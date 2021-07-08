@@ -1,6 +1,6 @@
 # Git Templates with hooks
 
-This is a WIP repository, all hooks might not work, if there is an issue with a hook, just remove it from your '.git/hooks' folder
+This is a WIP repository, all hooks might not work, if there is an issue with a hook, just remove it from your '.git/hooks' folder. If you need to push and a hook is preventing you, you could append the option `--no-verify`
 
 ## Setup
 
