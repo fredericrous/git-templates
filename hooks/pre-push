@@ -1,8 +1,13 @@
-#!/bin/bash
+#!/bin/zsh
 # Author: https://github.com/fredericrous
 SCRIPT_PATH=`dirname $(realpath -s "$0")`
 HOOK_NAME=`basename "$0"`
 
 for f in "$SCRIPT_PATH"/$HOOK_NAME-*; do
-    "$f" "$@" || exit $?
+    "$f" "$@"
+    EXIT_CODE=$?
+    if [[ $EXIT_CODE -ne 0 ]]; then
+        printf "\n🚨  Error raised by hook \u001b[38;5;208m$f\u001b[0m\n"
+        exit $EXIT_CODE
+    fi
 done

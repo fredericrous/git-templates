@@ -8,9 +8,9 @@ FILES=`git diff --diff-filter=d --cached --name-only | grep -E '\.(js|jsx|vue)$'
 [ ${#FILES} -lt 1 ] && exit
 
 if ! type eslint > /dev/null; then
-    npx eslint ${FILES[*]} "$@"
+    npx eslint `printf ${FILES[*]}` "$@"
 else
-    eslint ${FILES[*]} "$@"
+    eslint `printf ${FILES[*]}` "$@"
 fi
 
 if [ $? -ne 0 ]; then
