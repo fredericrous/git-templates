@@ -1,0 +1,8 @@
+#!/bin/bash
+# Author: https://github.com/fredericrous
+SCRIPT_PATH=`dirname $(realpath -s "$0")`
+HOOK_NAME=`basename "$0"`
+
+for f in "$SCRIPT_PATH"/$HOOK_NAME-*; do
+    "$f" "$@" || exit $?
+done
