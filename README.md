@@ -36,9 +36,9 @@ This hook lints your message, to help to keep some conventions in place, and it 
 
 Here are the conventions the hooks from this repository takes inspiration from:
 
-- https://git-scm.com/docs/git-commit
-- https://www.conventionalcommits.org/en/v1.0.0/
-- https://gitmoji.dev/
+- <https://git-scm.com/docs/git-commit>
+- <https://www.conventionalcommits.org/en/v1.0.0/>
+- <https://gitmoji.dev/>
 
 Once the message complies with the checks, the commit is finally created.
 
@@ -87,8 +87,10 @@ cp ~/.config/git/templates/hooks/* .git/hooks/
 |-|-|
 | commit-msg | Lint commit message to conform to [git recommentation](https://git-scm.com/docs/git-commit) and mostly to[conventional commits]( https://www.conventionalcommits.org/en/v1.0.0/) specification<br>Prefix with an emoji conform to [gitmoji](https://gitmoji.dev/) specification<br>Apply formating to the commit: break the body to 72 char per line. It groups footers. It insures the body is separated by a blank line after the summary and before the footers |
 | pre-commit-ban-terms | prevent the commit of certain tokens |
-| pre-commit-lint | eslint js files in staging |
-| pre-commit-package-lock | when a package.json is changed, check package-lock.json is versioned as well 
+| pre-commit-lint-js | eslint js files in staging |
+| pre-commit-lint-json-yaml | lint json and yaml with [yq](https://github.com/mikefarah/yq) |
+| pre-commit-merge-conflict | detect for staged files in a merge states |
+| pre-commit-package-lock | when a package.json is changed, check package-lock.json is versioned as well
 | pre-push-branch-pattern | insure a branch follows pattern `prefix/digit-branch-name`. ie `feat/3002-image-crop` |
 | pre-push-force-same-branch | should test that when you do a force push, your target the same remote branch and avoid the default one |
 | pre-push-pull-rebase | pull the origin remote branch with the same name before push. Fetch default branch and warn if it's ahead |
@@ -148,21 +150,19 @@ bypass the hooks with the option `--no-verify`.
 
 ## Similar projects
 
-- https://github.com/okonet/lint-staged
-- https://github.com/folke/devmoji
-- https://github.com/negokaz/git-fancy-message-prefix
-- https://github.com/conventional-changelog/commitlint
+- <https://github.com/okonet/lint-staged>
+- <https://github.com/folke/devmoji>
+- <https://github.com/negokaz/git-fancy-message-prefix>
+- <https://github.com/conventional-changelog/commitlint>
 
 ## A word about hook managers
 
-A note on hook managers. Below is a list. Each has advantages and flows.
-Most of these managers are easy to use and easy to plug into.
-Some like husky adds the feature of auto install of the hooks.
-But in my opinion they don't provide enough different packages. They don't provide an easy way to search and download these packages.
-Also I find these package managers overcomplicated for the little feature that git hooks is. Plus, there is a learning curve for each of these managers.
-In comparaison, the hooks on this repository are loaded by a for loop in a zsh script. It's simple, effective and easy to customize.
+A note on hook managers. Below is a list. Each has advantages and flows. Some have prebuilt hooks that the others don't.
+The approach here is not to try to create a new challenger.
+But to suggest a different approach, keep it simple with a template that is easy to modify.
+You don't have zsh? convert the script to bash or powershell. You don't have nodejs? don't use the *.js hooks, or find others that fit you.
 
-- https://github.com/sds/overcommit [Ruby]
-- https://github.com/evilmartians/lefthook [Go]
-- https://github.com/pre-commit/pre-commit [Python]
-- https://github.com/typicode/husky [Javascript]
+- <https://github.com/sds/overcommit> [Ruby]
+- <https://github.com/evilmartians/lefthook> [Go]
+- <https://github.com/pre-commit/pre-commit> [Python]
+- <https://github.com/typicode/husky> [Javascript]
