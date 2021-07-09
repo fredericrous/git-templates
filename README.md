@@ -158,9 +158,9 @@ bypass the hooks with the option `--no-verify`.
 A note on hook managers. Below is a list. Each has advantages and flows.
 Most of these managers are easy to use and easy to plug into.
 Some like husky adds the feature of auto install of the hooks.
-But in my opinion they don't provide enough different packages. They don't provide an easy way to search and download this packages.
-Also I find these package manager overcomplicated for the little feature that git hooks is, there is a learning curve for each of these managers.
-In comparaison, the hooks on this repository are loaded by a simple for loop in a zsh script. It's simple, effective and easy to customize.
+But in my opinion they don't provide enough different packages. They don't provide an easy way to search and download these packages.
+Also I find these package managers overcomplicated for the little feature that git hooks is. Plus, there is a learning curve for each of these managers.
+In comparaison, the hooks on this repository are loaded by a for loop in a zsh script. It's simple, effective and easy to customize.
 
 - https://github.com/sds/overcommit [Ruby]
 - https://github.com/evilmartians/lefthook [Go]
