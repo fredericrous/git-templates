@@ -3,6 +3,7 @@
 SCRIPT_PATH=`dirname $(realpath -s "$0")`
 HOOK_NAME=`basename "$0"`
 
+failed_hooks=()
 function wait_all() {
   local exit_code=0
   local children=("$@")
@@ -11,20 +12,24 @@ function wait_all() {
    exit_code_job="$?"
    if [[ $exit_code_job != "0" ]]; then
      exit_code=$exit_code_job;
+     failed_hooks=$job
    fi
   done
   return $exit_code
 }
 
-pids=()
+typeset -A pids
 for f in "$SCRIPT_PATH"/$HOOK_NAME-*; do
     "$f" "$@" &
-    pids+=("$!")
+    pids[$!]="$f"
 done
 
-wait_all "${pids[@]}"
+wait_all "${(@k)pids}"
 EXIT_CODE="$?"
 if [[ $EXIT_CODE -ne 0 ]]; then
-    printf "\n🚨  Error raised by hook \u001b[38;5;208m$f\u001b[0m\n"
+    printf "\n🚨  Error raised by:\n"
+    for i in $failed_hooks; do
+        printf "    - \u001b[38;5;208m${pids[$i]}\u001b[0m\n"
+    done
 fi
 exit $EXIT_CODE
