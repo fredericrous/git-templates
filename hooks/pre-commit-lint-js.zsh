@@ -14,7 +14,7 @@ else
 fi
 
 if [ $? -ne 0 ]; then
-    printf "$ERROR_SIGN Lint issues found. Please fix\n"
+    printf "$ERROR_SIGN ESLint issues found. Please fix\n"
     exit 1
 fi
-printf "$VALID_SIGN Lint passed\n"
+printf "$VALID_SIGN ESLint passed\n"
