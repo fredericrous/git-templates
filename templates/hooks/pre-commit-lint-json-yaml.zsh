@@ -6,7 +6,7 @@ VALID_SIGN="  \u001b[38;5;112m\u2713\u001b[0m"
 WARNING_SIGN="  \u001b[38;5;208m!\u001b[0m"
 
 FILES=`git diff --diff-filter=d --cached --name-only | grep -E '\.(json|yaml)$'`
-[ ${#FILES} -lt 1 ] && exit
+[ ${#FILES} -lt 1 ] && exit 0
 
 if ! type yq > /dev/null; then
     printf "$WARNING_SIGN Json/Yaml files detected. To lint them, install \u001b[38;5;208myq\u001b[0m"

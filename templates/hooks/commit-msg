@@ -45,7 +45,7 @@ const COLORS = {
 
 if (require.main === module) {
   if (!filename) {
-    console.info(['Usage:', '', 'node commit-msg {commit-message-file-name}']);
+    console.info(['Usage:', '', './commit-msg <filename>']);
     process.exit(1);
   }
 } else {
@@ -140,7 +140,7 @@ const formatFooter = () => {
     const footerWithoutExtraNewLines = commitMsgArray
       .slice(commitMsgArray.length - footerSize)
       .filter((x) => x !== '');
-    return [...bodyWithoutFooter, '', ...footerWithoutExtraNewLines].join('\n');
+    return [...bodyWithoutFooter, '', ...footerWithoutExtraNewLines].join('\n') + '\n';
   };
 };
 const format = `${COMMIT_TYPE[prefix]}  ${prefix}${scope || ''}${

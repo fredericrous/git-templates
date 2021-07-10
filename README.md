@@ -54,8 +54,9 @@ Some of the hooks give you recommendation to help you resolve the branch state y
 
 ## Requirements
 
-- NodeJS (minimum v6)
+- Git 2.22+
 - ZSH
+- NodeJS (minimum v6)
 - [ripgrep](https://github.com/BurntSushi/ripgrep/)
 
 ## Setup
@@ -64,21 +65,23 @@ Clone the repository to a convenient place:
 
 ```sh
 mkdir ~/.config/git
-git clone https://github.com/fredericrousgit-templates.git ~/.config/git/templates
-chmod +x ~/.config/git/templates/hooks/*
+cd ~/.config/git
+git clone https://github.com/fredericrous/git-templates.git
+chmod +x templates/hooks/*
 ```
 
 Setup your gitconfig
 
 ```sh
-git config --global init.templatedir ~/.config/git/templates
-git config --global commit.template ~/.config/git/message
+git config --global init.templatedir ~/.config/git/git-templates/templates
+git config --global commit.template ~/.config/git/git-templates/message
 ```
 
 Copy the hooks to existing repositories
 
 ```sh
-cp ~/.config/git/templates/hooks/* .git/hooks/
+cd <folder-of-your-repo>
+git init
 ```
 
 ## Hooks implemented
@@ -144,9 +147,11 @@ bypass the hooks with the option `--no-verify`.
 - pre-push: when a tag is semver, check that it's defined in a package.json
 - pre-commit: lint more languages
 - pre-commit: check other languages Gemfile.lock, Pipfile.lock, Cargo.lock, composer.lock
+- pre-commit: check you are commiting with the usual email / gpg / name
 - pre-push: check branch pattern for jira
 - repare-commit-msg: extract kabanize or jira id from branch name and prepare a commit msg with a footer Issues: (#id)? < id >
 - pre-push: prevent force push to a remote branch that has a different name
+- commit-msg: commit msg alias. exemple: "."="(prev prefix): more on $(previous commit msg)"
 
 ## Similar projects
 
@@ -154,6 +159,7 @@ bypass the hooks with the option `--no-verify`.
 - <https://github.com/folke/devmoji>
 - <https://github.com/negokaz/git-fancy-message-prefix>
 - <https://github.com/conventional-changelog/commitlint>
+- <https://github.com/greg0ire/git_template>
 
 ## A word about hook managers
 
