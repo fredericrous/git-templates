@@ -55,7 +55,7 @@ Signed-Off: me <my@self.test>
 Co-authored-by: you <r@self.test>
 EOL
 $HOOK_CHECK COMMIT_MSG &> /dev/null
-sed '5!d' COMMIT_MSG | grep "Signed-Off: me <my@self.test>"
-sed '6!d' COMMIT_MSG | grep "Co-authored-by: you <r@self.test>"
+sed '5!d' COMMIT_MSG | grep "Signed-Off: me <my@self.test>" &> /dev/null
+sed '6!d' COMMIT_MSG | grep "Co-authored-by: you <r@self.test>" &> /dev/null
 
 exit 0

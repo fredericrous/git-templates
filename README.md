@@ -94,6 +94,7 @@ git init
 | pre-commit-lint-json-yaml | lint json and yaml with [yq](https://github.com/mikefarah/yq) |
 | pre-commit-merge-conflict | detect for staged files in a merge states |
 | pre-commit-package-lock | when a package.json is changed, check package-lock.json is versioned as well
+| pre-commit-usual-name | Issue a warning when you use a commit user for the first time |
 | pre-push-branch-pattern | insure a branch follows pattern `prefix/digit-branch-name`. ie `feat/3002-image-crop` |
 | pre-push-force-same-branch | should test that when you do a force push, your target the same remote branch and avoid the default one |
 | pre-push-pull-rebase | pull the origin remote branch with the same name before push. Fetch default branch and warn if it's ahead |
@@ -144,14 +145,17 @@ bypass the hooks with the option `--no-verify`.
 
 ## Other idea of hook not implemented
 
-- pre-push: when a tag is semver, check that it's defined in a package.json
+- post-commit: tag automatically when package version has been incremented
 - pre-commit: lint more languages
 - pre-commit: check other languages Gemfile.lock, Pipfile.lock, Cargo.lock, composer.lock
-- pre-commit: check you are commiting with the usual email / gpg / name
-- pre-push: check branch pattern for jira
-- repare-commit-msg: extract kabanize or jira id from branch name and prepare a commit msg with a footer Issues: (#id)? < id >
+- pre-commit: check you are commiting with the usual gpg key (could be slow)
+- pre-push: check branch pattern for jira id
+- prepare-commit-msg: extract kanbanize or jira id from branch name and prepare a commit msg with a footer Issues: (#id)? < id >
 - pre-push: prevent force push to a remote branch that has a different name
 - commit-msg: commit msg alias. exemple: "."="(prev prefix): more on $(previous commit msg)"
+- commit-msg: force user to put a description that is more than 5 words
+
+Note: Functionallities that are covered by gitattributes and gitignore shouldn't be implemented as hooks.
 
 ## Similar projects
 
