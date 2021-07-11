@@ -2,8 +2,12 @@
 # Author: https://github.com/fredericrous
 SCRIPT_PATH=`dirname $(realpath -s "$0")`
 HOOK_NAME=`basename "$0"`
+HOOKS_PATH=("$SCRIPT_PATH"/$HOOK_NAME-*)
+for i in `git config --get-all hook.skip`; do
+    HOOKS_PATH=(${HOOKS_PATH:#*$i*})
+done
 
-for f in "$SCRIPT_PATH"/$HOOK_NAME-*; do
+for f in $HOOKS_PATH; do
     "$f" "$@"
     EXIT_CODE=$?
     if [[ $EXIT_CODE -ne 0 ]]; then

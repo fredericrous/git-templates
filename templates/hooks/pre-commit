@@ -1,8 +1,12 @@
 #!/bin/zsh
 # Author: https://github.com/fredericrous
 SCRIPT_PATH=`dirname $(realpath -s "$0")`
-HOOK_NAME=`basename "$0"`
 test -f "$SCRIPT_PATH/../CHERRY_PICK_HEAD" && exit 0
+HOOK_NAME=`basename "$0"`
+HOOKS_PATH=("$SCRIPT_PATH"/$HOOK_NAME-*)
+for i in `git config --get-all hook.skip`; do
+    HOOKS_PATH=(${HOOKS_PATH:#*$i*})
+done
 
 failed_hooks=()
 function wait_all() {
@@ -20,7 +24,7 @@ function wait_all() {
 }
 
 typeset -A pids
-for f in "$SCRIPT_PATH"/$HOOK_NAME-*; do
+for f in $HOOKS_PATH; do
     "$f" "$@" &
     pids[$!]="$f"
 done

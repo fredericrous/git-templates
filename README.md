@@ -137,12 +137,45 @@ git init
 # └ opposite of add:
 ```
 
+## Update
+
+Update the local clone to the latest version
+
+```sh
+cd ~/.config/git/git-templates/templates
+git pull
+```
+
+Update the target repository
+
+```sh
+rm $(git rev-parse --git-dir)/hooks/*
+git init
+```
+
 ## Opt Out
 
-- If you encounter an issue with one of the hooks when you run the `push` command, you can temporarily
-bypass the hooks with the option `--no-verify`. This flag also works on the pre-commit hook.
-- If you like having the warning but would prefer the commit or push not to fail, replace the line `exit $EXIT_CODE` in `pre-commit` and `pre-push` by `break` or just remove the line.
-- You can disable the hooks any time by removing the files in `.git/hooks/`.
+**Bypass one `pre-push` or `pre-commit` hook**
+
+You can use the flag `-c hook.skip=<name of hook>` to disable temporarely one hook. You can cumulate the `-c` flags to skip more hooks.
+
+`<name of hook>` works as a glob pattern. For example `-c hook.skip=lint` would match `pre-commit-lint-js` and `pre-commit-lint-json-yaml`.
+
+You can set the flag permanently for the repository with `git config --add hook.skip <name of hook>`
+
+**Bypass all hooks on `pre-push` or `pre-commit`**
+
+Append the option `--no-verify` to your `git push` or `git commit` command
+
+Note: the prepare-commit-msg and commit-msg hooks can't be bypassed this way
+
+**Warn instead of fail the commit**
+
+If you like having the warning but would prefer the commit or push not to fail, replace the line `exit $EXIT_CODE` in `pre-commit` and `pre-push` by `break` or just remove the line.
+
+**Uninstall**
+
+You can disable the hooks any time by removing the files in `$(git rev-parse --git-dir)/hooks/`.
 
 ## Other ideas of hook not implemented
 
