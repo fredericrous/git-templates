@@ -22,6 +22,11 @@ COMMIT_MSG="feat: pass"
 STD_RESULT=$($HOOK_CHECK <(echo $COMMIT_MSG) 2>&1)
 echo $STD_RESULT | grep "A prefix is defined" &> /dev/null || exit 1
 
+printf "Should pass when prefix with emoji\n"
+COMMIT_MSG="👷  build: this is some summary"
+STD_RESULT=$($HOOK_CHECK <(echo $COMMIT_MSG) 2>&1)
+echo $STD_RESULT | grep "A prefix is defined" &> /dev/null || exit 1
+
 printf "Should pass when prefix with scope\n"
 COMMIT_MSG="feat(frontend): pass"
 STD_RESULT=$($HOOK_CHECK <(echo $COMMIT_MSG) 2>&1)

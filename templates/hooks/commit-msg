@@ -95,7 +95,7 @@ const extractConventionalCommit = (commitMsg, typeArray) => {
   return commitMsg.match(vaildateCommitRegex) || [];
 };
 const [, , /*input*/ /*emoji*/ prefix, scope, breakingChanges, restOfMessage] =
-  extractConventionalCommit(commitMsg, typeArray);
+  extractConventionalCommit(noComments(commitMsg), typeArray);
 if (!prefix) {
   message.error(`Commits MUST be prefixed with a type, which consists of a noun:
     ${typeArray.map(message.orange).join(', ')}
@@ -105,9 +105,8 @@ if (!prefix) {
     a section of the codebase surrounded by parenthesis, e.g., fix(parser)`);
   process.exit(1);
 }
-message.valid(`A prefix is defined`);
 
-const [description, ...commitBody] = noComments(restOfMessage)?.split('\n') || [];
+const [description, ...commitBody] = restOfMessage?.split('\n') || [];
 if (!description) {
   message.error(`A description MUST immediately follow the ${message.orange(
     'colon'
