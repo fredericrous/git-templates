@@ -6,7 +6,7 @@ Here to inspire you create the git hooks that fit you
 
 <img src="https://user-images.githubusercontent.com/702227/125003867-1b012f00-e050-11eb-8641-748ef806c639.png" width="800">
 
-*If there is an issue with a hook, please open an issue and consult the section [OPT Out](#opt-out).*
+*If there is an issue with a hook, please open an issue and consult the section [Opt Out](#opt-out).*
 
 Want to start right away? Check the [Requirements](#requirements) and head to the section [Setup](#setup).
 
@@ -89,6 +89,7 @@ git init
 | hook | description |
 |-|-|
 | commit-msg | Lint commit message to conform to [git recommentation](https://git-scm.com/docs/git-commit) and mostly to[conventional commits]( https://www.conventionalcommits.org/en/v1.0.0/) specification<br>Prefix with an emoji conform to [gitmoji](https://gitmoji.dev/) specification<br>Apply formating to the commit: break the body to 72 char per line. It groups footers. It insures the body is separated by a blank line after the summary and before the footers |
+| prepare-commit-msg | Extract Jira or Kanbanize id from branch name if there is, and append it to the footer of the commit msg |
 | pre-commit-ban-terms | prevent the commit of certain tokens |
 | pre-commit-lint-js | eslint js files in staging |
 | pre-commit-lint-json-yaml | lint json and yaml with [yq](https://github.com/mikefarah/yq) |
@@ -136,24 +137,23 @@ git init
 # └ opposite of add:
 ```
 
-## OPT Out
+## Opt Out
 
 - If you encounter an issue with one of the hooks when you run the `push` command, you can temporarily
-bypass the hooks with the option `--no-verify`.
+bypass the hooks with the option `--no-verify`. This flag also works on the pre-commit hook.
 - If you like having the warning but would prefer the commit or push not to fail, replace the line `exit $EXIT_CODE` in `pre-commit` and `pre-push` by `break` or just remove the line.
 - You can disable the hooks any time by removing the files in `.git/hooks/`.
 
-## Other idea of hook not implemented
+## Other ideas of hook not implemented
 
-- post-commit: tag automatically when package version has been incremented
+- post-commit: tag automatically when package version has been incremented (might be armful depending on your CD workflow)
 - pre-commit: lint more languages
 - pre-commit: check other languages Gemfile.lock, Pipfile.lock, Cargo.lock, composer.lock
 - pre-commit: check you are commiting with the usual gpg key (could be slow)
 - pre-push: check branch pattern for jira id
-- prepare-commit-msg: extract kanbanize or jira id from branch name and prepare a commit msg with a footer Issues: (#id)? < id >
-- pre-push: prevent force push to a remote branch that has a different name
+- pre-push: prevent force push to a remote branch that has a different name (amolst impossible?)
 - commit-msg: commit msg alias. exemple: "."="(prev prefix): more on $(previous commit msg)"
-- commit-msg: force user to put a description that is more than 5 words
+- commit-msg: force user to put a description that contains more than 3 words and a body that contains more than 5 words
 
 Note: Functionallities that are covered by gitattributes and gitignore shouldn't be implemented as hooks.
 

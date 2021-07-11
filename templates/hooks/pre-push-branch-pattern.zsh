@@ -5,7 +5,7 @@
 ERROR_SIGN="  \u001b[38;5;160m\u2717\u001b[0m"
 VALID_SIGN="  \u001b[38;5;112m\u2713\u001b[0m"
 
-BRANCH_REGEX='^(feat|fix|hotfix|chore|test|automation)/\d+-[\w-]+$'
+BRANCH_REGEX='^(feat|fix|hotfix|chore|test|automation)/[\w-]+$'
 
 LOCAL_BRANCH=`git rev-parse --abbrev-ref HEAD`
 [[ $? -ne 0 ]] && exit 0

@@ -1,4 +1,6 @@
 #!/bin/zsh
+# Issue a warning if it's the first time the author commits with this name
+# Author: https://github.com/fredericrous
 WARNING_SIGN="  \u001b[38;5;208m!\u001b[0m"
 
 USER_EMAIL=`git config user.email`

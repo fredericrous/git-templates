@@ -1,0 +1,39 @@
+#!/bin/zsh
+# Include the Issue Id if it's in the branch
+# Author: https://github.com/fredericrous
+
+JIRA_REGEX="[A-Z]{3,32}-[1-9]\d{1,31}"
+KANBANIZE_ID="\d{3,}"
+
+case "$2" in
+    message) # use -m/-F
+        : # do nothing
+        ;;
+    template) # use template (ex: -t option)
+        : # do nothing
+        ;;
+    merge)
+        : # do nothing
+        ;;
+    squash)
+        : # do nothing
+        ;;
+    commit) # use -c/-C/--amend
+        : # do nothing
+        ;;
+    *) # no option
+        CURRENT_BRANCH=`git branch --show-current`
+        JIRA_ID=`echo $CURRENT_BRANCH | rg --only-matching $JIRA_REGEX`
+        if [[ $? = 0 ]]; then
+            echo "\nIssue: $JIRA_ID" >> "$1"
+            exit 0
+        fi
+
+        ID=`echo $CURRENT_BRANCH | rg --only-matching $KANBANIZE_ID | head -n 1`
+        if [[ $? = 0 ]]; then
+            echo "\nIssue: #id $ID" >> "$1"
+            exit 0
+        fi
+        ;;
+esac
+exit 0
