@@ -2,6 +2,7 @@
 # Author: https://github.com/fredericrous
 SCRIPT_PATH=`dirname $(realpath -s "$0")`
 HOOK_NAME=`basename "$0"`
+test -f "$SCRIPT_PATH/../CHERRY_PICK_HEAD" && exit 0
 
 failed_hooks=()
 function wait_all() {
