@@ -1,6 +1,6 @@
 #!/bin/zsh
 TEST_NAME=`basename "$0"`
-HOOK_CHECK=`echo ../../templates/hooks/$TEST_NAME | sed 's@\.test@@'`
+HOOK_CHECK=`echo ${0:a:h}/../templates/hooks/$TEST_NAME | sed 's@\.test@@'`
 
 printf "Should throw when same email but different name\n"
 git config user.name "test all mighty"

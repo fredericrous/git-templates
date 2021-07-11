@@ -1,6 +1,6 @@
 #!/bin/zsh
 TEST_NAME=`basename "$0"`
-HOOK_CHECK=`echo ../../templates/hooks/$TEST_NAME | sed 's@\.test.zsh@@'`
+HOOK_CHECK=`echo ${0:a:h}/../templates/hooks/$TEST_NAME | sed 's@\.test.zsh@@'`
 
 printf "Should throw when summary is superior to 50 characters\n"
 COMMIT_MSG="this is a commit summary that is larger than 50 characters"

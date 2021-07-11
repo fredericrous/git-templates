@@ -1,6 +1,6 @@
 #!/bin/zsh
 TEST_NAME=`basename "$0"`
-HOOK_CHECK=`echo ../../templates/hooks/$TEST_NAME | sed 's@\.test@@'`
+HOOK_CHECK=`echo ${0:a:h}/../templates/hooks/$TEST_NAME | sed 's@\.test@@'`
 
 cat <<EOL > .eslintrc.js
 module.exports = {

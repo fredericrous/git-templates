@@ -2,7 +2,7 @@
 /**
  * Prevent commit of forbidden terms
  *
- * Author: fredericrous
+ * Author: https://github.com/fredericrous
  */
 const { execSync } = require('child_process');
 const { EOL } = require('os');

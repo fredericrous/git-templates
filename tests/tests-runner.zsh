@@ -1,12 +1,12 @@
 #!/bin/zsh
 # Author: https://github.com/fredericrous
 SCRIPT_PATH=`dirname $(realpath -s "$0")`
-TEST_REPO="test-repo"
 ERROR_SIGN="  \u001b[38;5;160m\u2717\u001b[0m"
 VALID_SIGN="  \u001b[38;5;112m\u2713\u001b[0m"
 
 function exec_test() {
     f=$1
+    TEST_REPO="test-repo-$RANDOM"
     TEST_NAME=`basename $f`
     TEMPLATE_DIR="$TEST_REPO-template"
     git init -q $TEST_REPO --template $TEMPLATE_DIR &> /dev/null
@@ -25,7 +25,7 @@ function exec_test() {
 }
 
 if [[ ! -z $1 ]]; then
-    exec_test $SCRIPT_PATH/$1*
+    exec_test $SCRIPT_PATH/*$1*
 else
     for f in "$SCRIPT_PATH"/*\.test\.*; do
         exec_test $f
