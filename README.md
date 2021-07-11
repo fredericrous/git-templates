@@ -190,6 +190,22 @@ You can disable the hooks any time by removing the files in `$(git rev-parse --g
 
 Note: Functionallities that are covered by gitattributes and gitignore shouldn't be implemented as hooks.
 
+## Contribute
+
+Basically if a script is simple implement it in shell script. If the logic is complicated, use javascript or any proper language to implement it. Javascript is nice because nowadays a lot of devs have nodejs installed on their machine.
+
+There's a makefile, open it, see the different tasks, basically:
+
+- `make test` runs the tests
+- `make` is an alias to `make test`
+- `make install` copies the hooks from this repo to both .git/ and ~/.config/git/
+
+To run 1 test alone, use
+
+```sh
+make test RUN=<part of the name of the test>
+```
+
 ## Similar projects
 
 - <https://github.com/okonet/lint-staged>
