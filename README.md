@@ -8,7 +8,7 @@ Git Starter Template with opinionated hooks to help you create beautiful commits
 
 ## The workflow
 
-First, `commit`. A nice template `message` appears to help you write a meaningful log description that passes the requirements.
+First, `commit`. A nice template [message](https://github.com/fredericrous/git-templates/blob/main/message) appears to help you write a meaningful commit description that passes the requirements.
 The message saved, [validators](https://github.com/fredericrous/git-templates/wiki/Hooks-implemented) run in parallel. If there is an issue, the commit is aborted
 Ready to push? once `git push` is started, the tests runs for the module you updated, branch name is checked. The branch is pushed. Bravo
 
