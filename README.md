@@ -97,7 +97,7 @@ git init
 | pre-commit-package-lock | when a package.json is changed, check package-lock.json is versioned as well
 | pre-commit-usual-name | Issue a warning when you use a commit user for the first time |
 | pre-push-branch-pattern | insure a branch follows pattern `prefix/digit-branch-name`. ie `feat/3002-image-crop` |
-| pre-push-force-same-branch | should test that when you do a force push, your target the same remote branch and avoid the default one |
+| pre-push-run-tests-js | run npm test and npm audit before push occurs (uses [fd](https://github.com/sharkdp/fd)) |
 | pre-push-pull-rebase | pull the origin remote branch with the same name before push. Fetch default branch and warn if it's ahead |
 
 ## Commit Prefix
