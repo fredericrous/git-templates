@@ -96,6 +96,7 @@ const extractConventionalCommit = (commitMsg, typeArray) => {
 };
 const [, , /*input*/ /*emoji*/ prefix, scope, breakingChanges, restOfMessage] =
   extractConventionalCommit(noComments(commitMsg), typeArray);
+
 if (!prefix) {
   message.error(`Commits MUST be prefixed with a type, which consists of a noun:
     ${typeArray.map(message.orange).join(', ')}
@@ -105,6 +106,7 @@ if (!prefix) {
     a section of the codebase surrounded by parenthesis, e.g., fix(parser)`);
   process.exit(1);
 }
+message.valid(`A prefix is defined`);
 
 const [description, ...commitBody] = restOfMessage?.split('\n') || [];
 if (!description) {
