@@ -15,7 +15,7 @@ const gitCommand = `git hash-object --stdin </dev/null | tr '[0-9a-f]' '0'`;
 const zero = execSync(gitCommand).toString().trim();
 
 function executeNpmPerProject(line) {
-  const [, /* localRef */ localOid /* remoteRef */, , remoteOid] = line.split(' ');
+  const [, /* localRef */ localOid, , /* remoteRef */ remoteOid] = line.split(' ');
 
   if (localOid === zero) return; // handle delete
   const range = remoteOid === zero ? localOid : `${remoteOid}..${localOid}`;

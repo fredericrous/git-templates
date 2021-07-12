@@ -1,6 +1,6 @@
 #!/bin/zsh
 # Author: https://github.com/fredericrous
-SCRIPT_PATH=`dirname $(realpath -s "$0")`
+SCRIPT_PATH=$(dirname $(realpath -s "$0"))
 HOOK_NAME=`basename "$0"`
 HOOKS_PATH=("$SCRIPT_PATH"/$HOOK_NAME-*)
 for i in `git config --get-all hook.skip`; do
