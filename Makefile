@@ -17,7 +17,7 @@ test: chmodx
 
 install: chmodx
 	@cp $(SRC_CTRL_HOOKS) $(HOME_PATH_HOOKS)
-	@rm $(GIT_REPO_HOOK_PATH)/*
+	@rm -v $(GIT_REPO_HOOK_PATH)*
 	@cp $(SRC_CTRL_HOOKS) $(GIT_REPO_HOOK_PATH)
 	@git init
 
