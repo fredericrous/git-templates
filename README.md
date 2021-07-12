@@ -56,7 +56,7 @@ Some of the hooks give you recommendation to help you resolve the branch state y
 
 - Git 2.22+
 - ZSH
-- NodeJS (minimum v6)
+- NodeJS 11.7+
 - [ripgrep](https://github.com/BurntSushi/ripgrep/)
 
 ## Setup

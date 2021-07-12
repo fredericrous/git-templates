@@ -1,6 +1,6 @@
 #!/bin/zsh
 TEST_NAME=`basename "$0"`
-HOOK_CHECK=`echo ${0:a:h}/../templates/hooks/$TEST_NAME | sed 's@\.test@@'`
+HOOK_CHECK=`echo ${0:a:h}/../templates/hooks/$TEST_NAME | sed 's@\.test.zsh@.js@'`
 CURRENT_BRANCH=`git branch --show-current`
 
 printf "Should detect js files and test them\n"
