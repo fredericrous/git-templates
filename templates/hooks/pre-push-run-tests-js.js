@@ -36,11 +36,7 @@ function executeNpmPerProject(line) {
     .map((x) => x.replace(new RegExp(`^${gitRoot}/`), ''));
 
   const execTests = (folder) =>
-    execSync(`cd ${gitRoot}/${folder}; npm test && npm audit || exit 1`);
-  if (allPkgJson.length === 1) {
-    execTests(allPkgJson[0]);
-    return;
-  }
+    execSync(`cd ${gitRoot}/${folder}; npm test && npm audit || exit 1`, { stdio: 'inherit' });
   const foldersToExecTests = allPkgJson.filter((pkg) =>
     jsFiles.filter((file) => file.startsWith(pkg))
   );
