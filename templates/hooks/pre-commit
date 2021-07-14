@@ -36,5 +36,16 @@ if [[ $EXIT_CODE -ne 0 ]]; then
     for i in $failed_hooks; do
         printf "    - \u001b[38;5;208m${pids[$i]}\u001b[0m\n"
     done
+    printf "Need to bypass these checks? "
+    if [ ${#failed_hooks} -eq ${#HOOKS_PATH} ]; then
+        printf "Run your command with --no-verify\n"
+    else
+        printf "Run git"
+        for i in $failed_hooks; do
+            i_name=$(basename "${pids[$i]%.*}")
+            printf " -c hook.skip=$i_name"
+        done
+        printf " commit [...args]\n"
+    fi
 fi
 exit $EXIT_CODE

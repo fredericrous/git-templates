@@ -16,8 +16,7 @@ fi
 if ! echo $LOCAL_BRANCH | rg $BRANCH_REGEX -oc &> /dev/null; then
     printf "$ERROR_SIGN Branch names in this project must adhere to this contract:
     \u001b[38;5;208m${BRANCH_REGEX}\u001b[0m.
-    Rename your branch with: \u001b[38;5;208mgit branch -m\u001b[0m <branch name>
-    Or bypass this check with git -c hook.skip=branch-pattern push\n"
+    Rename your branch with: \u001b[38;5;208mgit branch -m\u001b[0m <branch name>\n"
     exit 1
 fi
 printf "$VALID_SIGN Branch name conforms with authorized pattern\n"

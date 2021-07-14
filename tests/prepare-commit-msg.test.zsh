@@ -1,7 +1,6 @@
 #!/bin/zsh
 TEST_NAME=`basename "$0"`
 HOOK_CHECK=`echo ${0:a:h}/../templates/hooks/$TEST_NAME | sed 's@\.test.zsh@@'`
-echo $HOOK_CHECK
 printf "Should extract JIRA ID and append it to commit msg\n"
 git branch -m "feat/JIRA-1234-description"
 $HOOK_CHECK COMMIT_MSG magic

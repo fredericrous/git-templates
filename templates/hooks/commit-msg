@@ -19,6 +19,7 @@
  * Author: https://github.com/fredericrous
  */
 const fs = require('fs');
+const message = require('./common/message');
 const [, , /*interpreter path*/ /*script name*/ filename] = process.argv;
 
 const MAX_SUMMARY_LINE_SIZE = 50;
@@ -37,11 +38,6 @@ const COMMIT_TYPE = {
   add: '➕',
   remove: '➖',
 };
-const COLORS = {
-  green: '112',
-  orange: '208',
-  red: '160',
-};
 
 if (require.main === module) {
   if (!filename) {
@@ -55,19 +51,6 @@ if (require.main === module) {
 const commitMsg = fs.readFileSync(filename, 'utf8');
 const typeArray = Object.keys(COMMIT_TYPE);
 
-const message = (function formatMsg() {
-  const mark = {
-    ok: '\u2713',
-    err: '\u2717',
-  };
-
-  const colorMsg = (msg, color) => `\u001b[38;5;${color}m${msg}\u001b[0m`;
-  return {
-    valid: (msg) => console.info(`  ${colorMsg(mark.ok, COLORS.green)} ${msg}`),
-    error: (msg) => console.error(`  ${colorMsg(mark.err, COLORS.red)} ${msg}`),
-    orange: (msg) => colorMsg(msg, COLORS.orange),
-  };
-})();
 const noComments = (lines) => lines?.replace(/^#.*(\n|$)/gm, '') || '';
 const validateSummarySize = (commitMsg, maxCharcaters) => {
   const [firstLine] = noComments(commitMsg).split('\n');

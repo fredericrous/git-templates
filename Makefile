@@ -16,8 +16,8 @@ test: chmodx
 	@$(MAKEFILE_DIR)/tests/tests-runner.zsh $(RUN)
 
 install: chmodx
-	@rm -v $(GIT_REPO_HOOK_PATH)* $(HOME_PATH_HOOKS)*
-	cp $(SRC_CTRL_HOOKS) $(HOME_PATH_HOOKS)
+	@rm -rv $(GIT_REPO_HOOK_PATH)* $(HOME_PATH_HOOKS)* || true
+	cp -r $(SRC_CTRL_HOOKS) $(HOME_PATH_HOOKS)
 	@git init
 
 .PHONY: all chmodx test install

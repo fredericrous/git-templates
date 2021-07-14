@@ -12,6 +12,8 @@ for f in $HOOKS_PATH; do
     EXIT_CODE=$?
     if [[ $EXIT_CODE -ne 0 ]]; then
         printf "\n🚨  Error raised by hook \u001b[38;5;208m$f\u001b[0m\n"
+        f_name=$(basename "${f%.*}")
+        printf "Need to bypass this check? Run git -c hook.skip=$f_name push [...args]\n"
         exit $EXIT_CODE
     fi
 done
