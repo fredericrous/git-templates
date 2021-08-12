@@ -10,7 +10,8 @@ const filesToDetect = /\.rb$/;
     const run = await runTests();
     run({
       rootFile: 'Rakefile',
-      testCommand: 'RAILS_ENV=test rails db:schema:load && rails db:migrate && bundle exec rspec',
+      testCommand:
+        'RAILS_ENV=test bundle exec bin/rake db:schema:load && bundle exec bin/rake db:migrate && bundle exec bin/rspec',
       filesToDetect,
     });
   } catch (e) {
