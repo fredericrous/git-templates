@@ -1,44 +1,8 @@
-########## Summary ################## 50 max ####
-# Uncomment one of the following templates
-#👷  build:
-# └ Add or update CI build system
-#🔧  chore:
-# └ Changes to the configuration files or auxiliary tools and libraries
-#    such as documentation generation
-#🔧  chore(deps):
-# └ Upgrade or Downgrade a dependency
-#🔧  chore(security):
-# └ Fix security issues
-#📝  docs:
-# └ Documentation only changes
-#✨  feat:
-# └ Introduce new features
-#🐛  fix:
-# └ Fix a bug
-#⚡️  perf:
-# └ Improves performance
-#♻️  refactor:
-# └ A code change that neither fixes a bug nor adds a feature
-#⏪️  revert:
-# └ Revert changes. Ideally done with the `git revert` command
-#🎨  style:
-# └ Improve structure / format of the code
-#🚨  test(tdd):
-# └ Add a failing test
-#🚨  test:
-# └ Add, update, or pass tests
-#➕   add:
-# └ Add files as part of a larger feature
-#➖   remove:
-# └ opposite of add:
-########## Body ########################################## 72 max ####
 
 
-########## Trailer ##############################
-# Issue: <id>
+#                                               _
+# Issue:
 # Refs: <reverted commit>
-# BREAKING CHANGE: <description>
-# Reported-by: <reporter>
-# Co-authored-by: <author>
-#################################################
-
+# BREAKING CHANGE:
+# Reported-by:
+# Co-authored-by:
