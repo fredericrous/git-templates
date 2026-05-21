@@ -2,8 +2,8 @@
 # Check a branch name is well formated before push,
 # unless it's already there on the remote
 # Author: https://github.com/fredericrous
-ERROR_SIGN="  \u001b[38;5;160m\u2717\u001b[0m"
-VALID_SIGN="  \u001b[38;5;112m\u2713\u001b[0m"
+ERROR_SIGN=$'  \e[38;5;160m✗\e[0m'
+VALID_SIGN=$'  \e[38;5;112m✓\e[0m'
 
 BRANCH_REGEX='^(feat|fix|hotfix|chore|test|automation)/[\w-]+$'
 
@@ -15,8 +15,8 @@ if git show-branch remotes/origin/$LOCAL_BRANCH &> /dev/null; then
 fi
 if ! echo $LOCAL_BRANCH | rg $BRANCH_REGEX -oc &> /dev/null; then
     printf "$ERROR_SIGN Branch names in this project must adhere to this contract:
-    \u001b[38;5;208m${BRANCH_REGEX}\u001b[0m.
-    Rename your branch with: \u001b[38;5;208mgit branch -m\u001b[0m <branch name>
+    \033[38;5;208m${BRANCH_REGEX}\033[0m.
+    Rename your branch with: \033[38;5;208mgit branch -m\033[0m <branch name>
     Or bypass this check with git -c hook.skip=branch-pattern push\n"
     exit 1
 fi
