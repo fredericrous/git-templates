@@ -15,9 +15,23 @@ chmodx:
 test: chmodx
 	@$(MAKEFILE_DIR)/tests/tests-runner.zsh $(RUN)
 
+# Resolve $(HOME_PATH_HOOKS) and the in-repo source with `pwd -P` before
+# touching anything. If both canonicalise to the same directory (the
+# common case when ~/.config/git/git-templates is a symlink to this
+# working tree, or vice-versa), the original `rm $(HOME_PATH_HOOKS)*`
+# wiped the source — skip the rm+cp in that case and only re-init the
+# per-repo .git/hooks/. Otherwise behave as before.
 install: chmodx
-	@rm -v $(GIT_REPO_HOOK_PATH)* $(HOME_PATH_HOOKS)*
-	cp $(SRC_CTRL_HOOKS) $(HOME_PATH_HOOKS)
+	@mkdir -p $(HOME_PATH_HOOKS)
+	@HOME_REAL="$$(cd $(HOME_PATH_HOOKS) && pwd -P)"; \
+	SRC_REAL="$$(cd $(MAKEFILE_DIR)templates/hooks/ && pwd -P)"; \
+	if [ "$$HOME_REAL" = "$$SRC_REAL" ]; then \
+		echo "$(HOME_PATH_HOOKS) resolves to the in-repo source — skipping copy"; \
+	else \
+		rm -v $(HOME_PATH_HOOKS)* 2>/dev/null || true; \
+		cp $(SRC_CTRL_HOOKS) $(HOME_PATH_HOOKS); \
+	fi
+	@rm -v $(GIT_REPO_HOOK_PATH)* 2>/dev/null || true
 	@git init
 
 .PHONY: all chmodx test install
