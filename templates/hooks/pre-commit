@@ -1,6 +1,6 @@
 #!/bin/zsh
 # Author: https://github.com/fredericrous
-SCRIPT_PATH=`dirname $(realpath -s "$0")`
+SCRIPT_PATH=`dirname $(realpath "$0")`
 test -f "$SCRIPT_PATH/../CHERRY_PICK_HEAD" && exit 0
 HOOK_NAME=`basename "$0"`
 HOOKS_PATH=("$SCRIPT_PATH"/$HOOK_NAME-*)
