@@ -37,6 +37,18 @@ COMMIT_MSG="fix(trade-agents): pass"
 STD_RESULT=$($HOOK_CHECK <(echo $COMMIT_MSG) 2>&1)
 echo $STD_RESULT | grep "A prefix is defined" &> /dev/null || exit 1
 
+printf "Should not promote body-quoted conv-commit to subject\n"
+# Body quotes another commit's conv-commit string; the FIRST line is the
+# real subject (also conventional). The hook used to anchor anywhere via
+# /ms regex flags and rewrote the commit using the body's quote.
+cat <<EOL > COMMIT_MSG
+revert: undo last change
+In abc1234 ("fix(scope): something else") an unrelated diff slipped
+in. Restoring the original value.
+EOL
+$HOOK_CHECK COMMIT_MSG &> /dev/null
+sed '1!d' COMMIT_MSG | grep -E "revert: undo last change|⏪️.*revert: undo last change" &> /dev/null || exit 1
+
 printf "Should throw when prefix but no description\n"
 COMMIT_MSG="feat:"
 STD_RESULT=$($HOOK_CHECK <(echo $COMMIT_MSG) 2>&1)
