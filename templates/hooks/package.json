@@ -1,0 +1,4 @@
+{
+  "type": "commonjs",
+  "//": "Forces Node to treat the hook scripts in this directory (the extensionless commit-msg and the *.js hooks) as CommonJS. Without it, a consuming repo whose root package.json declares \"type\":\"module\" extends that package scope down into .git/hooks/, so Node parses the hooks as ESM and `require` throws 'require is not defined in ES module scope'. This file is deployed alongside the hooks into each repo's .git/hooks/."
+}
