@@ -10,7 +10,10 @@ function exec_test() {
     TEST_NAME=`basename $f`
     TEMPLATE_DIR="$TEST_REPO-template"
     git init -q $TEST_REPO --template $TEMPLATE_DIR &> /dev/null
-    cd $TEST_REPO
+    # Hard guard: if the throwaway dir can't be entered we MUST abort, never run
+    # the test in the parent repo — tests do destructive git ops (branch -m,
+    # rewriting .git/HEAD) that would otherwise corrupt this checkout.
+    cd "$TEST_REPO" || { printf "\n🚨  cannot enter $TEST_REPO; aborting\n"; exit 1; }
     printf "- $TEST_NAME\n"
     "$f"
     EXIT_CODE=$?
