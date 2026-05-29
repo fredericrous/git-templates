@@ -9,8 +9,14 @@ GIT_REPO_HOOK_PATH := $(shell git rev-parse --git-dir)/hooks/
 
 all: test
 
+# +x only the scripts, never data files like package.json. Keyed on the
+# shebang rather than the extension, so the extensionless git entrypoints
+# (commit-msg, pre-commit, pre-push, prepare-commit-msg) get +x while
+# package.json (no shebang) is left untouched. POSIX sh — no zsh needed.
 chmodx:
-	@chmod +x $(MAKEFILE_DIR)/tests/* $(SRC_CTRL_HOOKS)
+	@for f in $(MAKEFILE_DIR)/tests/* $(SRC_CTRL_HOOKS); do \
+		if head -1 "$$f" | grep -q '^#!'; then chmod +x "$$f"; fi; \
+	done
 
 test: chmodx
 	@$(MAKEFILE_DIR)/tests/tests-runner.zsh $(RUN)
