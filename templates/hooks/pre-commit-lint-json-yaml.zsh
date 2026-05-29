@@ -1,21 +1,44 @@
 #!/bin/zsh
-# Lint staged files
+# Lint staged JSON/YAML files for syntax errors before commit.
+#   .json → node's JSON.parse (strict: catches the missing/trailing commas that
+#           yq's lenient YAML-superset parser silently accepts).
+#   .yaml → yq (the right tool for YAML).
+# Like the rest of the hook set this leans on node; if a linter is absent we
+# warn and skip rather than block the commit.
 # Author: https://github.com/fredericrous
 ERROR_SIGN=$'  \e[38;5;160m✗\e[0m'
 VALID_SIGN=$'  \e[38;5;112m✓\e[0m'
 WARNING_SIGN=$'  \e[38;5;208m!\e[0m'
 
-FILES=`git diff --diff-filter=d --cached --name-only | grep -E '\.(json|yaml)$'`
-[ ${#FILES} -lt 1 ] && exit 0
+staged=(${(f)"$(git diff --diff-filter=d --cached --name-only)"})
+json_files=(${(M)staged:#*.json})
+yaml_files=(${(M)staged:#*.yaml})
 
-if ! type yq > /dev/null; then
-    printf "$WARNING_SIGN Json/Yaml files detected. To lint them, install \033[38;5;208myq\033[0m"
-    exit 0
+(( ${#json_files} + ${#yaml_files} == 0 )) && exit 0
+
+rc=0
+
+if (( ${#json_files} )); then
+    if type node > /dev/null; then
+        for f in $json_files; do
+            node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$f" 2>/dev/null \
+                || { printf "$ERROR_SIGN Invalid JSON: \033[38;5;208m%s\033[0m\n" "$f"; rc=1; }
+        done
+    else
+        printf "$WARNING_SIGN JSON files detected. To lint them, install \033[38;5;208mnode\033[0m\n"
+    fi
 fi
 
-yq e 'true' `printf ${FILES[*]}` 1>/dev/null
-if [ $? -ne 0 ]; then
-    printf "$ERROR_SIGN Json/Yaml Lint issues found. Please fix\n"
-    exit 1
+if (( ${#yaml_files} )); then
+    if type yq > /dev/null; then
+        for f in $yaml_files; do
+            yq e 'true' "$f" > /dev/null 2>&1 \
+                || { printf "$ERROR_SIGN Invalid YAML: \033[38;5;208m%s\033[0m\n" "$f"; rc=1; }
+        done
+    else
+        printf "$WARNING_SIGN YAML files detected. To lint them, install \033[38;5;208myq\033[0m\n"
+    fi
 fi
-printf "$VALID_SIGN Json/Yaml Lint passed\n"
+
+(( rc == 0 )) && printf "$VALID_SIGN Json/Yaml Lint passed\n"
+exit $rc
