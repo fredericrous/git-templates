@@ -32,6 +32,14 @@ fi
 if (( ${#yaml_files} )); then
     if type yq > /dev/null; then
         for f in $yaml_files; do
+            # Helm chart templates carry Go templating ({{ }}) and aren't valid
+            # YAML until Helm renders them, so yq can't lint them. Skip a staged
+            # YAML that lives in a chart's templates/ dir (sibling Chart.yaml at
+            # the chart root) — otherwise valid chart commits would need
+            # --no-verify just to get past this hook.
+            if [[ "$f" == */templates/* && -f "${f%/templates/*}/Chart.yaml" ]]; then
+                continue
+            fi
             yq e 'true' "$f" > /dev/null 2>&1 \
                 || { printf "$ERROR_SIGN Invalid YAML: \033[38;5;208m%s\033[0m\n" "$f"; rc=1; }
         done
