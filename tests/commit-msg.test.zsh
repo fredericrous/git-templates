@@ -2,15 +2,26 @@
 TEST_NAME=`basename "$0"`
 HOOK_CHECK=`echo ${0:a:h}/../templates/hooks/$TEST_NAME | sed 's@\.test.zsh@@'`
 
-printf "Should throw when summary is superior to 50 characters\n"
-COMMIT_MSG="this is a commit summary that is larger than 50 characters"
+printf "Should throw when subject is superior to 72 characters\n"
+COMMIT_MSG="feat: this is a commit subject line that is definitely larger than the limit"
 STD_RESULT=$($HOOK_CHECK <(echo $COMMIT_MSG) 2>&1)
 echo $STD_RESULT | grep "✓" &> /dev/null && exit 1
 
-printf "Should pass when summary is inferior to 50 chars\n"
-COMMIT_MSG="summary inferior to 50 characters"
+printf "Should pass when subject is inferior to 72 chars and description short\n"
+COMMIT_MSG="feat: a perfectly fine short description"
 STD_RESULT=$($HOOK_CHECK <(echo $COMMIT_MSG) 2>&1)
 echo $STD_RESULT | grep "✓" &> /dev/null || exit 1
+
+printf "Should throw when description after the colon exceeds 50 chars\n"
+# Subject is <= 72 overall, but the part after ': ' is longer than 50.
+COMMIT_MSG="feat: this commit description is intentionally over fifty chars"
+STD_RESULT=$($HOOK_CHECK <(echo $COMMIT_MSG) 2>&1)
+echo $STD_RESULT | grep "description after" &> /dev/null || exit 1
+
+printf "Should pass with a long scope as long as description stays under 50\n"
+COMMIT_MSG="feat(a-fairly-long-scope-name): still a short description"
+STD_RESULT=$($HOOK_CHECK <(echo $COMMIT_MSG) 2>&1)
+echo $STD_RESULT | grep "Description size is at most" &> /dev/null || exit 1
 
 printf "Should throw when no prefix\n"
 COMMIT_MSG="no prefix"

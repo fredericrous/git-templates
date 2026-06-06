@@ -7,7 +7,9 @@
  * https://gitmoji.dev/
  *
  * It validates:
- * - the summary is MAX_SUMMARY_LINE_SIZE (50) characters
+ * - the whole summary line is at most MAX_SUMMARY_LINE_SIZE (72) characters
+ * - with a conventional prefix, the description after the colon is at most
+ *   MAX_DESCRIPTION_SIZE (50) characters
  * - a prefix is present
  * - a description is present
  *
@@ -21,7 +23,8 @@
 const fs = require('fs');
 const [, , /*interpreter path*/ /*script name*/ filename] = process.argv;
 
-const MAX_SUMMARY_LINE_SIZE = 50;
+const MAX_SUMMARY_LINE_SIZE = 72;
+const MAX_DESCRIPTION_SIZE = 50;
 const MAX_BODY_LINE_SIZE = 72;
 const COMMIT_TYPE = {
   build: '👷',
@@ -69,19 +72,6 @@ const message = (function formatMsg() {
   };
 })();
 const noComments = (lines) => lines?.replace(/^#.*(\n|$)/gm, '') || '';
-const validateSummarySize = (commitMsg, maxCharcaters) => {
-  const [firstLine] = noComments(commitMsg).split('\n');
-  return firstLine && firstLine.length < maxCharcaters;
-};
-if (!validateSummarySize(commitMsg, MAX_SUMMARY_LINE_SIZE)) {
-  message.error(
-    `Commit's first line should exist and be under ${message.orange(
-      MAX_SUMMARY_LINE_SIZE
-    )} characters.`
-  );
-  process.exit(1);
-}
-message.valid(`Summary size is inferior to ${message.orange(MAX_SUMMARY_LINE_SIZE)} characters`);
 
 const extractConventionalCommit = (subjectLine, typeArray) => {
   // match any emoji. source: https://stackoverflow.com/a/43243160/1391012
@@ -103,6 +93,17 @@ const [subjectLine, ...commitBody] = noComments(commitMsg).split('\n');
 const [, , /*emoji*/ prefix, scope, breakingChanges, description] =
   extractConventionalCommit(subjectLine, typeArray);
 
+// The whole subject line (type, scope and description) must fit the hard wrap.
+if (!subjectLine || subjectLine.length > MAX_SUMMARY_LINE_SIZE) {
+  message.error(
+    `Commit's first line should exist and be at most ${message.orange(
+      MAX_SUMMARY_LINE_SIZE
+    )} characters.`
+  );
+  process.exit(1);
+}
+message.valid(`Summary size is at most ${message.orange(MAX_SUMMARY_LINE_SIZE)} characters`);
+
 if (!prefix) {
   message.error(`Commits MUST be prefixed with a type, which consists of a noun:
     ${typeArray.map(message.orange).join(', ')}
@@ -122,6 +123,18 @@ if (!description) {
   process.exit(1);
 }
 message.valid(`A description is present in the summary`);
+
+// With a conventional prefix present, keep the description after the `: `
+// short, even though the whole subject may run up to MAX_SUMMARY_LINE_SIZE.
+if (description.length > MAX_DESCRIPTION_SIZE) {
+  message.error(
+    `The description after the ${message.orange(
+      'colon'
+    )} should be at most ${message.orange(MAX_DESCRIPTION_SIZE)} characters.`
+  );
+  process.exit(1);
+}
+message.valid(`Description size is at most ${message.orange(MAX_DESCRIPTION_SIZE)} characters`);
 
 //wrap might be shitty if there is a too long comment
 const wrap = (w) => {
