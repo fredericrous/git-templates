@@ -42,6 +42,17 @@ done
 # is out of scope; project either uses kustomize or it doesn't).
 [ ${#ROOTS} -lt 1 ] && exit 0
 
+# Optional repo-local skip list: a `.kubeconform-skip` file at the repo root,
+# one Kind per line (`#` comments allowed). Use for CRDs whose published JSON
+# schema is wrong — e.g. the datreeio cilium schemas type CIDR fields as
+# IPv4-only, so any IPv6/dual-stack CiliumEgressGatewayPolicy false-fails.
+# These kinds are validated by their operator's admission webhook anyway.
+SKIP_ARGS=()
+if [ -f .kubeconform-skip ]; then
+    SKIP_KINDS=$(grep -vE '^\s*(#|$)' .kubeconform-skip | paste -sd, - | sed 's/ //g')
+    [ -n "$SKIP_KINDS" ] && SKIP_ARGS=(--skip "$SKIP_KINDS")
+fi
+
 OVERALL=0
 for root in $ROOTS; do
     # `kustomize build` errors stream to stderr; the pipe still captures
@@ -54,6 +65,7 @@ for root in $ROOTS; do
           --ignore-missing-schemas \
           --schema-location default \
           --schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+          $SKIP_ARGS \
           --summary -
     rc=$?
     if [ $rc -ne 0 ]; then
