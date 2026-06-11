@@ -42,11 +42,16 @@ done
 # is out of scope; project either uses kustomize or it doesn't).
 [ ${#ROOTS} -lt 1 ] && exit 0
 
-# Optional repo-local skip list: a `.kubeconform-skip` file at the repo root,
-# one Kind per line (`#` comments allowed). Use for CRDs whose published JSON
-# schema is wrong — e.g. the datreeio cilium schemas type CIDR fields as
-# IPv4-only, so any IPv6/dual-stack CiliumEgressGatewayPolicy false-fails.
-# These kinds are validated by their operator's admission webhook anyway.
+# kubeconform validates CORE Kubernetes kinds against the built-in schema.
+# We deliberately do NOT pull an external CRD catalog (the datree/datreeio
+# CRDs-catalog is unmaintained — Datree itself is EOL — and its cilium schema
+# typed CIDR fields IPv4-only, false-failing IPv6 policies). CRDs are skipped
+# here (--ignore-missing-schemas) and covered elsewhere in the stack: Kyverno
+# CLI (policy), Trivy (misconfig) and each operator's admission webhook.
+#
+# Optional escape hatch: a repo-local `.kubeconform-skip` file (one Kind per
+# line, `#` comments) force-skips kinds even if a schema is supplied — for the
+# day someone vendors local CRD schemas.
 SKIP_ARGS=()
 if [ -f .kubeconform-skip ]; then
     SKIP_KINDS=$(grep -vE '^\s*(#|$)' .kubeconform-skip | paste -sd, - | sed 's/ //g')
@@ -64,7 +69,6 @@ for root in $ROOTS; do
           --strict \
           --ignore-missing-schemas \
           --schema-location default \
-          --schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
           $SKIP_ARGS \
           --summary -
     rc=$?
