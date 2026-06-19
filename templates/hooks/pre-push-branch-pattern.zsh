@@ -13,6 +13,15 @@ if git show-branch remotes/origin/$LOCAL_BRANCH &> /dev/null; then
     printf "$VALID_SIGN Branch already on server. Name is authorized.\n"
     exit 0
 fi
+# Initial push to a brand-new empty remote (no branches yet): there's no
+# feature-branch convention to enforce when you're initializing the repo, and the
+# default branch (main/master) doesn't match the pattern. Allow it. ($1 is the
+# remote name passed by git to pre-push.)
+REMOTE_NAME="${1:-origin}"
+if [[ -z "$(git ls-remote --heads "$REMOTE_NAME" 2>/dev/null)" ]]; then
+    printf "$VALID_SIGN Remote has no branches yet (initial push). Name is authorized.\n"
+    exit 0
+fi
 if ! echo $LOCAL_BRANCH | rg $BRANCH_REGEX -oc &> /dev/null; then
     printf "$ERROR_SIGN Branch names in this project must adhere to this contract:
     \033[38;5;208m${BRANCH_REGEX}\033[0m.
