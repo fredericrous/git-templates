@@ -4,7 +4,7 @@
 ERROR_SIGN=$'  \e[38;5;160m✗\e[0m'
 VALID_SIGN=$'  \e[38;5;112m✓\e[0m'
 
-FILES=`git diff --diff-filter=d --cached --name-only | grep -E '\.(js|jsx|vue)$'`
+FILES=`git diff --diff-filter=d --cached --name-only | grep -E '\.(js|jsx|ts|tsx|vue)$'`
 [ ${#FILES} -lt 1 ] && exit
 
 # Skip when the repo has no ESLint config — ESLint 9+ errors out ("couldn't
