@@ -3,6 +3,7 @@
 // # Author: https://github.com/fredericrous
 
 const { execSync } = require('child_process');
+const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const rl = readline.createInterface({
@@ -35,10 +36,23 @@ function executeNpmPerProject(line) {
     .map(path.dirname)
     .map((x) => x.replace(new RegExp(`^${gitRoot}/`), ''));
 
-  const execTests = (folder) =>
+  const execTests = (folder) => {
+    // Skip dirs without a "test" script (e.g. GitOps repos, tooling pkgs) —
+    // `npm test` there fails with "Missing script: test" and blocks the push.
+    let pkg;
+    try {
+      pkg = JSON.parse(fs.readFileSync(`${gitRoot}/${folder}/package.json`, 'utf8'));
+    } catch {
+      return;
+    }
+    if (!pkg.scripts || !pkg.scripts.test) return;
     execSync(`cd ${gitRoot}/${folder}; npm test || exit 1`, { stdio: 'inherit' });
+  };
+  // .some, not .filter: only run tests in package dirs that actually contain a
+  // modified JS/TS file (the old .filter returned a truthy array for every pkg,
+  // so it ran npm test everywhere).
   const foldersToExecTests = allPkgJson.filter((pkg) =>
-    jsFiles.filter((file) => file.startsWith(pkg))
+    jsFiles.some((file) => file.startsWith(pkg))
   );
   foldersToExecTests.forEach((folder) => execTests(folder));
 }
