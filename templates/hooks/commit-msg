@@ -162,7 +162,19 @@ const formatFooter = () => {
     return [...bodyWithoutFooter, '', ...footerWithoutExtraNewLines].join('\n') + '\n';
   };
 };
-const format = `${COMMIT_TYPE[prefix]}  ${prefix}${scope || ''}${
+// Skip the gitmoji prefix when this repo is a fork set up to send PRs upstream
+// (an `upstream` remote exists). Upstream projects expect plain conventional
+// commits; the emoji would fail their commit-lint / be unwelcome in the PR.
+const isPrRepo = (() => {
+  try {
+    require('child_process').execSync('git remote get-url upstream', { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+const emojiPrefix = isPrRepo ? '' : `${COMMIT_TYPE[prefix]}  `;
+const format = `${emojiPrefix}${prefix}${scope || ''}${
   breakingChanges || ''
 }: ${description}\n\n${wrap(MAX_BODY_LINE_SIZE)(commitBody.join('\n'))}\n`;
 fs.writeFileSync(filename, formatFooter()(format), 'utf8');
