@@ -25,8 +25,9 @@ git init -q --bare ./origin.git
 git remote add origin "$PWD/origin.git"
 # The bare origin lives INSIDE the working tree: ignore it (and commit the
 # .gitignore) or every later assertion silently takes the dirty-tree early-exit
-# instead of the code path it claims to test.
-echo 'origin.git/' > .gitignore
+# instead of the code path it claims to test. Append (>>) — never truncate a
+# .gitignore an earlier step may have written.
+echo 'origin.git/' >> .gitignore
 git add .gitignore && git commit -q --no-verify -m 'ignore local origin'
 git push -q --no-verify -u origin HEAD          # sets upstream = origin/<this branch>
 $HOOK &> /dev/null || exit 1
