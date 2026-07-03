@@ -27,6 +27,20 @@ if ! git rev-parse --abbrev-ref --symbolic-full-name @{u} > /dev/null 2>&1; then
     exit 0
 fi
 
+# 2b. The upstream may be configured locally but GONE on the remote — the normal
+#     state right after a PR squash-merges with delete-branch-on-merge (e.g. when
+#     pushing a release tag from the merged branch). `git pull --rebase` would
+#     fail on the missing ref and read as a conflict, wrongly blocking the push.
+#     Nothing to sync with — skip. (ls-remote costs a round-trip, but so does the
+#     push we're about to do.)
+UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null)
+UPSTREAM_REMOTE=${UPSTREAM%%/*}
+UPSTREAM_BRANCH=${UPSTREAM#*/}
+if ! git ls-remote --exit-code --heads "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH" > /dev/null 2>&1; then
+    printf "$WARNING_SIGN Upstream $UPSTREAM no longer exists on the remote (merged + auto-deleted?) — skipping sync.\n"
+    exit 0
+fi
+
 HAS_DIVERGED=`git status -sb | rg 'ahead\s\d+,\sbehind' -c`
 if [[ $HAS_DIVERGED -eq 1 ]]; then
     printf "$WARNING_SIGN Branch diverged from its upstream — skip auto pull-rebase.\n"
