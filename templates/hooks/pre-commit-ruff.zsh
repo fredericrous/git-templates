@@ -37,12 +37,27 @@ if (( ! has_config )) && [[ -f "$ROOT/pyproject.toml" ]]; then
 fi
 (( ! has_config )) && exit 0
 
-# --- resolve a ruff binary -------------------------------------------
+# --- resolve a ruff binary (prefer the repo's PINNED ruff over latest) -
+# From a linked git worktree $ROOT has no .venv, so a naive check falls
+# through to `uvx ruff` (unpinned LATEST) — which flags lint/format the
+# pinned CI ruff (`uv run ruff`) doesn't enforce: phantom failures that
+# block commits on pre-existing code. Resolve in order: the worktree's own
+# .venv; the MAIN worktree's .venv (shared git-common-dir's parent) so
+# worktrees use the SAME pin; `uv run --no-sync ruff` (lockfile pin); PATH
+# ruff; and only then warn + fall back to `uvx ruff` (latest).
+common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+main_venv_ruff="${common_dir:h}/.venv/bin/ruff"
+
 if [[ -x "$ROOT/.venv/bin/ruff" ]]; then
     RUFF=("$ROOT/.venv/bin/ruff")
+elif [[ -n "$common_dir" && -x "$main_venv_ruff" ]]; then
+    RUFF=("$main_venv_ruff")
+elif type uv > /dev/null 2>&1 && uv run --no-sync ruff --version > /dev/null 2>&1; then
+    RUFF=(uv run --no-sync ruff)
 elif type ruff > /dev/null 2>&1; then
     RUFF=(ruff)
 elif type uvx > /dev/null 2>&1; then
+    printf "$WARNING_SIGN No pinned ruff found (.venv); using \033[38;5;208muvx ruff\033[0m (latest) — may flag issues the CI-pinned ruff doesn't.\n"
     RUFF=(uvx ruff)
 else
     printf "$WARNING_SIGN ruff config found but no ruff/uvx binary. Install ruff or uv.\n"
