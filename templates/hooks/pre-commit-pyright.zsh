@@ -46,21 +46,23 @@ fi
 (( ! has_config )) && exit 0
 
 # --- resolve a pyright binary (prefer the PINNED pyright over latest) -
-# A linked git worktree has no .venv, so a naive check falls through to
-# `uvx pyright` (unpinned LATEST) — a newer pyright surfaces type errors
-# the pinned CI pyright doesn't, blocking commits on pre-existing code.
-# Resolve in order: the worktree's own .venv; the MAIN worktree's .venv
-# (shared git-common-dir's parent); `uv run --no-sync pyright` (lockfile
-# pin); PATH pyright; and only then warn + fall back to `uvx pyright`.
+# `uv run --no-sync pyright` is the SAME lockfile-pinned pyright CI runs AND it
+# activates the venv, so third-party imports resolve — a bare `pyright` binary
+# reports every dependency as unresolved unless VIRTUAL_ENV/venvPath is set.
+# So try it first. It needs a synced venv (the main checkout has one); a linked
+# worktree doesn't, so fall back to the worktree's own .venv, then the MAIN
+# worktree's .venv (shared git-common-dir's parent) for the same pin; PATH
+# pyright next; only then warn + fall back to `uvx pyright` (unpinned LATEST,
+# no venv), which surfaces errors the pinned CI pyright doesn't.
 common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
 main_venv_pyright="${common_dir:h}/.venv/bin/pyright"
 
-if [[ -x "$ROOT/.venv/bin/pyright" ]]; then
+if type uv > /dev/null 2>&1 && uv run --no-sync pyright --version > /dev/null 2>&1; then
+    PYRIGHT=(uv run --no-sync pyright)
+elif [[ -x "$ROOT/.venv/bin/pyright" ]]; then
     PYRIGHT=("$ROOT/.venv/bin/pyright")
 elif [[ -n "$common_dir" && -x "$main_venv_pyright" ]]; then
     PYRIGHT=("$main_venv_pyright")
-elif type uv > /dev/null 2>&1 && uv run --no-sync pyright --version > /dev/null 2>&1; then
-    PYRIGHT=(uv run --no-sync pyright)
 elif type pyright > /dev/null 2>&1; then
     PYRIGHT=(pyright)
 elif type uvx > /dev/null 2>&1; then
