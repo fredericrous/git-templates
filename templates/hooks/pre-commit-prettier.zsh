@@ -40,9 +40,18 @@ if (( ! has_config )) && [[ -f "$ROOT/package.json" ]]; then
     fi
 fi
 
-# --- resolve a prettier binary ---------------------------------------
+# --- resolve a prettier binary (prefer the repo's PINNED prettier) ----
+# A linked git worktree has no node_modules; fall back to the MAIN
+# worktree's pinned prettier (shared git-common-dir's parent) so worktrees
+# use the SAME version as CI rather than an ambient/global one.
 local_bin=""
-[[ -x "$ROOT/node_modules/.bin/prettier" ]] && local_bin="$ROOT/node_modules/.bin/prettier"
+common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+main_prettier="${common_dir:h}/node_modules/.bin/prettier"
+if [[ -x "$ROOT/node_modules/.bin/prettier" ]]; then
+    local_bin="$ROOT/node_modules/.bin/prettier"
+elif [[ -n "$common_dir" && -x "$main_prettier" ]]; then
+    local_bin="$main_prettier"
+fi
 
 if (( ! has_config )) && [[ -z "$local_bin" ]]; then
     # Repo doesn't use prettier — nothing to enforce.

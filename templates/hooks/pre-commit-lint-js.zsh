@@ -18,11 +18,21 @@ if [ ${#configs} -eq 0 ] && ! grep -q '"eslintConfig"' "$ROOT/package.json" 2>/d
     exit 0
 fi
 
-if ! type eslint > /dev/null; then
-    npx eslint `printf ${FILES[*]}` "$@"
+# Resolve eslint: prefer the repo's PINNED eslint (node_modules/.bin) so the
+# hook matches CI. A linked worktree has no node_modules; fall back to the
+# MAIN worktree's (shared git-common-dir's parent). Only then PATH eslint,
+# and `npx --no-install` (never silently download a random latest).
+common_dir=`git rev-parse --path-format=absolute --git-common-dir 2>/dev/null`
+if [[ -x "$ROOT/node_modules/.bin/eslint" ]]; then
+    ESLINT=("$ROOT/node_modules/.bin/eslint")
+elif [[ -n "$common_dir" && -x "${common_dir:h}/node_modules/.bin/eslint" ]]; then
+    ESLINT=("${common_dir:h}/node_modules/.bin/eslint")
+elif type eslint > /dev/null; then
+    ESLINT=(eslint)
 else
-    eslint `printf ${FILES[*]}` "$@"
+    ESLINT=(npx --no-install eslint)
 fi
+$ESLINT `printf ${FILES[*]}` "$@"
 
 if [ $? -ne 0 ]; then
     printf "$ERROR_SIGN ESLint issues found. Please fix\n"

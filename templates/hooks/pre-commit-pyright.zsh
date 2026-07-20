@@ -45,12 +45,26 @@ if (( ! has_config )) && [[ -f "$ROOT/pyproject.toml" ]]; then
 fi
 (( ! has_config )) && exit 0
 
-# --- resolve a pyright binary ----------------------------------------
+# --- resolve a pyright binary (prefer the PINNED pyright over latest) -
+# A linked git worktree has no .venv, so a naive check falls through to
+# `uvx pyright` (unpinned LATEST) — a newer pyright surfaces type errors
+# the pinned CI pyright doesn't, blocking commits on pre-existing code.
+# Resolve in order: the worktree's own .venv; the MAIN worktree's .venv
+# (shared git-common-dir's parent); `uv run --no-sync pyright` (lockfile
+# pin); PATH pyright; and only then warn + fall back to `uvx pyright`.
+common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+main_venv_pyright="${common_dir:h}/.venv/bin/pyright"
+
 if [[ -x "$ROOT/.venv/bin/pyright" ]]; then
     PYRIGHT=("$ROOT/.venv/bin/pyright")
+elif [[ -n "$common_dir" && -x "$main_venv_pyright" ]]; then
+    PYRIGHT=("$main_venv_pyright")
+elif type uv > /dev/null 2>&1 && uv run --no-sync pyright --version > /dev/null 2>&1; then
+    PYRIGHT=(uv run --no-sync pyright)
 elif type pyright > /dev/null 2>&1; then
     PYRIGHT=(pyright)
 elif type uvx > /dev/null 2>&1; then
+    printf "$WARNING_SIGN No pinned pyright found (.venv); using \033[38;5;208muvx pyright\033[0m (latest) — may flag issues the CI-pinned pyright doesn't.\n"
     PYRIGHT=(uvx pyright)
 else
     printf "$WARNING_SIGN pyright config found but no pyright/uvx binary. Install pyright or uv.\n"
