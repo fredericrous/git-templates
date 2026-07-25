@@ -2,6 +2,15 @@
 TEST_NAME=`basename "$0"`
 HOOK_CHECK=`echo ${0:a:h}/../templates/hooks/$TEST_NAME | sed 's@\.test@@'`
 
+# Skip gracefully if eslint isn't resolvable in this environment (the hook
+# itself now warn+skips, so the throw/pass assertions below would be
+# meaningless). Mirrors the prettier test's availability guard.
+if ! npx --no-install eslint --version > /dev/null 2>&1 \
+   && ! type eslint > /dev/null 2>&1; then
+    printf "  ! eslint unavailable — skipping\n"
+    exit 0
+fi
+
 # ESLint 9+ uses flat config (eslint.config.js); the legacy .eslintrc.* format
 # is ignored, so a stale .eslintrc.js made even valid JS fail with "couldn't
 # find eslint.config.js". The temp test repo has no package.json, so this file

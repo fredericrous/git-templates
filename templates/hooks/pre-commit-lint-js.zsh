@@ -3,6 +3,7 @@
 # Author: https://github.com/fredericrous
 ERROR_SIGN=$'  \e[38;5;160m✗\e[0m'
 VALID_SIGN=$'  \e[38;5;112m✓\e[0m'
+WARNING_SIGN=$'  \e[38;5;208m!\e[0m'
 
 FILES=`git diff --diff-filter=d --cached --name-only | grep -E '\.(js|jsx|ts|tsx|vue)$'`
 [ ${#FILES} -lt 1 ] && exit
@@ -29,8 +30,15 @@ elif [[ -n "$common_dir" && -x "${common_dir:h}/node_modules/.bin/eslint" ]]; th
     ESLINT=("${common_dir:h}/node_modules/.bin/eslint")
 elif type eslint > /dev/null; then
     ESLINT=(eslint)
-else
+elif type npx > /dev/null 2>&1 && npx --no-install eslint --version > /dev/null 2>&1; then
+    # --no-install: never silently download a random latest eslint.
     ESLINT=(npx --no-install eslint)
+else
+    # Repo opts into eslint (config present) but no eslint binary is resolvable.
+    # Warn + skip rather than block the commit with a false "issues found" — a
+    # non-zero exit from a MISSING eslint is not the same as lint errors.
+    printf "$WARNING_SIGN eslint config found but no eslint binary. Run \033[38;5;208mnpm install\033[0m\n"
+    exit 0
 fi
 $ESLINT `printf ${FILES[*]}` "$@"
 
