@@ -75,10 +75,19 @@ else
     exit 0
 fi
 
+# Ignore a *global* ~/.editorconfig when this repo defines none of its own.
+# Otherwise prettier walks up past the repo to the machine-wide
+# ~/.editorconfig and enforces its defaults (e.g. 4-space) on a repo
+# formatted differently — a false positive that also disagrees with CI,
+# which has no ~/.editorconfig. A repo-level .editorconfig is still honoured
+# (matching CI), so this only strips the cross-repo leak, not real intent.
+ec_flag=()
+[[ -f "$ROOT/.editorconfig" ]] || ec_flag=(--no-editorconfig)
+
 # --check respects the repo's config + .prettierignore automatically.
-if ! "${PRETTIER[@]}" --check $files > /dev/null 2>&1; then
+if ! "${PRETTIER[@]}" "${ec_flag[@]}" --check $files > /dev/null 2>&1; then
     printf "$ERROR_SIGN Prettier found unformatted files. Run \033[38;5;208mprettier --write\033[0m on:\n"
-    "${PRETTIER[@]}" --list-different $files 2>/dev/null | sed 's/^/      /'
+    "${PRETTIER[@]}" "${ec_flag[@]}" --list-different $files 2>/dev/null | sed 's/^/      /'
     exit 1
 fi
 printf "$VALID_SIGN Prettier passed\n"
