@@ -38,9 +38,13 @@ printf "Should pass when branch conforms\n"
 git branch -m feat/0-test
 $HOOK_CHECK &> /dev/null || exit 1
 
-printf "Should pass when branch carries a semver (dots)\n"
+printf "Should pass when a chore branch carries a semver (dots)\n"
 git branch -m chore/duro-1.50.50
 $HOOK_CHECK &> /dev/null || exit 1
+
+printf "Should throw when a non-chore branch carries dots\n"
+git branch -m feat/duro-1.50.50
+$HOOK_CHECK &> /dev/null && exit 1
 
 printf "Should still throw without a type prefix\n"
 git branch -m duro-1.50.50

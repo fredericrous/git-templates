@@ -5,9 +5,10 @@
 ERROR_SIGN=$'  \e[38;5;160m✗\e[0m'
 VALID_SIGN=$'  \e[38;5;112m✓\e[0m'
 
-# Dots are allowed so version bumps read naturally (chore/duro-1.50.50);
-# git itself already rejects the dangerous dot forms ("..", trailing ".lock").
-BRANCH_REGEX='^(feat|fix|hotfix|chore|test|automation)/[\w.-]+$'
+# Dots are allowed only under chore/ — version-bump branches read naturally
+# (chore/duro-1.50.50); feature/fix names stay dot-free. Git itself already
+# rejects the dangerous dot forms ("..", trailing ".lock").
+BRANCH_REGEX='^((feat|fix|hotfix|test|automation)/[\w-]+|chore/[\w.-]+)$'
 
 LOCAL_BRANCH=`git rev-parse --abbrev-ref HEAD`
 [[ $? -ne 0 ]] && exit 0
