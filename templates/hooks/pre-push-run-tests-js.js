@@ -37,7 +37,7 @@ function executeNpmPerProject(line) {
     .map((x) => x.replace(new RegExp(`^${gitRoot}/`), ''));
 
   const execTests = (folder) => {
-    // Skip dirs without a "test" script (e.g. GitOps repos, tooling pkgs) —
+    // Skip dirs without any gate script (e.g. GitOps repos, tooling pkgs) —
     // `npm test` there fails with "Missing script: test" and blocks the push.
     let pkg;
     try {
@@ -45,8 +45,23 @@ function executeNpmPerProject(line) {
     } catch {
       return;
     }
-    if (!pkg.scripts || !pkg.scripts.test) return;
-    execSync(`cd ${gitRoot}/${folder}; npm test || exit 1`, { stdio: 'inherit' });
+    const scripts = (pkg && pkg.scripts) || {};
+    // Whichever of these the package defines, cheapest first, stopping at the
+    // first failure — so a type error costs seconds, not a full suite run.
+    //
+    // Scoped by script presence, like pre-commit-pyright scopes on a
+    // [tool.pyright] table: a repo that defines none is skipped entirely, so
+    // this stays a no-op where it doesn't apply.
+    //
+    // `lint` is deliberately absent: pre-commit-lint-js already lints staged
+    // files with the repo's pinned eslint, so repeating it here costs time and
+    // catches nothing new. Everything else CI runs belongs here — the gate
+    // exists so CI is never the first to see a failure.
+    const gate = ['typecheck', 'test:unit', 'test'].filter((s) => scripts[s]);
+    for (const script of gate)
+      execSync(`cd "${gitRoot}/${folder}"; npm run ${script} || exit 1`, {
+        stdio: 'inherit',
+      });
   };
   // .some, not .filter: only run tests in package dirs that actually contain a
   // modified JS/TS file (the old .filter returned a truthy array for every pkg,
