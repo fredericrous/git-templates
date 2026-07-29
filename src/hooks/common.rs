@@ -36,16 +36,17 @@ pub fn repo_root() -> String {
 /// worktree has no node_modules of its own — this is why the shell version
 /// consulted the git common dir), then PATH.
 pub fn resolve_tool(root: &str, tool: &str) -> Option<Vec<String>> {
-    let local = format!("{root}/node_modules/.bin/{tool}");
-    if Path::new(&local).is_file() {
-        return Some(vec![local]);
+    // Same extension problem as `which`: an npm-installed binary is `eslint.cmd`
+    // on Windows, so the bare name misses the repo's PINNED copy and the hook
+    // silently falls through to an ambient one.
+    if let Some(p) = in_bin_dir(&format!("{root}/node_modules/.bin"), tool) {
+        return Some(vec![p]);
     }
     if let Some(common) = git::stdout(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
     {
         if let Some(main) = Path::new(&common).parent() {
-            let p = main.join("node_modules/.bin").join(tool);
-            if p.is_file() {
-                return Some(vec![p.to_string_lossy().into_owned()]);
+            if let Some(p) = in_bin_dir(&main.join("node_modules/.bin").to_string_lossy(), tool) {
+                return Some(vec![p]);
             }
         }
     }
@@ -76,12 +77,51 @@ pub fn resolve_tool(root: &str, tool: &str) -> Option<Vec<String>> {
 }
 
 /// First match for `tool` on PATH.
+///
+/// Windows executables carry an extension — `git` is `git.exe`, an npm-installed
+/// `eslint` is `eslint.cmd` — so the bare name finds nothing there. PATHEXT is
+/// the OS's own list of what counts as executable; fall back to the usual set
+/// when it is unset. Found by the Windows CI job on its first run, where
+/// `which("git")` returned None on a machine that plainly has git.
 pub fn which(tool: &str) -> Option<String> {
     let path = std::env::var_os("PATH")?;
+    let exts: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+            .split(';')
+            .filter(|e| !e.is_empty())
+            .map(|e| e.to_lowercase())
+            .collect()
+    } else {
+        Vec::new()
+    };
     for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(tool);
-        if candidate.is_file() {
-            return Some(candidate.to_string_lossy().into_owned());
+        let bare = dir.join(tool);
+        if bare.is_file() {
+            return Some(bare.to_string_lossy().into_owned());
+        }
+        for e in &exts {
+            let c = dir.join(format!("{tool}{e}"));
+            if c.is_file() {
+                return Some(c.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+/// `<dir>/<tool>`, trying the Windows executable extensions too.
+fn in_bin_dir(dir: &str, tool: &str) -> Option<String> {
+    let bare = Path::new(dir).join(tool);
+    if bare.is_file() {
+        return Some(bare.to_string_lossy().into_owned());
+    }
+    if cfg!(windows) {
+        for e in [".cmd", ".exe", ".bat", ".ps1"] {
+            let c = Path::new(dir).join(format!("{tool}{e}"));
+            if c.is_file() {
+                return Some(c.to_string_lossy().into_owned());
+            }
         }
     }
     None

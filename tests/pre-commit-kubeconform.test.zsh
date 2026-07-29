@@ -16,10 +16,17 @@ git rm -q -f --cached src/app.yaml
 # Raw-YAML validation is deliberately out of scope: a project either uses
 # kustomize or it does not. A staged manifest with no kustomization.yaml
 # anywhere above it must produce NOTHING.
+# Root discovery happens AFTER the tool gate, so this case only means anything
+# when both tools are present. Asserting silence unconditionally encoded the
+# machine it was written on: CI has neither tool, hits the gate, and warns.
 printf "Should stay silent when no kustomization root is above the file\n"
 stage kubernetes/loose/deploy.yaml 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: c\n'
-$HOOK > /tmp/kc.txt 2>&1 || exit 1
-[ -s /tmp/kc.txt ] && { echo "  expected silence, got: $(cat /tmp/kc.txt)"; exit 1 }
+if type kustomize > /dev/null 2>&1 && type kubeconform > /dev/null 2>&1; then
+    $HOOK > /tmp/kc.txt 2>&1 || exit 1
+    [ -s /tmp/kc.txt ] && { echo "  expected silence, got: $(cat /tmp/kc.txt)"; exit 1 }
+else
+    printf "  ! kustomize/kubeconform unavailable — skipping\n"
+fi
 git rm -q -f --cached kubernetes/loose/deploy.yaml
 
 # With a kustomization.yaml ABOVE the staged file, the walk-up must find it and
