@@ -60,22 +60,19 @@ jobs:
       - name: Parse every hook
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q zsh
+          # Dispatch on the SHEBANG, never the extension. The Rust migration
+          # leaves shims at the original paths (docs/rust-migration.md), so
+          # `pre-commit-ban-terms.js` is POSIX sh and `pre-push-pull-rebase.zsh`
+          # is too — the names no longer describe their contents. Checking by
+          # extension ran `node --check` over a shell script.
           rc=0
-          for f in templates/hooks/*.zsh; do
-            zsh -n "$f" || { echo "::error file=$f::zsh parse error"; rc=1; }
-          done
-          for f in templates/hooks/*.js; do
-            node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; }
-          done
-          # The extensionless git entrypoints, by shebang.
-          for f in templates/hooks/commit-msg templates/hooks/pre-commit \
-                   templates/hooks/pre-push templates/hooks/prepare-commit-msg; do
+          for f in templates/hooks/*; do
+            [ -f "$f" ] || continue
+            case "$f" in */package.json) continue ;; esac
             case "$(head -1 "$f")" in
-              *zsh) zsh -n "$f" || { echo "::error file=$f::zsh parse error"; rc=1; } ;;
+              *zsh)  zsh -n "$f"       || { echo "::error file=$f::zsh parse error"; rc=1; } ;;
               *node) node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; } ;;
-              # the dispatcher shims are POSIX sh now — without this arm they
-              # would match nothing and be silently unchecked
-              */sh) sh -n "$f" || { echo "::error file=$f::sh parse error"; rc=1; } ;;
+              */sh)  sh -n "$f"        || { echo "::error file=$f::sh parse error"; rc=1; } ;;
               *) echo "::error file=$f::unrecognised shebang: $(head -1 "$f")"; rc=1 ;;
             esac
           done
