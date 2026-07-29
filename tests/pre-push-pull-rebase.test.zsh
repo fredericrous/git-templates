@@ -19,6 +19,9 @@ $HOOK &> /dev/null || exit 1
 [[ -f scratch.txt ]] || exit 1                  # still there (not stashed away)
 git status --porcelain | grep -q 'scratch.txt' || exit 1   # still uncommitted
 rm -f scratch.txt
+# NB: at this point there is no upstream, so the hook would exit early anyway —
+# this case alone cannot tell the dirty-tree guard from the no-upstream one.
+# The real assertion is repeated below, once an upstream EXISTS.
 
 printf "Should pass when in sync with its own upstream (no rebase onto main)\n"
 git init -q --bare ./origin.git
@@ -45,6 +48,17 @@ git -C ./origin.git update-ref -d refs/heads/feat/merged-away
 $HOOK &> /dev/null || exit 1
 # And it must be the explicit SKIP, not a blocked push:
 $HOOK 2>&1 | grep -q "no longer exists" || exit 1
+
+# The dirty-tree guard, for real this time. The earlier case asserted only that
+# the file survived, which the no-upstream exit satisfies just as well — delete
+# the guard entirely and that case still passed. The guard is step 1, so it
+# fires whatever the upstream state; assert its OWN message and nothing else can
+# produce a pass.
+printf "Should announce the dirty-tree skip, not just leave the file alone\n"
+echo dirty > scratch2.txt
+$HOOK 2>&1 | grep -q "Uncommitted changes" || { echo "  guard did not fire"; exit 1 }
+[[ -f scratch2.txt ]] || exit 1
+rm -f scratch2.txt
 
 # The grep fallback carries the divergence guard on machines without rg. If it
 # silently matched nothing, HAS_DIVERGED would read as "not diverged" and the

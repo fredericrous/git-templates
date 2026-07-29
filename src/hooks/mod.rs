@@ -3,4 +3,5 @@
 //! .zsh suite exercises the Rust implementation unchanged.
 pub mod branch_pattern;
 pub mod prepare_commit_msg;
+pub mod pull_rebase;
 pub mod usual_name;
