@@ -1,38 +1,47 @@
-#!/bin/zsh
-# Lint staged YAML files with yamllint, scoped to a repo-local .yamllint config.
+#!/bin/sh
+# git-templates hook shim → the githooks binary.
+#
+# One shim serves every hook: it passes its own filename through, so the binary
+# knows which hook to run. Dispatchers (pre-commit, pre-push) and ported leaf
+# hooks use the identical file.
 # Author: https://github.com/fredericrous
-ERROR_SIGN="  [38;5;160m✗[0m"
-VALID_SIGN="  [38;5;112m✓[0m"
-WARNING_SIGN="  [38;5;208m![0m"
+#
+# POSIX sh, not zsh: this must run wherever git does, including Git for Windows
+# (which ships sh but not zsh).
+#
+# Resolution order matters more than it looks. Git hooks do NOT inherit an
+# interactive shell's PATH: GUI clients (VS Code, Tower, JetBrains) launch git
+# with an environment that often lacks ~/.local/bin or ~/.cargo/bin. A shim that
+# only did `exec githooks` would work in the terminal and fail in the GUI. So:
+#   1. $GIT_HOOKS_BIN   — escape hatch; also how `make test` points at target/debug
+#   2. __GITHOOKS_BIN__ — absolute path written in by `make install`, when
+#                         installing to a custom INSTALL_BIN_DIR
+#   3. $HOME/.local/bin — the default install location, resolved at RUNTIME so
+#                         this template stays machine-agnostic. Without it, a
+#                         repo created by `git init` from a template dir that is
+#                         the git checkout itself (the usual setup here — the
+#                         XDG path symlinks to the repo) never gets that token
+#                         substituted and would depend on PATH after all.
+#   4. PATH             — last resort
+# and if none resolve, FAIL LOUDLY. Never skip a check silently: a hook that
+# quietly does nothing is worse than one that is missing.
+set -e
+HOOKS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HOOK_NAME=$(basename -- "$0")
 
-# Only operate on staged YAML; deletes (d) excluded.
-FILES=`git diff --diff-filter=d --cached --name-only | grep -E '\.ya?ml$'`
-[ ${#FILES} -lt 1 ] && exit 0
-
-# Tool gate — soft-fail if yamllint absent (matches pre-commit-lint-json-yaml.zsh).
-if ! type yamllint > /dev/null; then
-    printf "$WARNING_SIGN YAML files detected. To strict-lint them, install [38;5;208myamllint[0m\n"
-    exit 0
-fi
-
-# Config gate — yamllint's stock rules are too noisy to enforce generically;
-# require an opt-in repo-local config (.yamllint.yaml, .yamllint.yml,
-# or .yamllint). Skip silently otherwise.
-CONFIG=""
-for candidate in .yamllint.yaml .yamllint.yml .yamllint; do
-    if [ -f "$candidate" ]; then
-        CONFIG="$candidate"
-        break
-    fi
-done
-[ -z "$CONFIG" ] && exit 0
-
-# Run yamllint with the repo's config; pass only the staged files we found.
-# `printf ${FILES[*]}` expands the newline-separated zsh array to positional args.
-yamllint -c "$CONFIG" `printf ${FILES[*]}`
-EXIT_CODE=$?
-if [ $EXIT_CODE -ne 0 ]; then
-    printf "$ERROR_SIGN yamllint found issues. Please fix\n"
+if [ -n "$GIT_HOOKS_BIN" ] && [ -x "$GIT_HOOKS_BIN" ]; then
+    BIN="$GIT_HOOKS_BIN"
+elif [ -x "__GITHOOKS_BIN__" ]; then
+    BIN="__GITHOOKS_BIN__"
+elif [ -x "$HOME/.local/bin/githooks" ]; then
+    BIN="$HOME/.local/bin/githooks"
+elif command -v githooks > /dev/null 2>&1; then
+    BIN=githooks
+else
+    printf '  \033[38;5;160m✗\033[0m githooks binary not found — hooks cannot run.\n' >&2
+    printf '    Looked at: $GIT_HOOKS_BIN, the baked path, ~/.local/bin, then PATH.\n' >&2
+    printf '    Reinstall with \033[38;5;208mmake install\033[0m in git-templates.\n' >&2
     exit 1
 fi
-printf "$VALID_SIGN yamllint passed\n"
+
+exec "$BIN" --hooks-dir "$HOOKS_DIR" "$HOOK_NAME" "$@"

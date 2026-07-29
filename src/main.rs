@@ -67,6 +67,10 @@ fn main() {
         "commit-msg" => hooks::commit_msg::run(&rest),
         "pre-commit-ban-terms" => hooks::ban_terms::run(&hook, &rest),
         "pre-push-run-tests-js" => hooks::run_tests::run(&rest),
+        "pre-commit-merge-conflict" => hooks::merge_conflict::run(&hook, &rest),
+        "pre-commit-lint-json-yaml" => hooks::lint_json_yaml::run(&rest),
+        "pre-commit-yamllint" => hooks::yamllint::run(&rest),
+        "pre-commit-package-lock" => hooks::package_lock::run(&rest),
         other => {
             eprintln!("githooks: unknown hook {other:?}");
             2

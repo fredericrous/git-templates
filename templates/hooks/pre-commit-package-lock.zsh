@@ -1,58 +1,47 @@
-#!/bin/zsh
-# A package.json and its sibling package-lock.json should be committed together.
+#!/bin/sh
+# git-templates hook shim → the githooks binary.
 #
-# Checked PER DIRECTORY and only when a lockfile actually exists, so:
-#   - a package.json that isn't a real npm project (no package-lock.json beside
-#     it — e.g. a .git/hooks/package.json type-marker) never demands one;
-#   - in a monorepo, one project's lockfile isn't satisfied by another's.
+# One shim serves every hook: it passes its own filename through, so the binary
+# knows which hook to run. Dispatchers (pre-commit, pre-push) and ported leaf
+# hooks use the identical file.
 # Author: https://github.com/fredericrous
-ERROR_SIGN=$'  \e[38;5;160m✗\e[0m'
-WARNING_SIGN=$'  \e[38;5;208m!\e[0m'
-VALID_SIGN=$'  \e[38;5;112m✓\e[0m'
+#
+# POSIX sh, not zsh: this must run wherever git does, including Git for Windows
+# (which ships sh but not zsh).
+#
+# Resolution order matters more than it looks. Git hooks do NOT inherit an
+# interactive shell's PATH: GUI clients (VS Code, Tower, JetBrains) launch git
+# with an environment that often lacks ~/.local/bin or ~/.cargo/bin. A shim that
+# only did `exec githooks` would work in the terminal and fail in the GUI. So:
+#   1. $GIT_HOOKS_BIN   — escape hatch; also how `make test` points at target/debug
+#   2. __GITHOOKS_BIN__ — absolute path written in by `make install`, when
+#                         installing to a custom INSTALL_BIN_DIR
+#   3. $HOME/.local/bin — the default install location, resolved at RUNTIME so
+#                         this template stays machine-agnostic. Without it, a
+#                         repo created by `git init` from a template dir that is
+#                         the git checkout itself (the usual setup here — the
+#                         XDG path symlinks to the repo) never gets that token
+#                         substituted and would depend on PATH after all.
+#   4. PATH             — last resort
+# and if none resolve, FAIL LOUDLY. Never skip a check silently: a hook that
+# quietly does nothing is worse than one that is missing.
+set -e
+HOOKS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HOOK_NAME=$(basename -- "$0")
 
-staged=(${(f)"$(git diff --diff-filter=d --cached --name-only)"})
-
-is_staged() { print -rl -- $staged | grep -qxF -- "$1" }
-sibling()   { [[ $1 == . ]] && print -r -- "$2" || print -r -- "$1/$2" }
-
-forgot_lock=()   # package.json staged; sibling lock exists on disk but unstaged
-orphan_lock=()   # package-lock.json staged without its sibling package.json
-
-for f in $staged; do
-    dir=${f:h}
-    case ${f:t} in
-        package.json)
-            lock=$(sibling $dir package-lock.json)
-            is_staged "$lock" && continue          # both staged → in sync
-            [[ -f $lock ]] && forgot_lock+=("$f")   # real npm project, lock unstaged
-            ;;
-        package-lock.json)
-            pkg=$(sibling $dir package.json)
-            is_staged "$pkg" || orphan_lock+=("$f")
-            ;;
-    esac
-done
-
-if (( ${#forgot_lock} + ${#orphan_lock} == 0 )); then
-    printf "$VALID_SIGN package.json & package-lock.json look in sync\n"
-    exit 0
+if [ -n "$GIT_HOOKS_BIN" ] && [ -x "$GIT_HOOKS_BIN" ]; then
+    BIN="$GIT_HOOKS_BIN"
+elif [ -x "__GITHOOKS_BIN__" ]; then
+    BIN="__GITHOOKS_BIN__"
+elif [ -x "$HOME/.local/bin/githooks" ]; then
+    BIN="$HOME/.local/bin/githooks"
+elif command -v githooks > /dev/null 2>&1; then
+    BIN=githooks
+else
+    printf '  \033[38;5;160m✗\033[0m githooks binary not found — hooks cannot run.\n' >&2
+    printf '    Looked at: $GIT_HOOKS_BIN, the baked path, ~/.local/bin, then PATH.\n' >&2
+    printf '    Reinstall with \033[38;5;208mmake install\033[0m in git-templates.\n' >&2
+    exit 1
 fi
 
-for f in $orphan_lock; do
-    printf "$ERROR_SIGN \033[38;5;208m%s\033[0m staged without its package.json\n" "$f"
-done
-for f in $forgot_lock; do
-    printf "$WARNING_SIGN \033[38;5;208m%s\033[0m changed but its package-lock.json is not staged\n" "$f"
-done
-
-# An orphan lock is a hard error. A merely-forgotten lock can be confirmed past
-# — but only when a real terminal is attached; never crash on a missing /dev/tty
-# (the old `read < /dev/tty` aborted non-interactive commits with "device not
-# configured"). Headless callers can bypass with `git -c hook.skip=package-lock`.
-if (( ${#orphan_lock} == 0 )) && { exec 3</dev/tty } 2>/dev/null; then
-    read -u 3 "REPLY?  Commit anyway? (y/N) "
-    exec 3<&-
-    [[ $REPLY == [Yy]* ]] && exit 0
-fi
-printf "$ERROR_SIGN Run \033[38;5;208mnpm install\033[0m and stage the lockfile, or bypass with \033[38;5;208mgit -c hook.skip=package-lock commit\033[0m\n"
-exit 1
+exec "$BIN" --hooks-dir "$HOOKS_DIR" "$HOOK_NAME" "$@"
