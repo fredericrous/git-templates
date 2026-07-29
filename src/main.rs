@@ -66,6 +66,7 @@ fn main() {
         "pre-push-pull-rebase" => hooks::pull_rebase::run(&rest),
         "commit-msg" => hooks::commit_msg::run(&rest),
         "pre-commit-ban-terms" => hooks::ban_terms::run(&hook, &rest),
+        "pre-push-run-tests-js" => hooks::run_tests::run(&rest),
         other => {
             eprintln!("githooks: unknown hook {other:?}");
             2
