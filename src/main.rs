@@ -49,10 +49,14 @@ fn main() {
         std::process::exit(2);
     };
 
-    // Sub-hook shims keep their original filenames, so the name arrives with a
-    // `.zsh` / `.js` suffix that no longer describes anything. Strip it rather
-    // than rename the files: the existing tests resolve hooks by those exact
-    // paths (docs/rust-migration.md), and renaming is a post-migration tidy-up.
+    // The shipped shims no longer carry `.zsh` / `.js` suffixes, but this
+    // stripping STAYS, permanently and on purpose: a repo whose .git/hooks was
+    // seeded before the rename still has the old filenames, and the shim passes
+    // its own filename through. Dropping this would leave every un-swept repo
+    // dispatching an unknown hook — exit 2, and no commit gets through.
+    //
+    // It costs one string compare per invocation and removes any ordering
+    // requirement between installing the binary and sweeping the repos.
     let hook = hook
         .strip_suffix(".zsh")
         .or_else(|| hook.strip_suffix(".js"))
