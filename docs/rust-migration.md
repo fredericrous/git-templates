@@ -1,6 +1,7 @@
 # Migrating the hooks to a single Rust binary
 
-Status: proposed, not started. Written 2026-07-29.
+Status: **Phases 0-3 complete** (PRs #15-#27, 2026-07-29). Phase 4 optional and
+not started. See [Outcome](#outcome) for what the plan got wrong.
 
 ## Why
 
@@ -252,3 +253,86 @@ runs (`realpath -s`, and the `\w`-vs-POSIX-class dialect split).
 If Phase 1 alone lands, the framework stops imposing anything and Phase 4 stays
 optional. Phases 2-3 are optional only if Windows is not a real target; if it is,
 budget for Phase 3 too — roughly 1,500 lines rather than 700.
+
+---
+
+## Outcome
+
+All 20 hooks are `sh` shims over one dependency-free binary (~430 KB). A repo
+that triggers no linter needs **neither zsh nor node** to commit or push, which
+was the requirement. Phase 2 (Windows CI) and Phase 3 (the nine linter hooks)
+landed too, so zsh is gone from the hook set entirely.
+
+### What the plan got wrong
+
+**"All 14 zsh suites passing is Phase 0 done."** They were necessary but not
+sufficient: every suite invokes a SUB-HOOK directly, so the dispatchers — the
+exact code Phase 0 replaced — had **no coverage at all**. Phase 0 had to bring
+its own tests.
+
+**The safety rule contradicted itself.** "Existing tests pass unchanged" only
+holds if every hook keeps a file at its original path; the plan said Phase 1
+would delete the scripts. Corrected before implementation: porting replaces the
+body with a shim, never deletes the file. ~20 shims, not 4.
+
+**"Phase 1 delivers no zsh."** The dispatcher still globs and spawns
+`pre-commit-*` scripts, which need zsh before they can no-op. Phase 1 removes
+the UNCONDITIONAL dependency; full removal needed Phase 3.
+
+**Phase 3 was listed as optional.** It is a prerequisite for Windows being
+usable, not an extra — a real commit there fails while any *applicable* hook is
+zsh.
+
+### What the method actually caught
+
+Seven bugs in code that had already shipped:
+
+- four hooks used `rg` unguarded — a missing `rg` makes `! rg …` true, so
+  `branch-pattern` rejected EVERY branch name (silent wrong answers, not errors);
+- `make test` had never run on a clean macOS (`realpath -s` is GNU-only);
+- CI could not go red (`make test | tee` without pipefail);
+- `[]` is truthy in JS, so `run-tests-js` selected every package regardless of
+  what changed;
+- `prepare-commit-msg` appended a dangling `Issue: #id ` (tested `$?` after a
+  pipeline ending in `head -n 1`);
+- `pull-rebase` read the ahead-count with `head -c 1`, so 12 printed as "1";
+- 54 of 96 installed `commit-msg` copies matched no known template blob and were
+  silently skipped by the propagation sweep.
+
+Plus five in the ports themselves, each caught by the existing suite before
+merge, and three tests that could not fail (the dispatchers had none;
+`pull-rebase`'s dirty-tree case was satisfied by an unrelated early exit; my own
+Windows smoke read a commit subject without first asserting the commit existed).
+
+**Two bugs were found only by the Windows leg, on its first two runs** — and
+both were silent-wrong rather than loud. `which` missed `.exe`, so `resolve_tool`
+would have skipped the repo's PINNED linter for an ambient one. And Windows has
+no shebang support, so every sub-hook the dispatcher spawned failed with
+`%1 is not a valid Win32 application`.
+
+### Rules worth keeping
+
+1. **A hook is not ported until its existing test passes untouched** — then break
+   the implementation once to confirm the test can fail. Vacuous tests are the
+   characteristic failure here.
+2. **"Verified against the original first" is only as good as the environment it
+   was verified in.** A kubeconform test asserting silence encoded the machine it
+   was written on; CI has neither tool, hits the gate first, and warns.
+3. **A sweep reporting "0 customised" is not proof of a clean fleet.** Check the
+   DISTINCT-BLOB count per hook; consistent means 1.
+4. For hooks that REWRITE (`commit-msg`) or filter (`ban-terms`), diff the old
+   and new implementations over the same inputs. Both were byte-identical across
+   11 and 14 cases.
+
+### Still open
+
+- **Phase 4** — port the 19 zsh suites to `cargo test`. Deliberately last: they
+  are the migration harness.
+- **The `ban-terms` tokenizer.** The blanker is still not a parser and
+  over-blanks a regex literal with an escaped slash — a missed warning, not a
+  false alarm. Fixing it makes the hook STRICTER, so it needs its own PR and its
+  own differential run.
+- **The rename.** Shims still carry `.zsh` / `.js` suffixes that describe
+  nothing. Costs a test edit plus a 96-repo sweep.
+- **`pre-commit-pyright` is installed in 6 of 96 repos** — opt-in by history
+  rather than by design, since the hook already self-scopes on a pyright config.

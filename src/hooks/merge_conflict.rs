@@ -16,7 +16,20 @@ fn markers() -> [String; 3] {
     ["<", "=", ">"].map(|c| c.repeat(7))
 }
 
-pub fn run(_hook_name: &str, _args: &[std::ffi::OsString]) -> i32 {
+/// `git grep --cached` scans the WHOLE INDEX, not just this commit's changes,
+/// so any tracked file containing all three markers matches on every commit —
+/// including this hook's own TEST, which must contain them to test with.
+///
+/// The shell version excluded both its source and its test by path. Building
+/// the markers (see `markers`) removed the need to exclude the SOURCE, but not
+/// the test, and dropping that exclusion made this repo uncommittable — the
+/// same failure that once hit ban-terms, reintroduced by a fix for a different
+/// self-reference. Excluded by hook name so a rename cannot silently strand it.
+fn is_own_test(file: &str, hook_name: &str) -> bool {
+    file.starts_with(&format!("tests/{hook_name}.test."))
+}
+
+pub fn run(hook_name: &str, _args: &[std::ffi::OsString]) -> i32 {
     let m = markers();
     // --all-match: only files containing ALL THREE, so a lone rule of `=`
     // characters in a document is not mistaken for a conflict.
@@ -40,6 +53,7 @@ pub fn run(_hook_name: &str, _args: &[std::ffi::OsString]) -> i32 {
         .lines()
         .map(str::trim)
         .filter(|f| !f.is_empty())
+        .filter(|f| !is_own_test(f, hook_name))
         .collect();
 
     if !files.is_empty() {
@@ -64,6 +78,20 @@ mod tests {
         assert_eq!(m[0], "<".repeat(7));
         assert_eq!(m[1], "=".repeat(7));
         assert_eq!(m[2], ">".repeat(7));
+    }
+
+    #[test]
+    fn the_hooks_own_test_is_excluded() {
+        let n = "pre-commit-merge-conflict";
+        assert!(super::is_own_test(
+            "tests/pre-commit-merge-conflict.test.zsh",
+            n
+        ));
+        assert!(!super::is_own_test(
+            "tests/pre-commit-ban-terms.test.zsh",
+            n
+        ));
+        assert!(!super::is_own_test("src/main.rs", n));
     }
 
     /// The point of building them: this source file must not contain a literal
