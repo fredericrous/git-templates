@@ -197,6 +197,10 @@ pub fn blank_non_code(src: &str) -> String {
     let mut prev_significant: Option<char> = None;
     let mut word = String::new();
     let mut in_class = false;
+    // Open `${…}` substitutions, innermost last; each entry counts the `{` we
+    // are nested under, so the matching `}` returns us to template text.
+    // A stack, not a flag: substitutions nest — `` `${`${x}`}` ``.
+    let mut subst: Vec<u32> = Vec::new();
     let keep = |c: char| if c == '\n' { '\n' } else { ' ' };
 
     while i < b.len() {
@@ -226,6 +230,21 @@ pub fn blank_non_code(src: &str) -> String {
                     out.push(ch);
                     i += 1;
                 } else {
+                    if !subst.is_empty() {
+                        if ch == '{' {
+                            *subst.last_mut().expect("non-empty") += 1;
+                        } else if ch == '}' {
+                            let depth = subst.last_mut().expect("non-empty");
+                            if *depth == 0 {
+                                subst.pop();
+                                state = S::Template;
+                                out.push(ch);
+                                i += 1;
+                                continue;
+                            }
+                            *depth -= 1;
+                        }
+                    }
                     if !ch.is_whitespace() {
                         prev_significant = Some(ch);
                         if ch.is_alphanumeric() || ch == '_' || ch == '$' {
@@ -283,6 +302,36 @@ pub fn blank_non_code(src: &str) -> String {
                     i += 1;
                 }
             }
+            S::Template => {
+                if ch == '\\' {
+                    out.push_str(if next.is_none() { " " } else { "  " });
+                    i += 2;
+                    continue;
+                }
+                // `${…}` is CODE. Blanking it hid every banned call written
+                // inside a substitution — `` `${it.only(x)}` `` read as string
+                // content. That is a MISSED warning, which is the direction
+                // this hook must never fail in.
+                if ch == '$' && next == Some('{') {
+                    subst.push(0);
+                    state = S::Code;
+                    prev_significant = Some('{');
+                    word.clear();
+                    out.push_str("${");
+                    i += 2;
+                    continue;
+                }
+                if ch == '`' {
+                    state = S::Code;
+                    prev_significant = Some('`');
+                    word.clear();
+                    out.push(ch);
+                    i += 1;
+                    continue;
+                }
+                out.push(keep(ch));
+                i += 1;
+            }
             _ => {
                 if ch == '\\' {
                     // Blank the escape AND what it escapes, so \" never closes.
@@ -290,10 +339,7 @@ pub fn blank_non_code(src: &str) -> String {
                     i += 2;
                     continue;
                 }
-                let closes = matches!(
-                    (state, ch),
-                    (S::Single, '\'') | (S::Double, '"') | (S::Template, '`')
-                );
+                let closes = matches!((state, ch), (S::Single, '\'') | (S::Double, '"'));
                 if closes {
                     state = S::Code;
                     out.push(ch);
@@ -506,5 +552,90 @@ debugger;";
         for f in ["a.rs", "a.md", "a.json", "README"] {
             assert!(!is_searchable(f), "{f}");
         }
+    }
+}
+
+#[cfg(test)]
+mod template_substitutions {
+    use super::*;
+
+    /// `${…}` inside a template literal is CODE, not string content. Blanking
+    /// it hid every banned call written in a substitution — a MISSED warning,
+    /// which is the direction this hook must never fail in.
+    #[test]
+    fn a_substitution_is_code() {
+        let b = blank_non_code("const s = `${fit(1)}`;");
+        assert!(call_of(&b, "fit"), "blanked to {b:?}");
+    }
+
+    /// A stack, not a flag: substitutions nest. Before the fix this case
+    /// reported correctly by ACCIDENT — the scanner lost track and left the
+    /// inner text unblanked, which happened to expose the call.
+    #[test]
+    fn substitutions_nest() {
+        let b = blank_non_code("const s = `${`${fit(1)}`}`;");
+        assert!(call_of(&b, "fit"), "blanked to {b:?}");
+        assert!(
+            b.contains("${`${fit(1)}`}"),
+            "nesting must be tracked, not merely survived: {b:?}"
+        );
+    }
+
+    /// Braces INSIDE the substitution must not close it early.
+    #[test]
+    fn braces_inside_a_substitution_do_not_close_it() {
+        let b = blank_non_code("const s = `${ {a: 1}.a }` + 'fit(';");
+        assert!(
+            !call_of(&b, "fit"),
+            "the string literal must stay blanked: {b:?}"
+        );
+        let b2 = blank_non_code("const s = `${ {a: 1}.a } ${fit(2)}`;");
+        assert!(call_of(&b2, "fit"), "blanked to {b2:?}");
+
+        // The discriminating case for DEPTH COUNTING. Treating the first `}` as
+        // the end of the substitution puts the rest of it back into template
+        // text, so the call after the object literal is blanked and missed.
+        // Popping unconditionally passes every other case here.
+        let b3 = blank_non_code("const s = `${ {a: 1} && fit(2) }`;");
+        assert!(
+            call_of(&b3, "fit"),
+            "a `}}` closing a nested object must not end the substitution: {b3:?}"
+        );
+    }
+
+    /// Template TEXT is still string content, and an escaped `\${` is text too.
+    #[test]
+    fn template_text_is_still_blanked() {
+        assert!(!call_of(&blank_non_code("const s = `fit(`;"), "fit"));
+        assert!(
+            !call_of(&blank_non_code(r#"const s = `\${fit(1)}`;"#), "fit"),
+            "an escaped dollar does not open a substitution"
+        );
+    }
+
+    /// Comments, strings and regexes inside a substitution are handled by the
+    /// ordinary code path, so they must still be blanked there.
+    #[test]
+    fn nested_constructs_inside_a_substitution() {
+        assert!(!call_of(
+            &blank_non_code("const s = `${/* fit(1) */ x}`;"),
+            "fit"
+        ));
+        assert!(!call_of(
+            &blank_non_code(r#"const s = `${"fit("}`;"#),
+            "fit"
+        ));
+        assert!(!call_of(
+            &blank_non_code(r"const s = `${/fit\(/.test(y)}`;"),
+            "fit"
+        ));
+    }
+
+    /// An unbalanced `}` in ordinary code must not be mistaken for the end of a
+    /// substitution that was never opened.
+    #[test]
+    fn a_stray_brace_in_code_is_harmless() {
+        let b = blank_non_code("function f() { return 1; }\nfit(() => {});");
+        assert!(call_of(&b, "fit"), "blanked to {b:?}");
     }
 }
