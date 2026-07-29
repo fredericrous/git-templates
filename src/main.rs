@@ -75,6 +75,9 @@ fn main() {
         "pre-commit-prettier" => hooks::prettier::run(&rest),
         "pre-commit-ruff" => hooks::python_tools::ruff(&rest),
         "pre-commit-pyright" => hooks::python_tools::pyright(&rest),
+        "pre-commit-argo-lint" => hooks::k8s::argo_lint(&rest),
+        "pre-commit-kube-linter" => hooks::k8s::kube_linter(&rest),
+        "pre-commit-kubeconform" => hooks::k8s::kubeconform(&rest),
         other => {
             eprintln!("githooks: unknown hook {other:?}");
             2
