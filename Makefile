@@ -33,12 +33,19 @@ build:
 test: chmodx build
 	@GIT_HOOKS_BIN=$(DEBUG_BIN) $(MAKEFILE_DIR)/tests/tests-runner.zsh $(RUN)
 
-# Resolve $(HOME_PATH_HOOKS) and the in-repo source with `pwd -P` before
-# touching anything. If both canonicalise to the same directory (the
-# common case when ~/.config/git/git-templates is a symlink to this
-# working tree, or vice-versa), the original `rm $(HOME_PATH_HOOKS)*`
-# wiped the source — skip the rm+cp in that case and only re-init the
-# per-repo .git/hooks/. Otherwise behave as before.
+# Never rm/cp/bake into a directory that lives inside a git checkout.
+#
+# ~/.config/git/git-templates is commonly a SYMLINK to a checkout of this repo,
+# in which case "installing" there means deleting and overwriting TRACKED source
+# files. Comparing it against $(MAKEFILE_DIR) is not enough: run `make install`
+# from a git WORKTREE and the two resolve to different paths — a different
+# checkout of the same repo — so the guard says "not the source" and clobbers
+# the main checkout. Observed doing exactly that, including baking a
+# machine-specific absolute path into tracked files.
+#
+# Asking git is the reliable test, whatever route the symlink took. When the
+# target is inside a checkout there is nothing to install anyway: `git init`
+# already reads its templates from there.
 install: chmodx
 	@cargo build --release --quiet
 	@mkdir -p $(INSTALL_BIN_DIR)
@@ -46,14 +53,13 @@ install: chmodx
 	@echo "installed $(INSTALLED_BIN)"
 	@mkdir -p $(HOME_PATH_HOOKS)
 	@HOME_REAL="$$(cd $(HOME_PATH_HOOKS) && pwd -P)"; \
-	SRC_REAL="$$(cd $(MAKEFILE_DIR)templates/hooks/ && pwd -P)"; \
-	if [ "$$HOME_REAL" = "$$SRC_REAL" ]; then \
-		echo "$(HOME_PATH_HOOKS) resolves to the in-repo source — skipping copy"; \
+	if git -C "$$HOME_REAL" rev-parse --show-toplevel > /dev/null 2>&1; then \
+		echo "$(HOME_PATH_HOOKS) is inside a git checkout — leaving it alone"; \
 	else \
 		rm -v $(HOME_PATH_HOOKS)* 2>/dev/null || true; \
 		cp $(SRC_CTRL_HOOKS) $(HOME_PATH_HOOKS); \
+		$(MAKE) --no-print-directory bake-shims DIR=$(HOME_PATH_HOOKS); \
 	fi
-	@$(MAKE) --no-print-directory bake-shims DIR=$(HOME_PATH_HOOKS)
 	@rm -v $(GIT_REPO_HOOK_PATH)* 2>/dev/null || true
 	@git init
 	@$(MAKE) --no-print-directory bake-shims DIR=$(GIT_REPO_HOOK_PATH)
@@ -63,6 +69,13 @@ install: chmodx
 # login shell would have, so a shim relying on PATH alone resolves nothing and
 # the hook fails. Idempotent — re-baking an already-baked shim is a no-op
 # because the placeholder is gone.
+#
+# NEVER call this on the in-repo templates/hooks/. ~/.config/git/git-templates
+# is commonly a SYMLINK to this working tree, so baking "the installed copy"
+# would rewrite the tracked source with a machine-specific absolute path —
+# dirtying the tree and, if committed, shipping one developer's $HOME to all 96
+# repos. `install` therefore bakes only real copies: the per-repo .git/hooks/,
+# and ~/.config/... only when it is NOT the source.
 bake-shims:
 	@for f in $(DIR)pre-commit $(DIR)pre-push; do \
 		[ -f "$$f" ] || continue; \

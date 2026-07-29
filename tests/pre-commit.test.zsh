@@ -102,7 +102,7 @@ chmod +x h_args/pre-commit-echo
 
 printf "Should fail loudly when the binary cannot be found\n"
 new_hooks_dir h_nobin
-OUT=`GIT_HOOKS_BIN=/nonexistent PATH=/nonexistent ./h_nobin/pre-commit 2>&1` && exit 1
+OUT=`HOME=/nonexistent GIT_HOOKS_BIN=/nonexistent PATH=/nonexistent ./h_nobin/pre-commit 2>&1` && exit 1
 echo "$OUT" | grep -q "not found" || { echo "  no clear message: $OUT"; exit 1 }
 
 exit 0
