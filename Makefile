@@ -26,12 +26,13 @@ chmodx:
 build:
 	@cargo build --quiet
 
-# GIT_HOOKS_BIN points the shims at the freshly built debug binary. Without it
-# they would fall through to the unsubstituted @BIN@ placeholder (this is the
-# SOURCE tree — @BIN@ is only filled in at install time) and then to PATH, where
-# a stale installed binary could silently answer instead of the one under test.
-test: chmodx build
-	@GIT_HOOKS_BIN=$(DEBUG_BIN) $(MAKEFILE_DIR)/tests/tests-runner.zsh $(RUN)
+# `--show-output` so a case that SKIPPED for a missing tool is visible: cargo
+# hides stdout for passing tests, and a silent skip is indistinguishable from a
+# pass — the trap the zsh suites already guarded against.
+#
+# RUN=<filter> still works: `make test RUN=branch_pattern`.
+test: chmodx
+	@cargo test $(if $(RUN),--test $(RUN)) -- --show-output
 
 # Never rm/cp/bake into a directory that lives inside a git checkout.
 #
