@@ -19,8 +19,8 @@ pub fn is_helm_template(root: &str, file: &str) -> bool {
         .is_file()
 }
 
-fn parses(root: &str, program: &str, args: &[&str]) -> bool {
-    Command::new(program)
+fn parses(root: &str, tool: &str, args: &[&str]) -> bool {
+    Command::new(super::common::program(tool))
         .args(args)
         .current_dir(root)
         .stdin(Stdio::null())

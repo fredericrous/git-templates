@@ -50,14 +50,14 @@ pub fn resolve_tool(root: &str, tool: &str) -> Option<Vec<String>> {
             }
         }
     }
-    if which(tool).is_some() {
-        return Some(vec![tool.to_string()]);
+    if let Some(full) = which(tool) {
+        return Some(vec![full]);
     }
     // `npx --no-install`: never silently download a random latest version — a
     // hook that quietly pulls a different linter than CI uses is worse than one
     // that skips.
     if which("npx").is_some()
-        && Command::new("npx")
+        && Command::new(program("npx"))
             .args(["--no-install", tool, "--version"])
             .current_dir(root)
             .stdin(Stdio::null())
@@ -68,7 +68,7 @@ pub fn resolve_tool(root: &str, tool: &str) -> Option<Vec<String>> {
             .unwrap_or(false)
     {
         return Some(vec![
-            "npx".to_string(),
+            program("npx"),
             "--no-install".to_string(),
             tool.to_string(),
         ]);
@@ -96,15 +96,20 @@ pub fn which(tool: &str) -> Option<String> {
         Vec::new()
     };
     for dir in std::env::split_paths(&path) {
-        let bare = dir.join(tool);
-        if bare.is_file() {
-            return Some(bare.to_string_lossy().into_owned());
-        }
+        // On Windows the EXTENSION forms come first. A node install ships both
+        // `npm` (an extensionless shell script, for MSYS) and `npm.cmd` in the
+        // same directory; preferring the bare name hands CreateProcess a shell
+        // script it cannot execute — "%1 is not a valid Win32 application" —
+        // and the hook reports an installed tool as broken.
         for e in &exts {
             let c = dir.join(format!("{tool}{e}"));
             if c.is_file() {
                 return Some(c.to_string_lossy().into_owned());
             }
+        }
+        let bare = dir.join(tool);
+        if bare.is_file() {
+            return Some(bare.to_string_lossy().into_owned());
         }
     }
     None
@@ -125,6 +130,19 @@ fn in_bin_dir(dir: &str, tool: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Resolve a tool name to a full path for spawning.
+///
+/// `Command::new("npm")` cannot execute `npm.cmd`: Rust does no PATHEXT
+/// resolution, so on Windows every bare-name spawn fails with "program not
+/// found" and the hook reports the tool as broken rather than absent. Found by
+/// the Windows job on its first FULL-suite run — the smoke never spawned a
+/// tool, so it could not have surfaced this.
+///
+/// Falls back to the name unchanged, so a caller still gets a sensible error.
+pub fn program(name: &str) -> String {
+    which(name).unwrap_or_else(|| name.to_string())
 }
 
 /// The first of `names` that exists at the repo root — how these hooks decide
@@ -174,6 +192,26 @@ mod tests {
     fn which_finds_a_real_binary_and_not_a_fake_one() {
         assert!(which("git").is_some());
         assert!(which("definitely-not-a-real-binary-xyz").is_none());
+    }
+
+    /// On Windows a tool can exist BOTH as an extensionless shell script and as
+    /// a .cmd/.exe in the same directory; only the latter is executable by
+    /// CreateProcess, so the extension forms must win.
+    #[test]
+    #[cfg(windows)]
+    fn windows_prefers_an_executable_extension_over_a_bare_file() {
+        let dir = std::env::temp_dir().join("githooks-which-order");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("faketool"), "#!/bin/sh\n").unwrap();
+        std::fs::write(dir.join("faketool.cmd"), "@echo off\n").unwrap();
+        let saved = std::env::var_os("PATH");
+        std::env::set_var("PATH", &dir);
+        let found = which("faketool").unwrap();
+        if let Some(p) = saved {
+            std::env::set_var("PATH", p);
+        }
+        assert!(found.ends_with(".cmd"), "got {found}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

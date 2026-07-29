@@ -42,8 +42,8 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-      # The behavioural coverage lives in the zsh suites (they drive the binary
-      # through the shims); these two just keep the source honest.
+      # The behavioural coverage lives in the integration tests under tests/;
+      # these two just keep the source honest.
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
 
@@ -59,7 +59,6 @@ jobs:
       # ships silently today. Parse-only, nothing is executed.
       - name: Parse every hook
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q zsh
           # Dispatch on the SHEBANG, never the extension. The Rust migration
           # leaves shims at the original paths (docs/rust-migration.md), so
           # `pre-commit-ban-terms.js` is POSIX sh and `pre-push-pull-rebase.zsh`
@@ -70,7 +69,9 @@ jobs:
             [ -f "$f" ] || continue
             case "$f" in */package.json) continue ;; esac
             case "$(head -1 "$f")" in
-              *zsh)  zsh -n "$f"       || { echo "::error file=$f::zsh parse error"; rc=1; } ;;
+              # No hook is zsh any more, so zsh is not installed. The arm stays:
+              # if one reappears this errors loudly rather than skipping it.
+              *zsh)  zsh -n "$f"       || { echo "::error file=$f::zsh parse error (or zsh absent)"; rc=1; } ;;
               *node) node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; } ;;
               */sh)  sh -n "$f"        || { echo "::error file=$f::sh parse error"; rc=1; } ;;
               *) echo "::error file=$f::unrecognised shebang: $(head -1 "$f")"; rc=1 ;;
@@ -88,7 +89,7 @@ jobs:
   # through the shims end to end. Git for Windows ships `sh`, which is what the
   # shims are.
   windows:
-    name: windows smoke
+    name: windows
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -103,9 +104,12 @@ jobs:
 
       # The ported suites run HERE now — Phase 4's point is that Windows gets
       # the real tests, not just a smoke, because they no longer need zsh.
-      - run: cargo test
+      # The full suite — 19 ported suites' worth — not a smoke. This is what
+      # Phase 4 bought: the tests no longer need zsh, so Windows runs the same
+      # ones every other platform does.
+      - run: cargo test -- --show-output
 
-      - name: A real commit runs through the hooks
+      - name: And a real commit runs end to end through the shims
         shell: bash
         run: |
           set -euo pipefail
@@ -169,20 +173,14 @@ jobs:
       # fd: NOT optional — pre-push-run-tests-js shells out to `fd package.json`
       # to find packages, so without it that hook throws and its test fails.
       # Debian ships the binary as `fdfind` (name clash with another package).
-      # zsh: the runner and every TEST is a zsh script (default on macOS, absent
-      # on the Ubuntu image). The hooks themselves no longer need it.
+      # zsh is gone entirely: the hooks became sh shims over the binary, and as
+      # of Phase 4 the tests are cargo integration tests. Nothing here needs it.
       #
       # fd and rg used to be installed here and are no longer required by any
       # hook: the Rust ports use `git ls-files` and native matching. Both were
       # undeclared hard dependencies whose absence produced silent WRONG answers
       # rather than errors — see the guard added in #13, now retired with the
       # shell it protected.
-      - name: Install zsh (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q zsh
-
       - name: Install ruff (macOS)
         if: runner.os == 'macOS'
         run: brew install ruff
@@ -197,7 +195,7 @@ jobs:
       - name: Hard dependencies are present
         run: |
           rc=0
-          for bin in zsh git node npm cargo; do
+          for bin in git node npm cargo; do
             if command -v "$bin" > /dev/null; then
               printf '  ok   %-5s %s\n' "$bin" "$(command -v "$bin")"
             else

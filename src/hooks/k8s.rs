@@ -4,7 +4,7 @@
 //! blocking a commit, because CI is the hard gate and not every developer has
 //! kustomize/kubeconform/argo installed.
 
-use super::common::{fail, hl, ok, repo_root, staged_files, warn, which};
+use super::common::{fail, hl, ok, program, repo_root, staged_files, warn, which};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -72,7 +72,7 @@ pub fn argo_lint(_args: &[std::ffi::OsString]) -> i32 {
     // templating is what it actually checks.
     let mut argv = vec!["lint".to_string(), "--offline".to_string()];
     argv.extend(workflows.iter().cloned());
-    let okd = Command::new("argo")
+    let okd = Command::new(program("argo"))
         .args(&argv)
         .current_dir(&root)
         .stdin(Stdio::null())
@@ -129,7 +129,7 @@ pub fn kube_linter(_args: &[std::ffi::OsString]) -> i32 {
     // apps-vs-infra splits work without per-hook wiring.
     let mut overall = 0;
     for cfg in &configs {
-        let okd = Command::new("kube-linter")
+        let okd = Command::new(program("kube-linter"))
             .args(["lint", ".", "--config", cfg])
             .current_dir(&root)
             .stdin(Stdio::null())
@@ -240,7 +240,7 @@ pub fn kubeconform(_args: &[std::ffi::OsString]) -> i32 {
 /// semantics: a kustomize failure fails the check even when kubeconform would
 /// happily consume the empty input.
 fn validate_root(root: &str, sub: &str, skip: Option<&str>) -> bool {
-    let Ok(mut build) = Command::new("kustomize")
+    let Ok(mut build) = Command::new(program("kustomize"))
         .args(["build", sub])
         .current_dir(root)
         .stdin(Stdio::null())
@@ -270,7 +270,7 @@ fn validate_root(root: &str, sub: &str, skip: Option<&str>) -> bool {
     argv.push("--summary");
     argv.push("-");
 
-    let conform = Command::new("kubeconform")
+    let conform = Command::new(program("kubeconform"))
         .args(&argv)
         .current_dir(root)
         .stdin(Stdio::from(out))
