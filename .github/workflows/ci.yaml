@@ -19,6 +19,15 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# GitHub's DEFAULT shell is `bash -e {0}` — no pipefail. Only naming bash
+# explicitly gets `bash -eo pipefail {0}`. Without this, `make test | tee`
+# reports the exit status of `tee` (always 0) and a failing suite goes GREEN.
+# That is exactly what the first run of this workflow did: both jobs passed
+# while `make` had printed "*** [test] Error 1".
+defaults:
+  run:
+    shell: bash
+
 jobs:
   syntax:
     name: syntax
@@ -66,20 +75,43 @@ jobs:
       # fd: NOT optional — pre-push-run-tests-js shells out to `fd package.json`
       # to find packages, so without it that hook throws and its test fails.
       # Debian ships the binary as `fdfind` (name clash with another package).
-      - name: Install zsh + fd (Linux)
+      # zsh: the runner and every test are zsh scripts (default on macOS, absent
+      # on the Ubuntu image).
+      # fd + rg: NOT optional. `pre-push-run-tests-js` shells out to `fd
+      # package.json`, and four hooks (branch-pattern, pull-rebase, usual-name,
+      # prepare-commit-msg) match with `rg` — none of them guard for its
+      # absence, and a missing `rg` makes `! rg …` true, so branch-pattern
+      # rejects EVERY branch name rather than erroring usefully.
+      # Debian ships fd's binary as `fdfind` (name clash with another package).
+      - name: Install zsh + fd + rg (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q zsh fd-find
+          sudo apt-get install -y -q zsh fd-find ripgrep
           sudo ln -sf "$(command -v fdfind)" /usr/local/bin/fd
 
-      - name: Install fd + ruff (macOS)
+      - name: Install fd + rg + ruff (macOS)
         if: runner.os == 'macOS'
-        run: brew install fd ruff
+        run: brew install fd ripgrep ruff
 
       - name: Install ruff (Linux)
         if: runner.os == 'Linux'
         run: pipx install ruff
+
+      # Fail here, with a name, rather than 14 suites down as an opaque
+      # assertion failure — the hooks' hard dependencies are undeclared
+      # anywhere else in the repo.
+      - name: Hard dependencies are present
+        run: |
+          rc=0
+          for bin in zsh git node npm fd rg; do
+            if command -v "$bin" > /dev/null; then
+              printf '  ok   %-5s %s\n' "$bin" "$(command -v "$bin")"
+            else
+              printf '  MISS %-5s\n' "$bin"; rc=1
+            fi
+          done
+          exit $rc
 
       # The tool-dependent tests (lint-js, prettier, ruff, pyright) skip
       # gracefully when their binary is missing — which would leave CI green
@@ -100,8 +132,8 @@ jobs:
           git config --global init.defaultBranch main
 
       # tee, not a second run: the skip check below reads this output rather
-      # than paying for the whole suite twice. GitHub's default bash sets
-      # pipefail, so a failing `make test` still fails the step through the pipe.
+      # than paying for the whole suite twice. Depends on the workflow-level
+      # `shell: bash` above for pipefail — see the comment there.
       - name: make test
         run: make test 2>&1 | tee /tmp/hooks-test.log
 
