@@ -14,13 +14,13 @@
 # with an environment that often lacks ~/.local/bin or ~/.cargo/bin. A shim that
 # only did `exec githooks` would work in the terminal and fail in the GUI. So:
 #   1. $GIT_HOOKS_BIN   — escape hatch; also how `make test` points at target/debug
-#   2. @BIN@            — absolute path written in by `make install`, when
+#   2. __GITHOOKS_BIN__ — absolute path written in by `make install`, when
 #                         installing to a custom INSTALL_BIN_DIR
 #   3. $HOME/.local/bin — the default install location, resolved at RUNTIME so
 #                         this template stays machine-agnostic. Without it, a
 #                         repo created by `git init` from a template dir that is
 #                         the git checkout itself (the usual setup here — the
-#                         XDG path symlinks to the repo) never gets @BIN@
+#                         XDG path symlinks to the repo) never gets that token
 #                         substituted and would depend on PATH after all.
 #   4. PATH             — last resort
 # and if none resolve, FAIL LOUDLY. Never skip a check silently: a hook that
@@ -31,15 +31,15 @@ HOOK_NAME=$(basename -- "$0")
 
 if [ -n "$GIT_HOOKS_BIN" ] && [ -x "$GIT_HOOKS_BIN" ]; then
     BIN="$GIT_HOOKS_BIN"
-elif [ -x "@BIN@" ]; then
-    BIN="@BIN@"
+elif [ -x "__GITHOOKS_BIN__" ]; then
+    BIN="__GITHOOKS_BIN__"
 elif [ -x "$HOME/.local/bin/githooks" ]; then
     BIN="$HOME/.local/bin/githooks"
 elif command -v githooks > /dev/null 2>&1; then
     BIN=githooks
 else
     printf '  \033[38;5;160m✗\033[0m githooks binary not found — hooks cannot run.\n' >&2
-    printf '    Looked at: $GIT_HOOKS_BIN, @BIN@, ~/.local/bin, then PATH.\n' >&2
+    printf '    Looked at: $GIT_HOOKS_BIN, the baked path, ~/.local/bin, then PATH.\n' >&2
     printf '    Reinstall with \033[38;5;208mmake install\033[0m in git-templates.\n' >&2
     exit 1
 fi
