@@ -10,21 +10,16 @@
 use crate::git;
 use crate::ui::{ERROR_SIGN, VALID_SIGN};
 
-/// Printed verbatim when a name is rejected, so the message keeps telling
-/// people the rule in the notation they'd grep for. Kept as the POSIX form the
-/// shell version settled on.
-const CONTRACT: &str = "^((feat|fix|hotfix|test|automation)/[[:alnum:]_-]+|chore/[[:alnum:]_.-]+)$";
+use crate::vocabulary;
 
-/// Prefixes whose suffix must stay dot-free.
-const PLAIN_PREFIXES: [&str; 5] = ["feat", "fix", "hotfix", "test", "automation"];
-
-/// The regex, by hand. `[[:alnum:]]` is ASCII in both rg and `grep -E` under
-/// the C locale, so `is_ascii_alphanumeric` is the faithful translation — a
-/// Unicode-aware check would ACCEPT names the shell version rejected.
+/// Both the rule and the message now come from `vocabulary`, so what a user is
+/// told and what is enforced cannot drift — and neither can the branch prefixes
+/// and the commit types, which had diverged to the point that `docs/…` was
+/// unpushable while `docs:` was a valid commit type.
 ///
-/// Dots are allowed only under `chore/`: version-bump branches read naturally
-/// (`chore/duro-1.50.50`) while feature names stay dot-free. Git already
-/// rejects the dangerous dot forms (`..`, trailing `.lock`).
+/// `[[:alnum:]]` is ASCII in both rg and `grep -E` under the C locale, which is
+/// what the shell version enforced; `is_ascii_alphanumeric` keeps that. A
+/// Unicode-aware check would silently LOOSEN the rule.
 pub fn conforms(branch: &str) -> bool {
     let Some((prefix, rest)) = branch.split_once('/') else {
         return false;
@@ -32,12 +27,11 @@ pub fn conforms(branch: &str) -> bool {
     if rest.is_empty() {
         return false;
     }
-    let dots_ok = prefix == "chore";
-    if !dots_ok && !PLAIN_PREFIXES.contains(&prefix) {
+    let Some(p) = vocabulary::branch_prefix(prefix) else {
         return false;
-    }
+    };
     rest.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || (dots_ok && c == '.'))
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || (p.dots && c == '.'))
 }
 
 pub fn run(args: &[std::ffi::OsString]) -> i32 {
@@ -70,9 +64,10 @@ pub fn run(args: &[std::ffi::OsString]) -> i32 {
     if !conforms(&branch) {
         println!(
             "{ERROR_SIGN} Branch names in this project must adhere to this contract:
-    \u{1b}[38;5;208m{CONTRACT}\u{1b}[0m.
+    \u{1b}[38;5;208m{}\u{1b}[0m.
     Rename your branch with: \u{1b}[38;5;208mgit branch -m\u{1b}[0m <branch name>
-    Or bypass this check with git -c hook.skip=branch-pattern push"
+    Or bypass this check with git -c hook.skip=branch-pattern push",
+            vocabulary::branch_contract()
         );
         return 1;
     }
@@ -86,34 +81,54 @@ mod tests {
     use super::conforms;
 
     #[test]
-    fn accepts_the_conventional_shapes() {
-        assert!(conforms("feat/0-test"));
-        assert!(conforms("fix/some_thing"));
-        assert!(conforms("hotfix/a-b-c"));
-        assert!(conforms("automation/nightly"));
-        assert!(conforms("chore/duro-1.50.50")); // dots, under chore only
-        assert!(conforms("chore/a_b-1.2"));
+    fn accepts_every_declared_prefix() {
+        for p in crate::vocabulary::BRANCH_PREFIXES {
+            assert!(conforms(&format!("{}/some-work", p.name)), "{}", p.name);
+        }
+    }
+
+    /// The divergence this module exists to end: these were all REJECTED as
+    /// branch names while being perfectly valid commit types.
+    #[test]
+    fn accepts_the_prefixes_that_used_to_be_rejected() {
+        for b in [
+            "docs/rust-migration",
+            "refactor/hook-registry",
+            "perf/faster-startup",
+            "build/bump-toolchain",
+            "style/reformat",
+            "revert/bad-change",
+            "add/new-thing",
+            "remove/dead-code",
+        ] {
+            assert!(conforms(b), "{b} should be allowed now");
+        }
     }
 
     #[test]
     fn rejects_everything_else() {
-        assert!(!conforms("feat/duro-1.50.50")); // dots outside chore
-        assert!(!conforms("off-pattern")); // no prefix
+        assert!(!conforms("off-pattern"));
         assert!(!conforms("duro-1.50.50"));
-        assert!(!conforms("feat/")); // empty suffix
+        assert!(!conforms("feat/"));
         assert!(!conforms("/x"));
-        assert!(!conforms("feat/a/b")); // slash isn't in the class
+        assert!(!conforms("feat/a/b"));
         assert!(!conforms("main"));
-        assert!(!conforms("release/1")); // unknown prefix
+        assert!(!conforms("release/1")); // not a declared prefix
+    }
+
+    /// Dots stay a chore-only affordance for version bumps.
+    #[test]
+    fn dots_are_chore_only() {
+        assert!(conforms("chore/duro-1.50.50"));
+        assert!(!conforms("feat/duro-1.50.50"));
+        assert!(!conforms("docs/1.2.3"));
     }
 
     /// `[[:alnum:]]` is ASCII under the C locale in both engines the shell
-    /// version used. Accepting Unicode letters here would be a silent
-    /// LOOSENING of the rule during the port.
+    /// version used; a Unicode-aware check would LOOSEN the rule.
     #[test]
     fn alnum_stays_ascii() {
         assert!(!conforms("feat/café"));
-        assert!(!conforms("feat/naïve"));
         assert!(!conforms("chore/日本語"));
     }
 }

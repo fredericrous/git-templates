@@ -15,22 +15,7 @@ const MAX_SUMMARY_LINE_SIZE: usize = 72;
 const MAX_DESCRIPTION_SIZE: usize = 50;
 const MAX_BODY_LINE_SIZE: usize = 72;
 
-/// Type → gitmoji, in declaration order (the error message lists them, so the
-/// order is user-visible).
-const COMMIT_TYPES: [(&str, &str); 12] = [
-    ("build", "👷"),
-    ("chore", "🔧"),
-    ("docs", "📝️"),
-    ("feat", "✨"),
-    ("fix", "🐛"),
-    ("perf", "⚡️"),
-    ("refactor", "♻️"),
-    ("revert", "⏪️"),
-    ("style", "🎨"),
-    ("test", "🚨"),
-    ("add", "➕"),
-    ("remove", "➖"),
-];
+use crate::vocabulary::{self, COMMIT_TYPES};
 
 pub struct Subject {
     pub prefix: String,
@@ -75,7 +60,7 @@ pub fn parse_subject(subject_line: &str) -> Option<Subject> {
     let rest = split_leading_emoji(subject_line);
     let (prefix, rest) = COMMIT_TYPES
         .iter()
-        .map(|(t, _)| *t)
+        .map(|t| t.name)
         .find(|t| rest.starts_with(t))
         .map(|t| (t.to_string(), &rest[t.len()..]))?;
 
@@ -245,7 +230,7 @@ pub fn run(args: &[std::ffi::OsString]) -> i32 {
         orange(&MAX_SUMMARY_LINE_SIZE.to_string())
     ));
 
-    let types: Vec<String> = COMMIT_TYPES.iter().map(|(t, _)| orange(t)).collect();
+    let types: Vec<String> = COMMIT_TYPES.iter().map(|t| orange(t.name)).collect();
     let Some(subject) = parse_subject(subject_line) else {
         error(&format!(
             "Commits MUST be prefixed with a type, which consists of a noun:
@@ -289,12 +274,7 @@ pub fn run(args: &[std::ffi::OsString]) -> i32 {
     let emoji_prefix = if is_pr_repo {
         String::new()
     } else {
-        let e = COMMIT_TYPES
-            .iter()
-            .find(|(t, _)| *t == subject.prefix)
-            .map(|(_, e)| *e)
-            .unwrap_or("");
-        format!("{e}  ")
+        format!("{}  ", vocabulary::emoji_for(&subject.prefix))
     };
 
     let formatted = format!(
