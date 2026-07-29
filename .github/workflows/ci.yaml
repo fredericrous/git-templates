@@ -1,0 +1,156 @@
+name: CI
+
+# These hooks stand between the author and every commit/push in ~96 repos, so a
+# broken one is felt immediately and everywhere. `make test` was dev-machine
+# only until now; this runs it on every push and PR.
+#
+# Matrix on purpose: the hooks ship to a macOS workstation but also run on Linux
+# CI runners, and they lean on tools whose flags differ by platform (BSD vs GNU
+# realpath/grep/sed — the ban-terms hook already carries a comment about POSIX
+# regex flavour varying). A single-platform run would let that class of break
+# through.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# GitHub's DEFAULT shell is `bash -e {0}` — no pipefail. Only naming bash
+# explicitly gets `bash -eo pipefail {0}`. Without this, `make test | tee`
+# reports the exit status of `tee` (always 0) and a failing suite goes GREEN.
+# That is exactly what the first run of this workflow did: both jobs passed
+# while `make` had printed "*** [test] Error 1".
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  syntax:
+    name: syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cheap backstop for the hooks no test file covers (argo-lint,
+      # kube-linter, kubeconform, yamllint): a syntax error in one of those
+      # ships silently today. Parse-only, nothing is executed.
+      - name: Parse every hook
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q zsh
+          rc=0
+          for f in templates/hooks/*.zsh; do
+            zsh -n "$f" || { echo "::error file=$f::zsh parse error"; rc=1; }
+          done
+          for f in templates/hooks/*.js; do
+            node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; }
+          done
+          # The extensionless git entrypoints, by shebang.
+          for f in templates/hooks/commit-msg templates/hooks/pre-commit \
+                   templates/hooks/pre-push templates/hooks/prepare-commit-msg; do
+            case "$(head -1 "$f")" in
+              *zsh) zsh -n "$f" || { echo "::error file=$f::zsh parse error"; rc=1; } ;;
+              *node) node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; } ;;
+            esac
+          done
+          exit $rc
+
+  test:
+    name: hooks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # zsh: the runner and every test are zsh scripts (default shell on macOS,
+      # absent on the Ubuntu image).
+      # fd: NOT optional — pre-push-run-tests-js shells out to `fd package.json`
+      # to find packages, so without it that hook throws and its test fails.
+      # Debian ships the binary as `fdfind` (name clash with another package).
+      # zsh: the runner and every test are zsh scripts (default on macOS, absent
+      # on the Ubuntu image).
+      # fd + rg: NOT optional. `pre-push-run-tests-js` shells out to `fd
+      # package.json`, and four hooks (branch-pattern, pull-rebase, usual-name,
+      # prepare-commit-msg) match with `rg` — none of them guard for its
+      # absence, and a missing `rg` makes `! rg …` true, so branch-pattern
+      # rejects EVERY branch name rather than erroring usefully.
+      # Debian ships fd's binary as `fdfind` (name clash with another package).
+      - name: Install zsh + fd + rg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q zsh fd-find ripgrep
+          sudo ln -sf "$(command -v fdfind)" /usr/local/bin/fd
+
+      - name: Install fd + rg + ruff (macOS)
+        if: runner.os == 'macOS'
+        run: brew install fd ripgrep ruff
+
+      - name: Install ruff (Linux)
+        if: runner.os == 'Linux'
+        run: pipx install ruff
+
+      # Fail here, with a name, rather than 14 suites down as an opaque
+      # assertion failure — the hooks' hard dependencies are undeclared
+      # anywhere else in the repo.
+      - name: Hard dependencies are present
+        run: |
+          rc=0
+          for bin in zsh git node npm fd rg; do
+            if command -v "$bin" > /dev/null; then
+              printf '  ok   %-5s %s\n' "$bin" "$(command -v "$bin")"
+            else
+              printf '  MISS %-5s\n' "$bin"; rc=1
+            fi
+          done
+          exit $rc
+
+      # The tool-dependent tests (lint-js, prettier, ruff, pyright) skip
+      # gracefully when their binary is missing — which would leave CI green
+      # while silently testing far less. Install them so those suites actually
+      # assert something. Resolution order in the hooks ends at PATH, so a
+      # global install is enough.
+      - name: Install the tools the hooks drive
+        run: npm i -g eslint prettier pyright
+
+      # Every test does real commits in a throwaway repo. Only two set a local
+      # identity, so without a global one the rest fail at `git commit` with
+      # "Please tell me who you are" — and the failure would look like a hook
+      # bug rather than a missing CI setting.
+      - name: Git identity for the throwaway test repos
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name "git-templates ci"
+          git config --global init.defaultBranch main
+
+      # tee, not a second run: the skip check below reads this output rather
+      # than paying for the whole suite twice. Depends on the workflow-level
+      # `shell: bash` above for pipefail — see the comment there.
+      - name: make test
+        run: make test 2>&1 | tee /tmp/hooks-test.log
+
+      # A skip is legitimate (a tool genuinely absent) but must not pass
+      # unnoticed: the whole point of installing the tools above is that these
+      # suites run for real. A green tick over a suite that quietly skipped is
+      # the failure mode worth surfacing.
+      # Match the tests' actual skip marker, not the bare word: one test is
+      # NAMED "Should stop at the first failure, skipping the rest of the gate",
+      # so `grep skipping` warned on a perfectly healthy run. A warning that
+      # cries wolf is one people learn to scroll past.
+      - name: Report skipped suites
+        if: always()
+        run: |
+          if grep -q "unavailable — skipping" /tmp/hooks-test.log; then
+            echo "::warning::suites skipped despite the tools being installed:"
+            grep "unavailable — skipping" /tmp/hooks-test.log
+          else
+            echo "no suites skipped"
+          fi

@@ -1,6 +1,11 @@
 #!/bin/zsh
 # Author: https://github.com/fredericrous
-SCRIPT_PATH=`dirname $(realpath -s "$0")`
+# `${0:a:h}`, not `realpath -s`: -s is a GNU coreutils flag. BSD realpath (a
+# clean macOS, no brew coreutils on PATH) rejects it, SCRIPT_PATH ends up empty
+# and the glob below becomes `/*.test.*` — "no matches found", zero tests run.
+# The zsh modifiers do it natively: :a = absolute without resolving symlinks
+# (what -s meant), :h = dirname. Same form the test files already use.
+SCRIPT_PATH=${0:a:h}
 ERROR_SIGN=$'  \e[38;5;160m✗\e[0m'
 VALID_SIGN=$'  \e[38;5;112m✓\e[0m'
 

@@ -1,5 +1,7 @@
 # Git Templates with hooks
 
+[![CI](https://github.com/fredericrous/git-templates/actions/workflows/ci.yaml/badge.svg)](https://github.com/fredericrous/git-templates/actions/workflows/ci.yaml)
+
 Git Starter Template with opinionated hooks to help you create beautiful commits with high quality standards..and emojis ✨
 
 <img src="https://user-images.githubusercontent.com/702227/125003867-1b012f00-e050-11eb-8641-748ef806c639.png" width="800">
