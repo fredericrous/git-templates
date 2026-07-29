@@ -41,7 +41,23 @@ if ! git ls-remote --exit-code --heads "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH" > /
     exit 0
 fi
 
-HAS_DIVERGED=`git status -sb | rg 'ahead\s\d+,\sbehind' -c`
+# rg is the fast path but isn't everywhere, and an unguarded rg that's missing
+# would leave HAS_DIVERGED empty and silently auto-rebase a diverged branch —
+# the one case this guard exists to prevent. ONE pattern per check: POSIX
+# classes are understood by rg and grep -E alike (\s and \d are not), so the
+# fallback can't drift. HOOKS_FORCE_GREP=1 exercises it where rg IS installed.
+DIVERGED_REGEX='ahead[[:space:]]+[0-9]+,[[:space:]]*behind'
+if [[ -z $HOOKS_FORCE_GREP ]] && command -v rg > /dev/null 2>&1; then
+    diverged_count() { rg -c "$DIVERGED_REGEX" }
+    default_branch_is() { rg -q "^[[:space:]*]+$1\$" }
+else
+    diverged_count() { grep -cE "$DIVERGED_REGEX" }
+    default_branch_is() { grep -qE "^[[:space:]*]+$1\$" }
+fi
+
+# `grep -c` prints 0 on no match where `rg -c` prints nothing; both leave the
+# test below false, so the two paths agree.
+HAS_DIVERGED=`git status -sb | diverged_count`
 if [[ $HAS_DIVERGED -eq 1 ]]; then
     printf "$WARNING_SIGN Branch diverged from its upstream — skip auto pull-rebase.\n"
     printf "    Reconcile manually: \033[38;5;208mgit pull --rebase\033[0m (or \033[38;5;208mgit merge\033[0m)\n"
@@ -56,9 +72,9 @@ fi
 
 # 3. Informational only: warn if the default branch has moved ahead. No auto-action.
 BRANCH_LIST=`git branch`
-if echo $BRANCH_LIST | rg '^[\s*]+main$' --context=0 -or '$1' > /dev/null; then
+if printf '%s\n' "$BRANCH_LIST" | default_branch_is main; then
     DEFAULT_BRANCH="main"
-elif echo $BRANCH_LIST | rg '^[\s*]+master$' --context=0 -or '$1' > /dev/null; then
+elif printf '%s\n' "$BRANCH_LIST" | default_branch_is master; then
     DEFAULT_BRANCH="master"
 else
     exit 0

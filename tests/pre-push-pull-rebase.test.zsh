@@ -46,4 +46,11 @@ $HOOK &> /dev/null || exit 1
 # And it must be the explicit SKIP, not a blocked push:
 $HOOK 2>&1 | grep -q "no longer exists" || exit 1
 
+# The grep fallback carries the divergence guard on machines without rg. If it
+# silently matched nothing, HAS_DIVERGED would read as "not diverged" and the
+# hook would auto-rebase the very case it exists to refuse.
+printf "Should reach the same verdict when falling back to grep\n"
+HOOKS_FORCE_GREP=1 $HOOK &> /dev/null || exit 1
+HOOKS_FORCE_GREP=1 $HOOK 2>&1 | grep -q "no longer exists" || exit 1
+
 exit 0
