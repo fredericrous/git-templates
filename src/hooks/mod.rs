@@ -6,4 +6,5 @@ pub mod branch_pattern;
 pub mod commit_msg;
 pub mod prepare_commit_msg;
 pub mod pull_rebase;
+pub mod run_tests;
 pub mod usual_name;

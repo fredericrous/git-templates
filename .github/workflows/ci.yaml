@@ -94,24 +94,23 @@ jobs:
       # fd: NOT optional — pre-push-run-tests-js shells out to `fd package.json`
       # to find packages, so without it that hook throws and its test fails.
       # Debian ships the binary as `fdfind` (name clash with another package).
-      # zsh: the runner and every test are zsh scripts (default on macOS, absent
-      # on the Ubuntu image).
-      # fd + rg: NOT optional. `pre-push-run-tests-js` shells out to `fd
-      # package.json`, and four hooks (branch-pattern, pull-rebase, usual-name,
-      # prepare-commit-msg) match with `rg` — none of them guard for its
-      # absence, and a missing `rg` makes `! rg …` true, so branch-pattern
-      # rejects EVERY branch name rather than erroring usefully.
-      # Debian ships fd's binary as `fdfind` (name clash with another package).
-      - name: Install zsh + fd + rg (Linux)
+      # zsh: the runner and every TEST is a zsh script (default on macOS, absent
+      # on the Ubuntu image). The hooks themselves no longer need it.
+      #
+      # fd and rg used to be installed here and are no longer required by any
+      # hook: the Rust ports use `git ls-files` and native matching. Both were
+      # undeclared hard dependencies whose absence produced silent WRONG answers
+      # rather than errors — see the guard added in #13, now retired with the
+      # shell it protected.
+      - name: Install zsh (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q zsh fd-find ripgrep
-          sudo ln -sf "$(command -v fdfind)" /usr/local/bin/fd
+          sudo apt-get install -y -q zsh
 
-      - name: Install fd + rg + ruff (macOS)
+      - name: Install ruff (macOS)
         if: runner.os == 'macOS'
-        run: brew install fd ripgrep ruff
+        run: brew install ruff
 
       - name: Install ruff (Linux)
         if: runner.os == 'Linux'
@@ -123,7 +122,7 @@ jobs:
       - name: Hard dependencies are present
         run: |
           rc=0
-          for bin in zsh git node npm fd rg cargo; do
+          for bin in zsh git node npm cargo; do
             if command -v "$bin" > /dev/null; then
               printf '  ok   %-5s %s\n' "$bin" "$(command -v "$bin")"
             else
