@@ -141,12 +141,16 @@ jobs:
       # unnoticed: the whole point of installing the tools above is that these
       # suites run for real. A green tick over a suite that quietly skipped is
       # the failure mode worth surfacing.
+      # Match the tests' actual skip marker, not the bare word: one test is
+      # NAMED "Should stop at the first failure, skipping the rest of the gate",
+      # so `grep skipping` warned on a perfectly healthy run. A warning that
+      # cries wolf is one people learn to scroll past.
       - name: Report skipped suites
         if: always()
         run: |
-          if grep -q "skipping" /tmp/hooks-test.log; then
+          if grep -q "unavailable — skipping" /tmp/hooks-test.log; then
             echo "::warning::suites skipped despite the tools being installed:"
-            grep "skipping" /tmp/hooks-test.log
+            grep "unavailable — skipping" /tmp/hooks-test.log
           else
             echo "no suites skipped"
           fi
