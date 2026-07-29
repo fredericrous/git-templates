@@ -98,6 +98,16 @@ impl Repo {
         }
     }
 
+    /// Write an executable sub-hook. `sh`, because that is what the shims are
+    /// and what the dispatcher's Windows shebang emulation expects.
+    pub fn sub_hook(&self, name: &str, body: &str) {
+        let dir = self.dir.join(".git/hooks");
+        std::fs::create_dir_all(&dir).expect("hooks dir");
+        let p = dir.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}")).expect("write sub-hook");
+        make_executable(&p);
+    }
+
     pub fn path(&self, rel: &str) -> PathBuf {
         self.dir.join(rel)
     }
@@ -132,6 +142,17 @@ impl HookRun {
         self.output().trim().is_empty()
     }
 }
+
+#[cfg(unix)]
+fn make_executable(p: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755));
+}
+
+/// Windows has no executable bit; the dispatcher runs scripts through their
+/// shebang interpreter there, so nothing is needed.
+#[cfg(not(unix))]
+fn make_executable(_p: &Path) {}
 
 /// The binary under test. Cargo builds it before integration tests and points
 /// at it via CARGO_BIN_EXE_*.
