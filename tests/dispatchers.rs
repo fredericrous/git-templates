@@ -17,7 +17,10 @@ fn pre_commit_exits_zero_with_no_sub_hooks() {
 fn pre_commit_runs_every_sub_hook() {
     let r = Repo::new();
     for n in ["a", "b", "c"] {
-        r.sub_hook(&format!("pre-commit-{n}"), &format!("echo {n} >> \"$PWD/ran.txt\"\n"));
+        r.sub_hook(
+            &format!("pre-commit-{n}"),
+            &format!("echo {n} >> \"$PWD/ran.txt\"\n"),
+        );
     }
     assert!(r.hook("pre-commit", &[]).passed());
     let mut got: Vec<String> = std::fs::read_to_string(r.path("ran.txt"))
@@ -62,7 +65,10 @@ fn pre_commit_reports_every_failure_not_just_the_first() {
     assert!(!run.passed());
     assert!(run.says("pre-commit-alpha"));
     assert!(run.says("pre-commit-gamma"));
-    assert!(!run.says("pre-commit-beta"), "a passing hook must not be named");
+    assert!(
+        !run.says("pre-commit-beta"),
+        "a passing hook must not be named"
+    );
 }
 
 /// Substring, not equality — that is what makes
@@ -74,7 +80,10 @@ fn hook_skip_is_a_substring_match() {
     r.sub_hook("pre-commit-package-lock", "echo gone >> \"$PWD/s.txt\"\n");
     r.git(&["config", "--add", "hook.skip", "package-lock"]);
     assert!(r.hook("pre-commit", &[]).passed());
-    assert_eq!(std::fs::read_to_string(r.path("s.txt")).unwrap().trim(), "kept");
+    assert_eq!(
+        std::fs::read_to_string(r.path("s.txt")).unwrap().trim(),
+        "kept"
+    );
 }
 
 #[test]
@@ -101,11 +110,16 @@ fn arguments_reach_sub_hooks() {
 fn pre_push_runs_sub_hooks_in_glob_order() {
     let r = Repo::new();
     for n in ["aaa", "mmm", "zzz"] {
-        r.sub_hook(&format!("pre-push-{n}"), &format!("echo {n} >> \"$PWD/o.txt\"\n"));
+        r.sub_hook(
+            &format!("pre-push-{n}"),
+            &format!("echo {n} >> \"$PWD/o.txt\"\n"),
+        );
     }
     assert!(r.hook("pre-push", &[]).passed());
     assert_eq!(
-        std::fs::read_to_string(r.path("o.txt")).unwrap().replace('\n', ""),
+        std::fs::read_to_string(r.path("o.txt"))
+            .unwrap()
+            .replace('\n', ""),
         "aaammmzzz"
     );
 }
@@ -121,7 +135,9 @@ fn pre_push_stops_at_the_first_failure() {
     let run = r.hook("pre-push", &[]);
     assert_eq!(run.code, 3, "the sub-hook's own code must propagate");
     assert_eq!(
-        std::fs::read_to_string(r.path("st.txt")).unwrap().replace('\n', ""),
+        std::fs::read_to_string(r.path("st.txt"))
+            .unwrap()
+            .replace('\n', ""),
         "aaammm",
         "zzz should not have run"
     );

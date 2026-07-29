@@ -7,7 +7,10 @@ use common::Repo;
 fn rewrite(r: &Repo, msg: &str) -> (bool, String) {
     r.write("MSG", msg);
     let run = r.hook("commit-msg", &["MSG"]);
-    (run.passed(), std::fs::read_to_string(r.path("MSG")).unwrap_or_default())
+    (
+        run.passed(),
+        std::fs::read_to_string(r.path("MSG")).unwrap_or_default(),
+    )
 }
 
 #[test]
@@ -78,7 +81,10 @@ fn accepts_scopes_including_hyphenated_ones() {
 #[test]
 fn a_body_quoting_a_conventional_commit_is_not_promoted() {
     let r = Repo::new();
-    let (ok, out) = rewrite(&r, "revert: undo it\n\nIn abc1234 (\"fix(scope): thing\")\n");
+    let (ok, out) = rewrite(
+        &r,
+        "revert: undo it\n\nIn abc1234 (\"fix(scope): thing\")\n",
+    );
     assert!(ok);
     assert!(out.lines().next().unwrap().contains("revert: undo it"));
 }
