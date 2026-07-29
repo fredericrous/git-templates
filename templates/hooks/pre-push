@@ -1,17 +1,34 @@
-#!/bin/zsh
+#!/bin/sh
+# git-templates dispatcher shim → the githooks binary.
 # Author: https://github.com/fredericrous
-SCRIPT_PATH=$(dirname $(realpath "$0"))
-HOOK_NAME=`basename "$0"`
-HOOKS_PATH=("$SCRIPT_PATH"/$HOOK_NAME-*)
-for i in `git config --get-all hook.skip`; do
-    HOOKS_PATH=(${HOOKS_PATH:#*$i*})
-done
+#
+# POSIX sh, not zsh: this must run wherever git does, including Git for Windows
+# (which ships sh but not zsh).
+#
+# Resolution order matters more than it looks. Git hooks do NOT inherit an
+# interactive shell's PATH: GUI clients (VS Code, Tower, JetBrains) launch git
+# with an environment that often lacks ~/.local/bin or ~/.cargo/bin. A shim that
+# only did `exec githooks` would work in the terminal and fail in the GUI. So:
+#   1. $GIT_HOOKS_BIN   — escape hatch; also how `make test` points at target/debug
+#   2. @BIN@            — absolute path written in by `make install`
+#   3. PATH             — last resort
+# and if none resolve, FAIL LOUDLY. Never skip a check silently: a hook that
+# quietly does nothing is worse than one that is missing.
+set -e
+HOOKS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HOOK_NAME=$(basename -- "$0")
 
-for f in $HOOKS_PATH; do
-    "$f" "$@"
-    EXIT_CODE=$?
-    if [[ $EXIT_CODE -ne 0 ]]; then
-        printf "\n🚨  Error raised by hook \033[38;5;208m$f\033[0m\n"
-        exit $EXIT_CODE
-    fi
-done
+if [ -n "$GIT_HOOKS_BIN" ] && [ -x "$GIT_HOOKS_BIN" ]; then
+    BIN="$GIT_HOOKS_BIN"
+elif [ -x "@BIN@" ]; then
+    BIN="@BIN@"
+elif command -v githooks > /dev/null 2>&1; then
+    BIN=githooks
+else
+    printf '  \033[38;5;160m✗\033[0m githooks binary not found — hooks cannot run.\n' >&2
+    printf '    Looked at: $GIT_HOOKS_BIN, @BIN@, then PATH.\n' >&2
+    printf '    Reinstall with \033[38;5;208mmake install\033[0m in git-templates.\n' >&2
+    exit 1
+fi
+
+exec "$BIN" --hooks-dir "$HOOKS_DIR" "$HOOK_NAME" "$@"
