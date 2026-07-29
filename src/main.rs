@@ -62,6 +62,7 @@ fn main() {
         "pre-push" => dispatch::pre_push(&hooks_dir, &rest),
         "pre-push-branch-pattern" => hooks::branch_pattern::run(&rest),
         "pre-commit-usual-name" => hooks::usual_name::run(&rest),
+        "prepare-commit-msg" => hooks::prepare_commit_msg::run(&rest),
         other => {
             eprintln!("githooks: unknown hook {other:?}");
             2

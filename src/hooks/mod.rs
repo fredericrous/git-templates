@@ -2,4 +2,5 @@
 //! across one at a time; each keeps a shim at its original path so the existing
 //! .zsh suite exercises the Rust implementation unchanged.
 pub mod branch_pattern;
+pub mod prepare_commit_msg;
 pub mod usual_name;
