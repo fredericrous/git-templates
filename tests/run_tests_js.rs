@@ -77,6 +77,12 @@ fn fails_when_the_gate_fails() {
 /// typecheck → test:unit → test, cheapest first, so a type error costs seconds
 /// rather than a full suite. `lint` is deliberately absent — pre-commit-lint-js
 /// already lints staged files.
+///
+/// The recording scripts avoid `sh -c '...'`: npm runs scripts through cmd.exe
+/// on Windows, where `'` does not quote. cmd would eat the `>>` redirect itself
+/// and run `sh -c 'echo typecheck`, creating ran.txt EMPTY — the gate looks like
+/// it ran nothing while exiting 0. `echo x>>ran.txt` means the same thing to sh
+/// and to cmd. No space before `>>`: cmd would include it in the written line.
 #[test]
 fn runs_the_gate_in_order_and_never_lint() {
     if missing("npm") {
@@ -85,7 +91,7 @@ fn runs_the_gate_in_order_and_never_lint() {
     let r = Repo::new();
     r.stage(
         "package.json",
-        r#"{"name":"t","scripts":{"typecheck":"sh -c 'echo typecheck >> ran.txt'","lint":"sh -c 'echo lint >> ran.txt'","test:unit":"sh -c 'echo unit >> ran.txt'","test":"sh -c 'echo test >> ran.txt'"}}"#,
+        r#"{"name":"t","scripts":{"typecheck":"echo typecheck>>ran.txt","lint":"echo lint>>ran.txt","test:unit":"echo unit>>ran.txt","test":"echo test>>ran.txt"}}"#,
     );
     r.commit("chore: base");
     let base = head(&r);
@@ -94,7 +100,7 @@ fn runs_the_gate_in_order_and_never_lint() {
     assert_eq!(push_range(&r, &base, &head(&r)), 0);
     let ran = std::fs::read_to_string(r.path("ran.txt")).unwrap_or_default();
     assert_eq!(
-        ran.lines().collect::<Vec<_>>(),
+        ran.lines().map(str::trim).collect::<Vec<_>>(),
         vec!["typecheck", "unit", "test"]
     );
     assert!(
@@ -111,7 +117,7 @@ fn a_failure_skips_the_rest_of_the_gate() {
     let r = Repo::new();
     r.stage(
         "package.json",
-        r#"{"name":"t","scripts":{"typecheck":"exit 1","test:unit":"sh -c 'echo unit >> ran.txt'","test":"sh -c 'echo test >> ran.txt'"}}"#,
+        r#"{"name":"t","scripts":{"typecheck":"exit 1","test:unit":"echo unit>>ran.txt","test":"echo test>>ran.txt"}}"#,
     );
     r.commit("chore: base");
     let base = head(&r);
