@@ -6,8 +6,13 @@ Status: proposed, not started. Written 2026-07-29.
 
 Two requirements the current design cannot meet:
 
-**1. No unconditional runtime dependency.** `commit-msg` is node and runs on
-*every commit in every repo*. The `pre-commit` / `pre-push` dispatchers are zsh.
+**1. No unconditional runtime dependency.** Three hooks run on *every commit in
+every repo*, whatever the language:
+
+- `commit-msg` — **node**
+- `prepare-commit-msg` — **zsh**
+- the `pre-commit` / `pre-push` dispatchers — **zsh**
+
 So a pure-Python repository needs **node and zsh installed to make a commit** —
 not because it uses either, but because the hook framework does. Per-hook
 scoping cannot fix this: the dependency is in the entrypoint, before any scoping
@@ -43,6 +48,24 @@ file path and asserts on exit code and stdout; none reaches inside. So once a
 hook file becomes a shim that `exec`s the binary, all 14 suites keep working
 **unchanged** against a Rust implementation.
 
+This only holds under a constraint that is easy to get wrong, so state it as a
+contract: **every hook keeps a file at its current path, forever.** The tests
+resolve `templates/hooks/<name>` from their own filename — `pre-push-branch-
+pattern.test.zsh` runs `templates/hooks/pre-push-branch-pattern.zsh`,
+`pre-commit-ban-terms.test.zsh` runs the `.js`. Porting a hook therefore means
+**replacing its body with a shim, never deleting the file**. Delete it and the
+unmodified test cannot run at all, and the safety property this whole plan rests
+on evaporates.
+
+That is not just a testing concern: the dispatcher discovers sub-hooks by
+globbing `<hook-name>-*` in its own directory, and `hook.skip` filters that glob
+by substring on the path. Keeping every path alive keeps both working, unchanged,
+throughout the migration. It is ~20 shims, not 4.
+
+Renaming the shims (dropping the now-misleading `.zsh` / `.js` suffixes) is a
+tidy-up for *after* the migration, and costs a test edit plus a propagation
+sweep. Not worth bundling into it.
+
 That means a behavioural regression net for the whole migration, on Linux and
 macOS via the CI added in #12, before writing a single line of Rust test. Port a
 hook, run `make test`, and the same assertions that guarded the zsh version now
@@ -55,8 +78,10 @@ passes against the binary, unmodified.**
 
 ### 1. Shim resolution (the part that will bite)
 
-Git requires an executable file at each hook name, so the binary needs ~4 thin
-shims: `commit-msg`, `pre-commit`, `pre-push`, `prepare-commit-msg`.
+Git requires an executable file at each of the four entrypoints (`commit-msg`,
+`pre-commit`, `pre-push`, `prepare-commit-msg`), and — per the contract above —
+every sub-hook keeps its path too, so every ported hook becomes a shim of this
+shape:
 
 ```sh
 #!/bin/sh
@@ -102,9 +127,20 @@ almost never. Net, install gets *simpler*, not harder.
 
 Verified against the current dispatcher — easy to lose in a rewrite:
 
-- **Sub-hooks run in PARALLEL** (`pre-commit` backgrounds each and waits). A
-  serial Rust port would be a visible slowdown on every commit.
-- **Failure reporting names the failing hook(s)**, not just a non-zero exit.
+- **The two dispatchers behave DIFFERENTLY, and both behaviours are load-bearing:**
+  - `pre-commit` backgrounds every sub-hook, waits for all of them, then reports
+    **every** failure as a list. Running it serially would be a visible slowdown
+    on each commit; stopping at the first failure would hide the rest, so you'd
+    fix one lint error, commit, and immediately meet the next.
+  - `pre-push` runs sub-hooks **serially and exits on the first failure**, naming
+    just that hook (`Error raised by hook <path>`). That is correct for push:
+    the steps are ordered and expensive (branch-pattern, then pull-rebase, then
+    the full test suite), and there is no point running tests after a rebase
+    conflict.
+
+  A Rust port must reproduce both, including the two distinct message formats,
+  and should have a test for each — a single shared "run all sub-hooks" helper
+  is the obvious accidental way to lose the distinction.
 - **`git config --get-all hook.skip`** filters by substring match against the
   hook path. `git -c hook.skip=package-lock commit` must keep working.
 - **`CHERRY_PICK_HEAD` short-circuit**: the dispatcher exits 0 during a cherry-pick.
@@ -118,30 +154,57 @@ Each phase ships and leaves the repo working. Nothing is a flag day.
 
 **Phase 0 — scaffold, no behaviour change.**
 Cargo crate, CI build job, shim mechanism, `make install` writing shims.
-The Rust `pre-commit`/`pre-push` dispatchers do nothing themselves yet: they
-glob and run the existing `pre-commit-*` / `pre-push-*` script files exactly as
-the zsh dispatcher does, in parallel, honouring `hook.skip`.
+The Rust dispatchers do nothing themselves yet: they glob and run the existing
+`pre-commit-*` / `pre-push-*` script files, honouring `hook.skip` — `pre-commit`
+in parallel collecting every failure, `pre-push` serially stopping at the first,
+each with its existing message format.
 *Done when:* all 14 zsh suites pass unchanged with shims installed.
 
 **Phase 1 — the always-on set.** In this order (cheapest correctness first):
 `branch-pattern` → `usual-name` → `prepare-commit-msg` → `pull-rebase` →
 `commit-msg` → `ban-terms` → `run-tests-js`.
-Each: implement, delete the script, `make test` must stay green.
-*Done when:* a repo with no linter configs needs **no zsh and no node** to commit.
-That is requirement 1, delivered.
+Each: implement in Rust, **replace the script with a shim (do not delete it)**,
+`make test` must stay green.
+
+Phase 1 also moves the **config gating into the dispatcher**. Today every
+`pre-commit-*.zsh` is spawned unconditionally and each decides for itself
+whether to no-op — which means a Python repo still starts a zsh process for the
+eslint hook purely to have it exit. The Rust dispatcher should evaluate the same
+signals (an eslint config, `[tool.ruff]`, `pyrightconfig`, staged `.yaml`, …)
+and **not spawn** what cannot apply. Fewer processes per commit, and it is what
+makes the dependency claim below true rather than nearly true.
+
+*Done when:* the **unconditional** dependency is gone — a repo whose staged
+files trigger no linter hook needs neither zsh nor node to commit.
+
+Note precisely what this does **not** yet deliver: a repo that *does* trigger a
+still-zsh linter hook (a Python repo with `[tool.ruff]` reaching
+`pre-commit-ruff.zsh`) continues to need zsh. Full removal is Phase 3. Requirement
+1 is met for the framework; it is met for every repo only after Phase 3.
 
 `ban-terms` earns a real parser here. Its current comment/string blanker is
 explicitly "not a parser" and mis-handles a regex literal containing an escaped
 slash; a proper tokenizer removes that whole class of false negative.
 
-**Phase 2 — Windows.** Add `windows-latest` to CI. Only meaningful once Phase 1
-lands, because the remaining zsh hooks still cannot run there.
-*Done when:* the always-on set is green on Windows in CI.
+**Phase 2 — Windows.** Add `windows-latest` to CI, running the suites for the
+ported hooks only.
 
-**Phase 3 — linter orchestration (optional).** Port the nine `pre-commit-*.zsh`.
-Required only for full Windows parity; skip it if Windows is a "commit hygiene"
-goal rather than a "run every linter" goal.
-*Done when:* zsh is absent from the repo entirely.
+Be clear about what this proves and what it does not: a **real end-to-end
+`git commit` on Windows still fails** while any applicable hook is zsh. Phase 1's
+gating helps — a repo triggering no linter hook commits fine — but a Python repo
+with `[tool.ruff]` reaches a zsh script that Windows cannot execute. So Phase 2
+demonstrates the always-on path, and **Phase 3 is a prerequisite for Windows
+being genuinely usable**, not an optional extra, if the goal is "work on Windows"
+rather than "the framework is portable".
+
+*Done when:* the ported hooks are green on `windows-latest`, and the doc says
+plainly which hooks a Windows user cannot yet run.
+
+**Phase 3 — linter orchestration.** Port the nine `pre-commit-*.zsh`. Optional
+only if Windows is a "commit hygiene" goal; **mandatory** if a Windows user must
+be able to commit to a repo that uses any of these linters (see Phase 2).
+*Done when:* zsh is absent from the repo entirely, and requirement 1 holds for
+every repo rather than for the framework.
 
 **Phase 4 — retire the shell test suite (optional).** Port `tests/*.zsh` to
 `cargo test`. Deliberately last: those tests are the migration harness, and
@@ -170,7 +233,13 @@ updating the binary updates every repo at once.
 4. **MSRV and dependency budget.** `regex` and `ignore` (ripgrep's own crates)
    cover matching and file walking. Resist more.
 5. **Does Windows need the linter hooks?** Determines whether Phase 3 is
-   optional or mandatory.
+   optional or mandatory — see Phase 2. If a Windows user must commit to a repo
+   using ruff/eslint/prettier, Phase 3 is part of the Windows story, not a
+   follow-up, and the honest total cost is ~1,500 lines rather than ~700.
+6. **Do the shims keep their `.zsh` / `.js` suffixes?** Keeping them means the
+   existing tests and the propagation recipe work untouched; the names just lie
+   about their contents. Renaming is a post-migration tidy-up costing a test
+   edit and a 96-repo sweep.
 
 ## Honest cost
 
@@ -180,5 +249,6 @@ every commit, Windows becomes a build target, and the BSD/GNU divergence class
 disappears — that class produced two of the three bugs CI found on its first two
 runs (`realpath -s`, and the `\w`-vs-POSIX-class dialect split).
 
-If Phase 1 alone lands, the stated requirement is met and Phases 2-4 remain
-genuinely optional.
+If Phase 1 alone lands, the framework stops imposing anything and Phase 4 stays
+optional. Phases 2-3 are optional only if Windows is not a real target; if it is,
+budget for Phase 3 too — roughly 1,500 lines rather than 700.
