@@ -5,6 +5,7 @@
 //! An all-zero local oid is a deletion; an all-zero remote oid means the branch
 //! is new, so everything it carries is in range.
 
+use super::common::program;
 use crate::git;
 use std::io::BufRead;
 use std::process::{Command, Stdio};
@@ -140,7 +141,7 @@ fn run_gate(root: &str, folder: &str) -> i32 {
         return 0;
     };
     for script in GATE.iter().filter(|s| defines_script(&pkg, s)) {
-        let status = Command::new("npm")
+        let status = Command::new(program("npm"))
             .args(["run", script])
             .current_dir(&dir)
             .stdin(Stdio::null())

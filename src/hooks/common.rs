@@ -50,14 +50,14 @@ pub fn resolve_tool(root: &str, tool: &str) -> Option<Vec<String>> {
             }
         }
     }
-    if which(tool).is_some() {
-        return Some(vec![tool.to_string()]);
+    if let Some(full) = which(tool) {
+        return Some(vec![full]);
     }
     // `npx --no-install`: never silently download a random latest version — a
     // hook that quietly pulls a different linter than CI uses is worse than one
     // that skips.
     if which("npx").is_some()
-        && Command::new("npx")
+        && Command::new(program("npx"))
             .args(["--no-install", tool, "--version"])
             .current_dir(root)
             .stdin(Stdio::null())
@@ -68,7 +68,7 @@ pub fn resolve_tool(root: &str, tool: &str) -> Option<Vec<String>> {
             .unwrap_or(false)
     {
         return Some(vec![
-            "npx".to_string(),
+            program("npx"),
             "--no-install".to_string(),
             tool.to_string(),
         ]);
@@ -125,6 +125,19 @@ fn in_bin_dir(dir: &str, tool: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Resolve a tool name to a full path for spawning.
+///
+/// `Command::new("npm")` cannot execute `npm.cmd`: Rust does no PATHEXT
+/// resolution, so on Windows every bare-name spawn fails with "program not
+/// found" and the hook reports the tool as broken rather than absent. Found by
+/// the Windows job on its first FULL-suite run — the smoke never spawned a
+/// tool, so it could not have surfaced this.
+///
+/// Falls back to the name unchanged, so a caller still gets a sensible error.
+pub fn program(name: &str) -> String {
+    which(name).unwrap_or_else(|| name.to_string())
 }
 
 /// The first of `names` that exists at the repo root — how these hooks decide
