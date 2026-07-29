@@ -71,6 +71,10 @@ fn main() {
         "pre-commit-lint-json-yaml" => hooks::lint_json_yaml::run(&rest),
         "pre-commit-yamllint" => hooks::yamllint::run(&rest),
         "pre-commit-package-lock" => hooks::package_lock::run(&rest),
+        "pre-commit-lint-js" => hooks::lint_js::run(&rest),
+        "pre-commit-prettier" => hooks::prettier::run(&rest),
+        "pre-commit-ruff" => hooks::python_tools::ruff(&rest),
+        "pre-commit-pyright" => hooks::python_tools::pyright(&rest),
         other => {
             eprintln!("githooks: unknown hook {other:?}");
             2

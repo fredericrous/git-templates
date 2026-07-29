@@ -1,49 +1,47 @@
-#!/bin/zsh
-# Lint staged files
+#!/bin/sh
+# git-templates hook shim → the githooks binary.
+#
+# One shim serves every hook: it passes its own filename through, so the binary
+# knows which hook to run. Dispatchers (pre-commit, pre-push) and ported leaf
+# hooks use the identical file.
 # Author: https://github.com/fredericrous
-ERROR_SIGN=$'  \e[38;5;160m✗\e[0m'
-VALID_SIGN=$'  \e[38;5;112m✓\e[0m'
-WARNING_SIGN=$'  \e[38;5;208m!\e[0m'
+#
+# POSIX sh, not zsh: this must run wherever git does, including Git for Windows
+# (which ships sh but not zsh).
+#
+# Resolution order matters more than it looks. Git hooks do NOT inherit an
+# interactive shell's PATH: GUI clients (VS Code, Tower, JetBrains) launch git
+# with an environment that often lacks ~/.local/bin or ~/.cargo/bin. A shim that
+# only did `exec githooks` would work in the terminal and fail in the GUI. So:
+#   1. $GIT_HOOKS_BIN   — escape hatch; also how `make test` points at target/debug
+#   2. __GITHOOKS_BIN__ — absolute path written in by `make install`, when
+#                         installing to a custom INSTALL_BIN_DIR
+#   3. $HOME/.local/bin — the default install location, resolved at RUNTIME so
+#                         this template stays machine-agnostic. Without it, a
+#                         repo created by `git init` from a template dir that is
+#                         the git checkout itself (the usual setup here — the
+#                         XDG path symlinks to the repo) never gets that token
+#                         substituted and would depend on PATH after all.
+#   4. PATH             — last resort
+# and if none resolve, FAIL LOUDLY. Never skip a check silently: a hook that
+# quietly does nothing is worse than one that is missing.
+set -e
+HOOKS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HOOK_NAME=$(basename -- "$0")
 
-FILES=`git diff --diff-filter=d --cached --name-only | grep -E '\.(js|jsx|ts|tsx|vue)$'`
-[ ${#FILES} -lt 1 ] && exit
-
-# Skip when the repo has no ESLint config — ESLint 9+ errors out ("couldn't
-# find an eslint.config file") instead of no-op'ing, which would fail commits in
-# repos that don't lint JS (e.g. this templates repo, infra/manifest repos).
-# (N) = null-glob: expands to nothing (no zsh nomatch error) when absent.
-ROOT=`git rev-parse --show-toplevel`
-configs=("$ROOT"/eslint.config.{js,mjs,cjs,ts}(N) "$ROOT"/.eslintrc*(N))
-if [ ${#configs} -eq 0 ] && ! grep -q '"eslintConfig"' "$ROOT/package.json" 2>/dev/null; then
-    printf "$VALID_SIGN ESLint skipped (no eslint config)\n"
-    exit 0
-fi
-
-# Resolve eslint: prefer the repo's PINNED eslint (node_modules/.bin) so the
-# hook matches CI. A linked worktree has no node_modules; fall back to the
-# MAIN worktree's (shared git-common-dir's parent). Only then PATH eslint,
-# and `npx --no-install` (never silently download a random latest).
-common_dir=`git rev-parse --path-format=absolute --git-common-dir 2>/dev/null`
-if [[ -x "$ROOT/node_modules/.bin/eslint" ]]; then
-    ESLINT=("$ROOT/node_modules/.bin/eslint")
-elif [[ -n "$common_dir" && -x "${common_dir:h}/node_modules/.bin/eslint" ]]; then
-    ESLINT=("${common_dir:h}/node_modules/.bin/eslint")
-elif type eslint > /dev/null; then
-    ESLINT=(eslint)
-elif type npx > /dev/null 2>&1 && npx --no-install eslint --version > /dev/null 2>&1; then
-    # --no-install: never silently download a random latest eslint.
-    ESLINT=(npx --no-install eslint)
+if [ -n "$GIT_HOOKS_BIN" ] && [ -x "$GIT_HOOKS_BIN" ]; then
+    BIN="$GIT_HOOKS_BIN"
+elif [ -x "__GITHOOKS_BIN__" ]; then
+    BIN="__GITHOOKS_BIN__"
+elif [ -x "$HOME/.local/bin/githooks" ]; then
+    BIN="$HOME/.local/bin/githooks"
+elif command -v githooks > /dev/null 2>&1; then
+    BIN=githooks
 else
-    # Repo opts into eslint (config present) but no eslint binary is resolvable.
-    # Warn + skip rather than block the commit with a false "issues found" — a
-    # non-zero exit from a MISSING eslint is not the same as lint errors.
-    printf "$WARNING_SIGN eslint config found but no eslint binary. Run \033[38;5;208mnpm install\033[0m\n"
-    exit 0
-fi
-$ESLINT `printf ${FILES[*]}` "$@"
-
-if [ $? -ne 0 ]; then
-    printf "$ERROR_SIGN ESLint issues found. Please fix\n"
+    printf '  \033[38;5;160m✗\033[0m githooks binary not found — hooks cannot run.\n' >&2
+    printf '    Looked at: $GIT_HOOKS_BIN, the baked path, ~/.local/bin, then PATH.\n' >&2
+    printf '    Reinstall with \033[38;5;208mmake install\033[0m in git-templates.\n' >&2
     exit 1
 fi
-printf "$VALID_SIGN ESLint passed\n"
+
+exec "$BIN" --hooks-dir "$HOOKS_DIR" "$HOOK_NAME" "$@"

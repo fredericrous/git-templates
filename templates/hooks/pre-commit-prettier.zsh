@@ -1,93 +1,47 @@
-#!/bin/zsh
-# Prettier --check on staged files, scoped to repos that actually use
-# prettier. Catches the formatting issues that a CI `prettier --check`
-# step would otherwise only surface after a push.
+#!/bin/sh
+# git-templates hook shim → the githooks binary.
 #
-# Scoping: only runs when the repo opts into prettier — either a
-# prettier config exists at the git root (.prettierrc*, prettier.config.*,
-# or a "prettier" key in package.json) OR a local prettier binary is
-# installed. Without that signal we warn+skip, so this never fires in
-# repos that don't use prettier (where `npx prettier` would download it
-# and flag every file against defaults).
-#
-# Uses the project-local prettier when present (correct version +
-# honours the repo's .prettierignore / config); falls back to npx.
+# One shim serves every hook: it passes its own filename through, so the binary
+# knows which hook to run. Dispatchers (pre-commit, pre-push) and ported leaf
+# hooks use the identical file.
 # Author: https://github.com/fredericrous
-ERROR_SIGN=$'  \e[38;5;160m✗\e[0m'
-VALID_SIGN=$'  \e[38;5;112m✓\e[0m'
-WARNING_SIGN=$'  \e[38;5;208m!\e[0m'
+#
+# POSIX sh, not zsh: this must run wherever git does, including Git for Windows
+# (which ships sh but not zsh).
+#
+# Resolution order matters more than it looks. Git hooks do NOT inherit an
+# interactive shell's PATH: GUI clients (VS Code, Tower, JetBrains) launch git
+# with an environment that often lacks ~/.local/bin or ~/.cargo/bin. A shim that
+# only did `exec githooks` would work in the terminal and fail in the GUI. So:
+#   1. $GIT_HOOKS_BIN   — escape hatch; also how `make test` points at target/debug
+#   2. __GITHOOKS_BIN__ — absolute path written in by `make install`, when
+#                         installing to a custom INSTALL_BIN_DIR
+#   3. $HOME/.local/bin — the default install location, resolved at RUNTIME so
+#                         this template stays machine-agnostic. Without it, a
+#                         repo created by `git init` from a template dir that is
+#                         the git checkout itself (the usual setup here — the
+#                         XDG path symlinks to the repo) never gets that token
+#                         substituted and would depend on PATH after all.
+#   4. PATH             — last resort
+# and if none resolve, FAIL LOUDLY. Never skip a check silently: a hook that
+# quietly does nothing is worse than one that is missing.
+set -e
+HOOKS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HOOK_NAME=$(basename -- "$0")
 
-# Extensions prettier handles in a typical web project.
-EXT_RE='\.(js|jsx|ts|tsx|mjs|cjs|json|jsonc|css|scss|less|html|vue|md|mdx|ya?ml)$'
-
-staged=(${(f)"$(git diff --diff-filter=d --cached --name-only)"})
-(( ${#staged} == 0 )) && exit 0
-files=(${(f)"$(printf '%s\n' $staged | grep -E $EXT_RE)"})
-(( ${#files} == 0 )) && exit 0
-
-ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-
-# --- decide whether this repo opts into prettier ---------------------
-# (N) = null-glob: unmatched patterns expand to nothing instead of
-# erroring under zsh's default NOMATCH. (.) = plain files only.
-has_config=0
-config_matches=("$ROOT"/.prettierrc(N.) "$ROOT"/.prettierrc.*(N.) "$ROOT"/prettier.config.*(N.))
-(( ${#config_matches} > 0 )) && has_config=1
-if (( ! has_config )) && [[ -f "$ROOT/package.json" ]]; then
-    if type node > /dev/null 2>&1; then
-        node -e 'process.exit(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).prettier?0:1)' \
-            "$ROOT/package.json" 2>/dev/null && has_config=1
-    fi
-fi
-
-# --- resolve a prettier binary (prefer the repo's PINNED prettier) ----
-# A linked git worktree has no node_modules; fall back to the MAIN
-# worktree's pinned prettier (shared git-common-dir's parent) so worktrees
-# use the SAME version as CI rather than an ambient/global one.
-local_bin=""
-common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
-main_prettier="${common_dir:h}/node_modules/.bin/prettier"
-if [[ -x "$ROOT/node_modules/.bin/prettier" ]]; then
-    local_bin="$ROOT/node_modules/.bin/prettier"
-elif [[ -n "$common_dir" && -x "$main_prettier" ]]; then
-    local_bin="$main_prettier"
-fi
-
-if (( ! has_config )) && [[ -z "$local_bin" ]]; then
-    # Repo doesn't use prettier — nothing to enforce.
-    exit 0
-fi
-
-if [[ -n "$local_bin" ]]; then
-    PRETTIER=("$local_bin")
-elif type prettier > /dev/null 2>&1; then
-    PRETTIER=(prettier)
-elif type npx > /dev/null 2>&1; then
-    PRETTIER=(npx --no-install prettier)
-    # --no-install: don't silently download into an unrelated repo. If
-    # it's not resolvable, warn+skip rather than block.
-    if ! npx --no-install prettier --version > /dev/null 2>&1; then
-        printf "$WARNING_SIGN prettier config found but no prettier binary. Run \033[38;5;208mnpm install\033[0m\n"
-        exit 0
-    fi
+if [ -n "$GIT_HOOKS_BIN" ] && [ -x "$GIT_HOOKS_BIN" ]; then
+    BIN="$GIT_HOOKS_BIN"
+elif [ -x "__GITHOOKS_BIN__" ]; then
+    BIN="__GITHOOKS_BIN__"
+elif [ -x "$HOME/.local/bin/githooks" ]; then
+    BIN="$HOME/.local/bin/githooks"
+elif command -v githooks > /dev/null 2>&1; then
+    BIN=githooks
 else
-    printf "$WARNING_SIGN Staged files prettier handles, but neither prettier nor npx is available.\n"
-    exit 0
-fi
-
-# Ignore a *global* ~/.editorconfig when this repo defines none of its own.
-# Otherwise prettier walks up past the repo to the machine-wide
-# ~/.editorconfig and enforces its defaults (e.g. 4-space) on a repo
-# formatted differently — a false positive that also disagrees with CI,
-# which has no ~/.editorconfig. A repo-level .editorconfig is still honoured
-# (matching CI), so this only strips the cross-repo leak, not real intent.
-ec_flag=()
-[[ -f "$ROOT/.editorconfig" ]] || ec_flag=(--no-editorconfig)
-
-# --check respects the repo's config + .prettierignore automatically.
-if ! "${PRETTIER[@]}" "${ec_flag[@]}" --check $files > /dev/null 2>&1; then
-    printf "$ERROR_SIGN Prettier found unformatted files. Run \033[38;5;208mprettier --write\033[0m on:\n"
-    "${PRETTIER[@]}" "${ec_flag[@]}" --list-different $files 2>/dev/null | sed 's/^/      /'
+    printf '  \033[38;5;160m✗\033[0m githooks binary not found — hooks cannot run.\n' >&2
+    printf '    Looked at: $GIT_HOOKS_BIN, the baked path, ~/.local/bin, then PATH.\n' >&2
+    printf '    Reinstall with \033[38;5;208mmake install\033[0m in git-templates.\n' >&2
     exit 1
 fi
-printf "$VALID_SIGN Prettier passed\n"
+
+exec "$BIN" --hooks-dir "$HOOKS_DIR" "$HOOK_NAME" "$@"
