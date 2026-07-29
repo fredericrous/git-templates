@@ -64,6 +64,7 @@ fn main() {
         "pre-commit-usual-name" => hooks::usual_name::run(&rest),
         "prepare-commit-msg" => hooks::prepare_commit_msg::run(&rest),
         "pre-push-pull-rebase" => hooks::pull_rebase::run(&rest),
+        "commit-msg" => hooks::commit_msg::run(&rest),
         other => {
             eprintln!("githooks: unknown hook {other:?}");
             2
