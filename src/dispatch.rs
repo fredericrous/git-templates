@@ -29,12 +29,56 @@ fn selected(hooks_dir: &Path, hook: &str) -> Vec<PathBuf> {
 /// stdin and `pre-push-run-tests-js` consumes them; reading it in the
 /// dispatcher would swallow the data before the sub-hook saw it.
 fn spawn(path: &PathBuf, args: &[OsString]) -> std::io::Result<std::process::Child> {
-    Command::new(path)
-        .args(args)
+    let mut cmd = command_for(path);
+    cmd.args(args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
+}
+
+/// Windows has NO shebang support: `CreateProcess` on a shell script fails with
+/// "%1 is not a valid Win32 application" (os error 193). The kernel does this
+/// for us on Unix, so there the path is spawned directly.
+///
+/// On Windows we emulate it — read the `#!` line and invoke that interpreter
+/// with the script as its argument. The interpreter is reduced to its basename
+/// (`/bin/sh` → `sh`) because the Unix absolute path does not exist there;
+/// Git for Windows puts `sh` on PATH, which is what every shim needs.
+/// `/usr/bin/env foo` is unwrapped to `foo` for the same reason.
+///
+/// Found by the Windows CI job: every sub-hook the dispatcher spawned failed
+/// with error 193.
+#[cfg(windows)]
+fn command_for(path: &PathBuf) -> Command {
+    use std::io::{BufRead, BufReader};
+    let interpreter = std::fs::File::open(path).ok().and_then(|f| {
+        let mut first = String::new();
+        BufReader::new(f).read_line(&mut first).ok()?;
+        let rest = first.trim_end().strip_prefix("#!")?.trim();
+        let mut parts = rest.split_whitespace();
+        let prog = parts.next()?;
+        let prog = prog.rsplit('/').next().unwrap_or(prog);
+        // `#!/usr/bin/env node` → node
+        if prog == "env" {
+            parts.next().map(str::to_owned)
+        } else {
+            Some(prog.to_owned())
+        }
+    });
+    match interpreter {
+        Some(i) => {
+            let mut c = Command::new(i);
+            c.arg(path);
+            c
+        }
+        None => Command::new(path),
+    }
+}
+
+#[cfg(not(windows))]
+fn command_for(path: &PathBuf) -> Command {
+    Command::new(path)
 }
 
 /// Exit code of a child, mapping "killed by signal" to a non-zero code so a
