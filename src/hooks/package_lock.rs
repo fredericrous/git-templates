@@ -6,7 +6,6 @@
 //! another's.
 
 use super::common::{fail, hl, ok, repo_root, staged_files, warn};
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 fn dir_of(path: &str) -> &str {
@@ -67,6 +66,7 @@ pub fn classify(staged: &[String], lock_exists: impl Fn(&str) -> bool) -> Verdic
 /// configured". Headless callers bypass with `git -c hook.skip=package-lock`.
 #[cfg(unix)]
 fn confirm() -> bool {
+    use std::io::{BufRead, BufReader};
     let Ok(tty) = std::fs::File::open("/dev/tty") else {
         return false;
     };

@@ -1,43 +1,47 @@
-#!/bin/zsh
-# Semantic-validate staged Argo Workflow manifests with `argo lint --offline`.
-# Catches what kubeconform's schema check can't: bad template references,
-# undefined entrypoints, broken DAG dependencies, invalid task wiring.
-# Only runs when the argo CLI is installed — otherwise warns and skips so
-# the hook doesn't gate on every developer having the toolchain.
+#!/bin/sh
+# git-templates hook shim → the githooks binary.
+#
+# One shim serves every hook: it passes its own filename through, so the binary
+# knows which hook to run. Dispatchers (pre-commit, pre-push) and ported leaf
+# hooks use the identical file.
 # Author: https://github.com/fredericrous
-ERROR_SIGN=$'  \033[38;5;160m✗\033[0m'
-VALID_SIGN=$'  \033[38;5;112m✓\033[0m'
-WARNING_SIGN=$'  \033[38;5;208m!\033[0m'
+#
+# POSIX sh, not zsh: this must run wherever git does, including Git for Windows
+# (which ships sh but not zsh).
+#
+# Resolution order matters more than it looks. Git hooks do NOT inherit an
+# interactive shell's PATH: GUI clients (VS Code, Tower, JetBrains) launch git
+# with an environment that often lacks ~/.local/bin or ~/.cargo/bin. A shim that
+# only did `exec githooks` would work in the terminal and fail in the GUI. So:
+#   1. $GIT_HOOKS_BIN   — escape hatch; also how `make test` points at target/debug
+#   2. __GITHOOKS_BIN__ — absolute path written in by `make install`, when
+#                         installing to a custom INSTALL_BIN_DIR
+#   3. $HOME/.local/bin — the default install location, resolved at RUNTIME so
+#                         this template stays machine-agnostic. Without it, a
+#                         repo created by `git init` from a template dir that is
+#                         the git checkout itself (the usual setup here — the
+#                         XDG path symlinks to the repo) never gets that token
+#                         substituted and would depend on PATH after all.
+#   4. PATH             — last resort
+# and if none resolve, FAIL LOUDLY. Never skip a check silently: a hook that
+# quietly does nothing is worse than one that is missing.
+set -e
+HOOKS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HOOK_NAME=$(basename -- "$0")
 
-# Only consider staged k8s-ish YAML — same prefix set as the kubeconform
-# and kube-linter hooks.
-STAGED=`git diff --diff-filter=d --cached --name-only | grep -E '^(kubernetes|manifests|charts?|k8s|helm|deploy)/.*\.ya?ml$'`
-[ ${#STAGED} -lt 1 ] && exit 0
-
-# Of those, keep only files that declare an Argo workflow kind. Anything
-# else (Deployments, ConfigMaps, Helm values) is out of scope here.
-typeset -a WF
-for f in ${(f)STAGED}; do
-    if grep -qE '^kind: (Workflow|CronWorkflow|WorkflowTemplate|ClusterWorkflowTemplate)$' "$f" 2>/dev/null; then
-        WF+=("$f")
-    fi
-done
-[ ${#WF} -lt 1 ] && exit 0
-
-# argo CLI required. Soft-fail so a missing toolchain doesn't block the
-# commit (the CI argo-lint job is the hard gate).
-if ! type argo > /dev/null; then
-    printf "$WARNING_SIGN Argo workflow manifests staged. Skipping argo lint; install: \033[38;5;208margo\033[0m\n"
-    exit 0
-fi
-
-# --offline: no cluster needed; inline templates only (this is what the
-# repo uses). Flux ${VAR} postBuild placeholders are inert strings to the
-# linter; Argo {{...}} templating is what it actually checks.
-OUT=`argo lint --offline ${WF} 2>&1`
-if [ $? -ne 0 ]; then
-    printf "$ERROR_SIGN argo lint failed:\n"
-    print -r -- "$OUT"
+if [ -n "$GIT_HOOKS_BIN" ] && [ -x "$GIT_HOOKS_BIN" ]; then
+    BIN="$GIT_HOOKS_BIN"
+elif [ -x "__GITHOOKS_BIN__" ]; then
+    BIN="__GITHOOKS_BIN__"
+elif [ -x "$HOME/.local/bin/githooks" ]; then
+    BIN="$HOME/.local/bin/githooks"
+elif command -v githooks > /dev/null 2>&1; then
+    BIN=githooks
+else
+    printf '  \033[38;5;160m✗\033[0m githooks binary not found — hooks cannot run.\n' >&2
+    printf '    Looked at: $GIT_HOOKS_BIN, the baked path, ~/.local/bin, then PATH.\n' >&2
+    printf '    Reinstall with \033[38;5;208mmake install\033[0m in git-templates.\n' >&2
     exit 1
 fi
-printf "$VALID_SIGN argo lint passed (${#WF} workflow manifest$([ ${#WF} -gt 1 ] && echo 's'))\n"
+
+exec "$BIN" --hooks-dir "$HOOKS_DIR" "$HOOK_NAME" "$@"

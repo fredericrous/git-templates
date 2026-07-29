@@ -5,6 +5,7 @@ pub mod ban_terms;
 pub mod branch_pattern;
 pub mod commit_msg;
 pub mod common;
+pub mod k8s;
 pub mod lint_js;
 pub mod lint_json_yaml;
 pub mod merge_conflict;

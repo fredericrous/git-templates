@@ -1,84 +1,47 @@
-#!/bin/zsh
-# Validate staged Kubernetes manifests with kustomize build | kubeconform.
-# Only runs when BOTH tools are installed — otherwise warns and skips so
-# the hook doesn't gate on every developer having the toolchain.
-# Author: https://github.com/fredericrous
-ERROR_SIGN="  [38;5;160m✗[0m"
-VALID_SIGN="  [38;5;112m✓[0m"
-WARNING_SIGN="  [38;5;208m![0m"
-
-# Trigger only when staged paths look kubernetes-ish — same prefix set as
-# pre-commit-kube-linter.zsh.
-STAGED=`git diff --diff-filter=d --cached --name-only | grep -E '^(kubernetes|manifests|charts?|k8s|helm|deploy)/.*\.ya?ml$'`
-[ ${#STAGED} -lt 1 ] && exit 0
-
-# Both tools required. Name the missing one(s) so the operator knows what
-# to install. Soft-fail.
-MISSING=()
-type kustomize > /dev/null || MISSING+=("kustomize")
-type kubeconform > /dev/null || MISSING+=("kubeconform")
-if [ ${#MISSING} -gt 0 ]; then
-    printf "$WARNING_SIGN Kubernetes manifests staged. Skipping kubeconform; install: [38;5;208m${(j:, :)MISSING}[0m\n"
-    exit 0
-fi
-
-# Find each kustomization root whose subtree contains a staged file.
-# A "kustomization root" is any dir containing kustomization.yaml or .yml.
-# We walk up from each staged file's parent until we find one (or hit the
-# repo root).
-typeset -aU ROOTS
-for f in ${(f)STAGED}; do
-    dir=$(dirname "$f")
-    while [ "$dir" != "." ] && [ "$dir" != "/" ]; do
-        if [ -f "$dir/kustomization.yaml" ] || [ -f "$dir/kustomization.yml" ]; then
-            ROOTS+=("$dir")
-            break
-        fi
-        dir=$(dirname "$dir")
-    done
-done
-
-# Nothing under a kustomization root — exit silently (raw-YAML validation
-# is out of scope; project either uses kustomize or it doesn't).
-[ ${#ROOTS} -lt 1 ] && exit 0
-
-# kubeconform validates CORE Kubernetes kinds against the built-in schema.
-# We deliberately do NOT pull an external CRD catalog (the datree/datreeio
-# CRDs-catalog is unmaintained — Datree itself is EOL — and its cilium schema
-# typed CIDR fields IPv4-only, false-failing IPv6 policies). CRDs are skipped
-# here (--ignore-missing-schemas) and covered elsewhere in the stack: Kyverno
-# CLI (policy), Trivy (misconfig) and each operator's admission webhook.
+#!/bin/sh
+# git-templates hook shim → the githooks binary.
 #
-# Optional escape hatch: a repo-local `.kubeconform-skip` file (one Kind per
-# line, `#` comments) force-skips kinds even if a schema is supplied — for the
-# day someone vendors local CRD schemas.
-SKIP_ARGS=()
-if [ -f .kubeconform-skip ]; then
-    SKIP_KINDS=$(grep -vE '^\s*(#|$)' .kubeconform-skip | paste -sd, - | sed 's/ //g')
-    [ -n "$SKIP_KINDS" ] && SKIP_ARGS=(--skip "$SKIP_KINDS")
-fi
+# One shim serves every hook: it passes its own filename through, so the binary
+# knows which hook to run. Dispatchers (pre-commit, pre-push) and ported leaf
+# hooks use the identical file.
+# Author: https://github.com/fredericrous
+#
+# POSIX sh, not zsh: this must run wherever git does, including Git for Windows
+# (which ships sh but not zsh).
+#
+# Resolution order matters more than it looks. Git hooks do NOT inherit an
+# interactive shell's PATH: GUI clients (VS Code, Tower, JetBrains) launch git
+# with an environment that often lacks ~/.local/bin or ~/.cargo/bin. A shim that
+# only did `exec githooks` would work in the terminal and fail in the GUI. So:
+#   1. $GIT_HOOKS_BIN   — escape hatch; also how `make test` points at target/debug
+#   2. __GITHOOKS_BIN__ — absolute path written in by `make install`, when
+#                         installing to a custom INSTALL_BIN_DIR
+#   3. $HOME/.local/bin — the default install location, resolved at RUNTIME so
+#                         this template stays machine-agnostic. Without it, a
+#                         repo created by `git init` from a template dir that is
+#                         the git checkout itself (the usual setup here — the
+#                         XDG path symlinks to the repo) never gets that token
+#                         substituted and would depend on PATH after all.
+#   4. PATH             — last resort
+# and if none resolve, FAIL LOUDLY. Never skip a check silently: a hook that
+# quietly does nothing is worse than one that is missing.
+set -e
+HOOKS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HOOK_NAME=$(basename -- "$0")
 
-OVERALL=0
-for root in $ROOTS; do
-    # `kustomize build` errors stream to stderr; the pipe still captures
-    # stdout. Pipefail catches a build failure even when kubeconform
-    # would otherwise consume an empty input cleanly.
-    setopt local_options pipefail
-    kustomize build "$root" 2>&1 | \
-        kubeconform \
-          --strict \
-          --ignore-missing-schemas \
-          --schema-location default \
-          $SKIP_ARGS \
-          --summary -
-    rc=$?
-    if [ $rc -ne 0 ]; then
-        printf "$ERROR_SIGN kubeconform failed for $root\n"
-        OVERALL=1
-    fi
-done
-
-if [ $OVERALL -ne 0 ]; then
+if [ -n "$GIT_HOOKS_BIN" ] && [ -x "$GIT_HOOKS_BIN" ]; then
+    BIN="$GIT_HOOKS_BIN"
+elif [ -x "__GITHOOKS_BIN__" ]; then
+    BIN="__GITHOOKS_BIN__"
+elif [ -x "$HOME/.local/bin/githooks" ]; then
+    BIN="$HOME/.local/bin/githooks"
+elif command -v githooks > /dev/null 2>&1; then
+    BIN=githooks
+else
+    printf '  \033[38;5;160m✗\033[0m githooks binary not found — hooks cannot run.\n' >&2
+    printf '    Looked at: $GIT_HOOKS_BIN, the baked path, ~/.local/bin, then PATH.\n' >&2
+    printf '    Reinstall with \033[38;5;208mmake install\033[0m in git-templates.\n' >&2
     exit 1
 fi
-printf "$VALID_SIGN kubeconform passed (${#ROOTS} kustomization root$([ ${#ROOTS} -gt 1 ] && echo 's'))\n"
+
+exec "$BIN" --hooks-dir "$HOOKS_DIR" "$HOOK_NAME" "$@"

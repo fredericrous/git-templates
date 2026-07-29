@@ -78,6 +78,79 @@ jobs:
           done
           exit $rc
 
+  # Phase 2 of docs/rust-migration.md. Only meaningful now that no hook is zsh:
+  # until this batch, a real commit on Windows failed the moment any applicable
+  # hook was a zsh script Git for Windows cannot execute.
+  #
+  # The zsh SUITES cannot run here — they are zsh scripts, and porting 19 of
+  # them is a separate job. So this proves the two things that actually matter
+  # on Windows: the binary's own tests pass, and a real `git commit` goes
+  # through the shims end to end. Git for Windows ships `sh`, which is what the
+  # shims are.
+  windows:
+    name: windows smoke
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - run: cargo test
+
+      - name: A real commit runs through the hooks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release
+          BIN="$PWD/target/release/githooks.exe"
+          [ -x "$BIN" ] || BIN="$PWD/target/release/githooks"
+
+          repo=$(mktemp -d)/r && mkdir -p "$repo" && cd "$repo"
+          # --template= (empty): without it `git init` copies the MACHINE's
+          # installed hooks in and the smoke would test those, not these.
+          git init -q --template= .
+          git config user.email ci@example.com
+          git config user.name "windows ci"
+
+          mkdir -p .git/hooks
+          for h in commit-msg prepare-commit-msg pre-commit; do
+            cp "$GITHUB_WORKSPACE/templates/hooks/$h" ".git/hooks/$h"
+            sed -i "s|__GITHOOKS_BIN__|$BIN|g" ".git/hooks/$h"
+            chmod +x ".git/hooks/$h"
+          done
+          # sub-hooks the dispatcher will find
+          for h in pre-commit-merge-conflict.zsh pre-commit-package-lock.zsh; do
+            cp "$GITHUB_WORKSPACE/templates/hooks/$h" ".git/hooks/$h"
+            sed -i "s|__GITHOOKS_BIN__|$BIN|g" ".git/hooks/$h"
+            chmod +x ".git/hooks/$h"
+          done
+
+          echo "hello" > a.txt && git add a.txt
+          git commit -m "feat: a windows commit through the rust hooks"
+
+          # commit-msg must have rewritten the subject with the gitmoji prefix —
+          # proof the hook ran and edited the message, not merely exited 0.
+          # The commit must EXIST before its subject means anything: an empty
+          # subject from a failed commit would otherwise satisfy a naive
+          # "differs from the plain text" check.
+          git rev-parse --verify HEAD > /dev/null 2>&1 \
+            || { echo "::error::commit did not happen"; exit 1; }
+          subject=$(git log -1 --format=%s)
+          echo "subject: $subject"
+          case "$subject" in
+            *"feat: a windows commit through the rust hooks") ;;
+            *) echo "::error::commit-msg did not run"; exit 1 ;;
+          esac
+          [ "$subject" = "feat: a windows commit through the rust hooks" ] \
+            && { echo "::error::gitmoji prefix missing — hook did not rewrite"; exit 1; }
+          echo "windows end-to-end OK"
+
   test:
     name: hooks (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
