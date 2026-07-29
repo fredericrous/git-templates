@@ -18,6 +18,7 @@ use std::process::{Command, Stdio};
 mod dispatch;
 mod git;
 mod hooks;
+mod registry;
 mod ui;
 
 fn main() {
@@ -57,29 +58,15 @@ fn main() {
         .unwrap_or(&hook)
         .to_owned();
 
-    let code = match hook.as_str() {
-        "pre-commit" => dispatch::pre_commit(&hooks_dir, &rest),
-        "pre-push" => dispatch::pre_push(&hooks_dir, &rest),
-        "pre-push-branch-pattern" => hooks::branch_pattern::run(&rest),
-        "pre-commit-usual-name" => hooks::usual_name::run(&rest),
-        "prepare-commit-msg" => hooks::prepare_commit_msg::run(&rest),
-        "pre-push-pull-rebase" => hooks::pull_rebase::run(&rest),
-        "commit-msg" => hooks::commit_msg::run(&rest),
-        "pre-commit-ban-terms" => hooks::ban_terms::run(&hook, &rest),
-        "pre-push-run-tests-js" => hooks::run_tests::run(&rest),
-        "pre-commit-merge-conflict" => hooks::merge_conflict::run(&hook, &rest),
-        "pre-commit-lint-json-yaml" => hooks::lint_json_yaml::run(&rest),
-        "pre-commit-yamllint" => hooks::yamllint::run(&rest),
-        "pre-commit-package-lock" => hooks::package_lock::run(&rest),
-        "pre-commit-lint-js" => hooks::lint_js::run(&rest),
-        "pre-commit-prettier" => hooks::prettier::run(&rest),
-        "pre-commit-ruff" => hooks::python_tools::ruff(&rest),
-        "pre-commit-pyright" => hooks::python_tools::pyright(&rest),
-        "pre-commit-argo-lint" => hooks::k8s::argo_lint(&rest),
-        "pre-commit-kube-linter" => hooks::k8s::kube_linter(&rest),
-        "pre-commit-kubeconform" => hooks::k8s::kubeconform(&rest),
-        other => {
-            eprintln!("githooks: unknown hook {other:?}");
+    let ctx = registry::Ctx {
+        name: &hook,
+        args: &rest,
+        hooks_dir: &hooks_dir,
+    };
+    let code = match registry::lookup(&hook) {
+        Some(f) => f(&ctx),
+        None => {
+            eprintln!("githooks: unknown hook {hook:?}");
             2
         }
     };
