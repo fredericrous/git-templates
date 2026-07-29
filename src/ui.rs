@@ -5,3 +5,8 @@ pub const VALID_SIGN: &str = "  \u{1b}[38;5;112m✓\u{1b}[0m";
 pub const ERROR_SIGN: &str = "  \u{1b}[38;5;160m✗\u{1b}[0m";
 #[allow(dead_code)]
 pub const WARNING_SIGN: &str = "  \u{1b}[38;5;208m!\u{1b}[0m";
+
+/// Wrap text in a 256-colour SGR sequence.
+pub fn color(text: &str, code: &str) -> String {
+    format!("\u{1b}[38;5;{code}m{text}\u{1b}[0m")
+}
