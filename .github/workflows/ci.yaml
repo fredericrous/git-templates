@@ -101,6 +101,8 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
+      # The ported suites run HERE now — Phase 4's point is that Windows gets
+      # the real tests, not just a smoke, because they no longer need zsh.
       - run: cargo test
 
       - name: A real commit runs through the hooks
