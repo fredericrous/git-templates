@@ -29,6 +29,24 @@ defaults:
     shell: bash
 
 jobs:
+  rust:
+    name: rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      # The behavioural coverage lives in the zsh suites (they drive the binary
+      # through the shims); these two just keep the source honest.
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+
   syntax:
     name: syntax
     runs-on: ubuntu-latest
@@ -55,6 +73,10 @@ jobs:
             case "$(head -1 "$f")" in
               *zsh) zsh -n "$f" || { echo "::error file=$f::zsh parse error"; rc=1; } ;;
               *node) node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; } ;;
+              # the dispatcher shims are POSIX sh now — without this arm they
+              # would match nothing and be silently unchecked
+              */sh) sh -n "$f" || { echo "::error file=$f::sh parse error"; rc=1; } ;;
+              *) echo "::error file=$f::unrecognised shebang: $(head -1 "$f")"; rc=1 ;;
             esac
           done
           exit $rc
@@ -104,7 +126,7 @@ jobs:
       - name: Hard dependencies are present
         run: |
           rc=0
-          for bin in zsh git node npm fd rg; do
+          for bin in zsh git node npm fd rg cargo; do
             if command -v "$bin" > /dev/null; then
               printf '  ok   %-5s %s\n' "$bin" "$(command -v "$bin")"
             else
