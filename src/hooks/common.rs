@@ -96,15 +96,20 @@ pub fn which(tool: &str) -> Option<String> {
         Vec::new()
     };
     for dir in std::env::split_paths(&path) {
-        let bare = dir.join(tool);
-        if bare.is_file() {
-            return Some(bare.to_string_lossy().into_owned());
-        }
+        // On Windows the EXTENSION forms come first. A node install ships both
+        // `npm` (an extensionless shell script, for MSYS) and `npm.cmd` in the
+        // same directory; preferring the bare name hands CreateProcess a shell
+        // script it cannot execute — "%1 is not a valid Win32 application" —
+        // and the hook reports an installed tool as broken.
         for e in &exts {
             let c = dir.join(format!("{tool}{e}"));
             if c.is_file() {
                 return Some(c.to_string_lossy().into_owned());
             }
+        }
+        let bare = dir.join(tool);
+        if bare.is_file() {
+            return Some(bare.to_string_lossy().into_owned());
         }
     }
     None
@@ -187,6 +192,26 @@ mod tests {
     fn which_finds_a_real_binary_and_not_a_fake_one() {
         assert!(which("git").is_some());
         assert!(which("definitely-not-a-real-binary-xyz").is_none());
+    }
+
+    /// On Windows a tool can exist BOTH as an extensionless shell script and as
+    /// a .cmd/.exe in the same directory; only the latter is executable by
+    /// CreateProcess, so the extension forms must win.
+    #[test]
+    #[cfg(windows)]
+    fn windows_prefers_an_executable_extension_over_a_bare_file() {
+        let dir = std::env::temp_dir().join("githooks-which-order");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("faketool"), "#!/bin/sh\n").unwrap();
+        std::fs::write(dir.join("faketool.cmd"), "@echo off\n").unwrap();
+        let saved = std::env::var_os("PATH");
+        std::env::set_var("PATH", &dir);
+        let found = which("faketool").unwrap();
+        if let Some(p) = saved {
+            std::env::set_var("PATH", p);
+        }
+        assert!(found.ends_with(".cmd"), "got {found}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
