@@ -31,9 +31,6 @@ pub fn repo_root() -> String {
 
 /// Resolve a tool, preferring the repo's PINNED copy so the hook matches CI.
 ///
-/// Unused until the node-driven hooks (lint-js, prettier) land in the next
-/// batch; kept here rather than written twice.
-#[allow(dead_code)]
 ///
 /// Order: `<root>/node_modules/.bin/<tool>`, then the MAIN worktree's (a linked
 /// worktree has no node_modules of its own — this is why the shell version
@@ -54,6 +51,26 @@ pub fn resolve_tool(root: &str, tool: &str) -> Option<Vec<String>> {
     }
     if which(tool).is_some() {
         return Some(vec![tool.to_string()]);
+    }
+    // `npx --no-install`: never silently download a random latest version — a
+    // hook that quietly pulls a different linter than CI uses is worse than one
+    // that skips.
+    if which("npx").is_some()
+        && Command::new("npx")
+            .args(["--no-install", tool, "--version"])
+            .current_dir(root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    {
+        return Some(vec![
+            "npx".to_string(),
+            "--no-install".to_string(),
+            tool.to_string(),
+        ]);
     }
     None
 }

@@ -1,82 +1,47 @@
-#!/bin/zsh
-# Ruff lint + format check on staged Python files, scoped to repos that
-# opt into ruff. Catches BOTH classes a CI ruff step enforces:
-#   - `ruff check`        -- lint rules
-#   - `ruff format --check` -- formatting
-# CI runs these as TWO SEPARATE steps, so a clean `ruff check` does NOT
-# imply a clean `ruff format`. Skipping the format check locally is how a
-# format-only failure slips through to CI (burned 2026-06-02).
+#!/bin/sh
+# git-templates hook shim → the githooks binary.
 #
-# Scoping: only runs when the repo opts into ruff — a `[tool.ruff]` table
-# in pyproject.toml at the git root, or a ruff.toml / .ruff.toml. Without
-# that signal we skip, so this never fires in repos that don't use ruff.
-#
-# Binary resolution: prefer a project-local .venv/bin/ruff (pinned
-# version), then `ruff` on PATH, then `uvx ruff` (matches uv-based CI).
-# Falls back to warn+skip when none resolve. `--force-exclude` makes ruff
-# honour the repo's own exclude config even though we pass explicit paths.
+# One shim serves every hook: it passes its own filename through, so the binary
+# knows which hook to run. Dispatchers (pre-commit, pre-push) and ported leaf
+# hooks use the identical file.
 # Author: https://github.com/fredericrous
-ERROR_SIGN=$'  \e[38;5;160m✗\e[0m'
-VALID_SIGN=$'  \e[38;5;112m✓\e[0m'
-WARNING_SIGN=$'  \e[38;5;208m!\e[0m'
+#
+# POSIX sh, not zsh: this must run wherever git does, including Git for Windows
+# (which ships sh but not zsh).
+#
+# Resolution order matters more than it looks. Git hooks do NOT inherit an
+# interactive shell's PATH: GUI clients (VS Code, Tower, JetBrains) launch git
+# with an environment that often lacks ~/.local/bin or ~/.cargo/bin. A shim that
+# only did `exec githooks` would work in the terminal and fail in the GUI. So:
+#   1. $GIT_HOOKS_BIN   — escape hatch; also how `make test` points at target/debug
+#   2. __GITHOOKS_BIN__ — absolute path written in by `make install`, when
+#                         installing to a custom INSTALL_BIN_DIR
+#   3. $HOME/.local/bin — the default install location, resolved at RUNTIME so
+#                         this template stays machine-agnostic. Without it, a
+#                         repo created by `git init` from a template dir that is
+#                         the git checkout itself (the usual setup here — the
+#                         XDG path symlinks to the repo) never gets that token
+#                         substituted and would depend on PATH after all.
+#   4. PATH             — last resort
+# and if none resolve, FAIL LOUDLY. Never skip a check silently: a hook that
+# quietly does nothing is worse than one that is missing.
+set -e
+HOOKS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HOOK_NAME=$(basename -- "$0")
 
-staged=(${(f)"$(git diff --diff-filter=d --cached --name-only)"})
-(( ${#staged} == 0 )) && exit 0
-files=(${(f)"$(printf '%s\n' $staged | grep -E '\.pyi?$')"})
-(( ${#files} == 0 )) && exit 0
-
-ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-
-# --- decide whether this repo opts into ruff -------------------------
-# (N) null-glob: unmatched patterns vanish instead of erroring (zsh NOMATCH).
-has_config=0
-config_matches=("$ROOT"/ruff.toml(N.) "$ROOT"/.ruff.toml(N.))
-(( ${#config_matches} > 0 )) && has_config=1
-if (( ! has_config )) && [[ -f "$ROOT/pyproject.toml" ]]; then
-    grep -q '^\[tool\.ruff' "$ROOT/pyproject.toml" && has_config=1
-fi
-(( ! has_config )) && exit 0
-
-# --- resolve a ruff binary (prefer the repo's PINNED ruff over latest) -
-# `uv run --no-sync ruff` is the SAME lockfile-pinned ruff CI runs, so try it
-# first. It needs a synced venv (the main checkout has one); a linked worktree
-# doesn't, so fall back to the worktree's own .venv, then the MAIN worktree's
-# .venv (shared git-common-dir's parent) so worktrees still use the SAME pin.
-# PATH ruff next; only then warn + fall back to `uvx ruff` (unpinned LATEST),
-# which flags lint/format the CI-pinned ruff doesn't — phantom failures.
-common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
-main_venv_ruff="${common_dir:h}/.venv/bin/ruff"
-
-if type uv > /dev/null 2>&1 && uv run --no-sync ruff --version > /dev/null 2>&1; then
-    RUFF=(uv run --no-sync ruff)
-elif [[ -x "$ROOT/.venv/bin/ruff" ]]; then
-    RUFF=("$ROOT/.venv/bin/ruff")
-elif [[ -n "$common_dir" && -x "$main_venv_ruff" ]]; then
-    RUFF=("$main_venv_ruff")
-elif type ruff > /dev/null 2>&1; then
-    RUFF=(ruff)
-elif type uvx > /dev/null 2>&1; then
-    printf "$WARNING_SIGN No pinned ruff found (.venv); using \033[38;5;208muvx ruff\033[0m (latest) — may flag issues the CI-pinned ruff doesn't.\n"
-    RUFF=(uvx ruff)
+if [ -n "$GIT_HOOKS_BIN" ] && [ -x "$GIT_HOOKS_BIN" ]; then
+    BIN="$GIT_HOOKS_BIN"
+elif [ -x "__GITHOOKS_BIN__" ]; then
+    BIN="__GITHOOKS_BIN__"
+elif [ -x "$HOME/.local/bin/githooks" ]; then
+    BIN="$HOME/.local/bin/githooks"
+elif command -v githooks > /dev/null 2>&1; then
+    BIN=githooks
 else
-    printf "$WARNING_SIGN ruff config found but no ruff/uvx binary. Install ruff or uv.\n"
-    exit 0
+    printf '  \033[38;5;160m✗\033[0m githooks binary not found — hooks cannot run.\n' >&2
+    printf '    Looked at: $GIT_HOOKS_BIN, the baked path, ~/.local/bin, then PATH.\n' >&2
+    printf '    Reinstall with \033[38;5;208mmake install\033[0m in git-templates.\n' >&2
+    exit 1
 fi
 
-fail=0
-
-if ! "${RUFF[@]}" check --force-exclude $files > /dev/null 2>&1; then
-    printf "$ERROR_SIGN Ruff lint issues. Run \033[38;5;208mruff check --fix\033[0m. Offenders:\n"
-    "${RUFF[@]}" check --force-exclude $files 2>&1 | sed 's/^/      /'
-    fail=1
-fi
-
-if ! "${RUFF[@]}" format --check --force-exclude $files > /dev/null 2>&1; then
-    printf "$ERROR_SIGN Ruff found unformatted files. Run \033[38;5;208mruff format\033[0m on:\n"
-    "${RUFF[@]}" format --check --force-exclude $files 2>&1 \
-        | grep -iE 'would reformat' | sed 's/^/      /'
-    fail=1
-fi
-
-(( fail )) && exit 1
-printf "$VALID_SIGN Ruff passed\n"
+exec "$BIN" --hooks-dir "$HOOKS_DIR" "$HOOK_NAME" "$@"
