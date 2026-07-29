@@ -145,3 +145,41 @@ fn pre_push_stops_at_the_first_failure() {
     assert!(run.says("Error raised by hook"));
     assert!(run.says("pre-push-mmm"));
 }
+
+/// Repos seeded BEFORE the shim rename still have `.git/hooks/` entries called
+/// `pre-commit-ban-terms.js` and `pre-push-pull-rebase.zsh`, and each shim
+/// passes its own filename through as the hook name. The binary must keep
+/// accepting those forever, or updating it before sweeping a repo makes that
+/// repo uncommittable — an unknown hook exits 2.
+///
+/// This is the test that lets the binary and the 96 repos move independently.
+#[test]
+fn the_old_suffixed_names_still_dispatch() {
+    let r = Repo::new();
+    for (old, new) in [
+        ("pre-commit-ban-terms.js", "pre-commit-ban-terms"),
+        ("pre-push-pull-rebase.zsh", "pre-push-pull-rebase"),
+        ("pre-commit-merge-conflict.zsh", "pre-commit-merge-conflict"),
+    ] {
+        let run = r.hook(old, &[]);
+        assert_ne!(
+            run.code, 2,
+            "{old} was rejected as unknown; a pre-rename repo could not commit"
+        );
+        assert!(
+            !run.says("unknown hook"),
+            "{old} must resolve to {new}, got: {}",
+            run.stderr
+        );
+    }
+}
+
+/// The inverse: a name that really is unknown must still be loud, or the
+/// stripping above would quietly swallow typos.
+#[test]
+fn a_genuinely_unknown_hook_still_exits_two() {
+    let r = Repo::new();
+    let run = r.hook("pre-commit-not-a-hook", &[]);
+    assert_eq!(run.code, 2);
+    assert!(run.says("unknown hook"));
+}

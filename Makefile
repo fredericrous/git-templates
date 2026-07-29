@@ -91,4 +91,10 @@ bake-shims:
 		fi; \
 	done
 
-.PHONY: all chmodx build test install bake-shims
+# Push the shim SET to every repo. Only needed when a hook is added, removed
+# or renamed — ordinary binary fixes reach all repos via `make install`, since
+# every shim points at the one binary. Dry-run: `make propagate`.
+propagate:
+	@./scripts/propagate.sh $(if $(APPLY),--apply,)
+
+.PHONY: all chmodx build test install bake-shims propagate

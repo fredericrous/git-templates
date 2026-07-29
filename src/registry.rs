@@ -95,22 +95,54 @@ mod tests {
     /// handler with no shim is dead code that ships forever. Both were possible
     /// while the name lived in a match arm and in a filename with nothing
     /// comparing them.
+    /// pre-push is SERIAL and fail-fast, and the order is the glob's — so the
+    /// shipped filenames decide it. Cheap structural checks run before the
+    /// expensive suite: reject a bad branch name and rebase before paying for
+    /// the tests, not after.
+    ///
+    /// `pre_push_runs_sub_hooks_in_glob_order` proves the dispatcher sorts, using
+    /// synthetic aaa/mmm/zzz names. It cannot notice that a RENAME reordered the
+    /// real ones — dropping the `.zsh`/`.js` suffixes was very nearly such a
+    /// change. This pins the actual shipped names.
+    #[test]
+    fn the_shipped_pre_push_hooks_sort_cheapest_first() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/templates/hooks");
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("templates/hooks")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("pre-push-"))
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "pre-push-branch-pattern",
+                "pre-push-pull-rebase",
+                "pre-push-run-tests-js",
+            ],
+            "pre-push order is decided by these filenames"
+        );
+    }
+
     #[test]
     fn every_shim_has_a_handler_and_vice_versa() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/templates/hooks");
         let mut shims = BTreeSet::new();
         for e in std::fs::read_dir(dir).expect("templates/hooks").flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
-            if name == "package.json" {
-                continue;
-            }
             // Only the shims dispatch to the binary; anything else is not ours.
             let body = std::fs::read_to_string(e.path()).unwrap_or_default();
             if !body.contains("--hooks-dir") {
                 continue;
             }
-            let stem = name.split_once('.').map(|(s, _)| s).unwrap_or(&name);
-            shims.insert(stem.to_string());
+            assert!(
+                !name.contains('.'),
+                "shim {name:?} carries an extension: the filename is what the \
+                 dispatcher passes as the hook name, so a suffix here has to be \
+                 stripped in main.rs forever and lies about the language"
+            );
+            shims.insert(name);
         }
         let registered: BTreeSet<String> = REGISTRY.iter().map(|(n, _)| n.to_string()).collect();
 

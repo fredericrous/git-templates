@@ -237,10 +237,10 @@ updating the binary updates every repo at once.
    optional or mandatory — see Phase 2. If a Windows user must commit to a repo
    using ruff/eslint/prettier, Phase 3 is part of the Windows story, not a
    follow-up, and the honest total cost is ~1,500 lines rather than ~700.
-6. **Do the shims keep their `.zsh` / `.js` suffixes?** Keeping them means the
-   existing tests and the propagation recipe work untouched; the names just lie
-   about their contents. Renaming is a post-migration tidy-up costing a test
-   edit and a 96-repo sweep.
+6. **Do the shims keep their `.zsh` / `.js` suffixes?** RESOLVED: no, they were
+   dropped after Phase 4. The suffix STRIPPING in `main.rs` stays permanently —
+   it is what lets the binary and the 96 repos move independently, since a repo
+   seeded before the rename still passes the old filename through.
 
 ## Honest cost
 
@@ -332,7 +332,11 @@ no shebang support, so every sub-hook the dispatcher spawned failed with
   over-blanks a regex literal with an escaped slash — a missed warning, not a
   false alarm. Fixing it makes the hook STRICTER, so it needs its own PR and its
   own differential run.
-- **The rename.** Shims still carry `.zsh` / `.js` suffixes that describe
-  nothing. Costs a test edit plus a 96-repo sweep.
-- **`pre-commit-pyright` is installed in 6 of 96 repos** — opt-in by history
-  rather than by design, since the hook already self-scopes on a pyright config.
+- ~~**The rename.**~~ Done. Shims carry no extension; `scripts/propagate.sh`
+  swept all 96. The sharp edge was the dispatcher's `<hook>-*` GLOB: a repo left
+  holding both `pre-commit-ruff.zsh` and `pre-commit-ruff` runs ruff TWICE,
+  silently. Removal and installation therefore happen per repo, in that order,
+  which is why the sweep is a script and not a typed loop.
+- ~~**`pre-commit-pyright` in 6 of 96 repos**~~ Done — it self-scopes on a
+  pyright config, so installing it everywhere changes nothing for the 90 repos
+  without one. `governance-ts` had it for months and it never fired.
