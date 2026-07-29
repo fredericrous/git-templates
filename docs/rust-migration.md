@@ -183,9 +183,14 @@ still-zsh linter hook (a Python repo with `[tool.ruff]` reaching
 `pre-commit-ruff.zsh`) continues to need zsh. Full removal is Phase 3. Requirement
 1 is met for the framework; it is met for every repo only after Phase 3.
 
-`ban-terms` earns a real parser here. Its current comment/string blanker is
-explicitly "not a parser" and mis-handles a regex literal containing an escaped
-slash; a proper tokenizer removes that whole class of false negative.
+`ban-terms` earns a real parser here. Its comment/string blanker is explicitly
+"not a parser" and mis-handles a regex literal containing an escaped slash; a
+proper tokenizer removes that whole class of false negative.
+
+(Written of the JS implementation. The Rust port gained a `Regex` state that
+handles escaped slashes and character classes, so the escaped-slash defect was
+gone by Phase 1 — this paragraph outlived it. The defect that actually
+survived was a different one: see the tokenizer note below.)
 
 **Phase 2 — Windows.** Add `windows-latest` to CI, running the suites for the
 ported hooks only.
@@ -328,10 +333,16 @@ no shebang support, so every sub-hook the dispatcher spawned failed with
 
 - **Phase 4** — port the 19 zsh suites to `cargo test`. Deliberately last: they
   are the migration harness.
-- **The `ban-terms` tokenizer.** The blanker is still not a parser and
-  over-blanks a regex literal with an escaped slash — a missed warning, not a
-  false alarm. Fixing it makes the hook STRICTER, so it needs its own PR and its
-  own differential run.
+- ~~**The `ban-terms` tokenizer.**~~ Done. The documented defect (escaped slash
+  in a regex) turned out to be already fixed by the port's `Regex` state — the
+  note was stale. Probing 20 hard constructs found the real survivor: template
+  literal **substitutions** were blanked as string content, so any banned call
+  written inside `${…}` was missed. Now handled as code, with a DEPTH STACK
+  because substitutions nest.
+
+  Differential over 39,378 real fleet files: blanking changed on 10,567 of them,
+  with 0 new alarms and 0 dropped detections — the path is heavily exercised and
+  the stricter rule costs nothing in false positives.
 - ~~**The rename.**~~ Done. Shims carry no extension; `scripts/propagate.sh`
   swept all 96. The sharp edge was the dispatcher's `<hook>-*` GLOB: a repo left
   holding both `pre-commit-ruff.zsh` and `pre-commit-ruff` runs ruff TWICE,

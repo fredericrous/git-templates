@@ -100,3 +100,33 @@ fn other_file_types_are_ignored() {
     r.stage("notes.md", "debugger;\n");
     assert!(r.hook("pre-commit-ban-terms", &[]).passed());
 }
+
+/// End to end, through stage 1's `git diff -G` prefilter as well as the
+/// blanker: a banned call inside a template substitution is real code and must
+/// be rejected. This was silently accepted before the tokenizer fix.
+#[test]
+fn a_banned_call_inside_a_template_substitution_is_rejected() {
+    assert!(!check("const s = `${fit(1)}`;\n"), "substitution is code");
+    assert!(
+        !check("const s = `${`${it.only(1)}`}`;\n"),
+        "nested substitution is code"
+    );
+    assert!(
+        !check("const s = `${ {a: 1} && fit(2) }`;\n"),
+        "a brace inside the substitution must not end it"
+    );
+}
+
+/// The other direction, which matters more: template TEXT is still a string,
+/// so the stricter blanker must not start alarming on prose.
+#[test]
+fn template_text_is_still_not_code() {
+    for src in [
+        "const s = `fit(`;\n",
+        "const s = `run debugger;`;\n",
+        "const s = `see describe.only in the docs`;\n",
+        "const s = `\\${fit(1)}`;\n",
+    ] {
+        assert!(check(src), "should have been accepted: {src:?}");
+    }
+}
