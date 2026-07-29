@@ -160,6 +160,31 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_githooks")
 }
 
+/// True when a tool the case genuinely needs is absent — and it SAYS SO.
+///
+/// Rust has no native skip: an early `return` reports as a pass, which is the
+/// exact trap the zsh suites already guarded against by printing
+/// "unavailable — skipping". The same phrase is used here so CI's
+/// skip-reporter sees both harnesses, and a suite that quietly did not run
+/// cannot masquerade as one that passed.
+pub fn missing(tool: &str) -> bool {
+    let found = std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path).any(|d| {
+                d.join(tool).is_file()
+                    || (cfg!(windows)
+                        && [".exe", ".cmd", ".bat"]
+                            .iter()
+                            .any(|e| d.join(format!("{tool}{e}")).is_file()))
+            })
+        })
+        .unwrap_or(false);
+    if !found {
+        println!("  ! {tool} unavailable — skipping");
+    }
+    !found
+}
+
 /// Absolute path to the repo's own templates/hooks, for tests that need a shim.
 pub fn template_hook(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
