@@ -2,7 +2,6 @@
 //! markers.
 
 use super::common::{fail, hl, ok};
-use crate::git;
 
 /// The markers, BUILT rather than written.
 ///
@@ -31,35 +30,33 @@ fn is_own_test(file: &str, hook_name: &str) -> bool {
 
 pub fn run(hook_name: &str, _args: &[std::ffi::OsString]) -> i32 {
     let m = markers();
-    // --all-match: only files containing ALL THREE, so a lone rule of `=`
-    // characters in a document is not mistaken for a conflict.
-    let args: Vec<&str> = vec![
-        "grep",
-        "--cached",
-        "-e",
-        &m[0],
-        "--or",
-        "-e",
-        &m[1],
-        "--or",
-        "-e",
-        &m[2],
-        "--all-match",
-        "--files-with-matches",
-    ];
-    let found = git::stdout(&args).unwrap_or_default();
-
-    let files: Vec<&str> = found
-        .lines()
-        .map(str::trim)
-        .filter(|f| !f.is_empty())
+    // Scoped to what this commit STAGES, not the whole index.
+    //
+    // `git grep --cached` scanned every tracked file, so a marker anywhere in
+    // the repo blocked every commit until someone fixed it — including files
+    // this change never touched. That is the argument ban-terms already makes
+    // for its own two-stage design, applied here.
+    //
+    // NOTE: this does NOT remove the need for the self-exclusion below, which
+    // I previously claimed it would. Editing the hook's own test still stages a
+    // file that must contain markers.
+    let staged = super::common::staged_files(&[]);
+    let flagged: Vec<String> = staged
+        .into_iter()
         .filter(|f| !is_own_test(f, hook_name))
+        .filter(|f| {
+            // The STAGED content, not the worktree's: what is being committed
+            // is what matters, and they differ during a partial `git add -p`.
+            crate::git::stdout(&["show", &format!(":{f}")])
+                .map(|c| m.iter().all(|mk| c.contains(mk.as_str())))
+                .unwrap_or(false)
+        })
         .collect();
 
-    if !files.is_empty() {
+    if !flagged.is_empty() {
         fail(&format!(
             "Merge conflict detected in {}",
-            hl(&files.join(", "))
+            hl(&flagged.join(", "))
         ));
         return 1;
     }

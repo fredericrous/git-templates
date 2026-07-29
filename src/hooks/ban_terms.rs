@@ -135,23 +135,68 @@ enum S {
     Single,
     Double,
     Template,
+    Regex,
 }
 
-/// Blank comments and the insides of string/template literals, preserving
+/// Keywords after which a `/` begins a regex, not a division.
+const REGEX_KEYWORDS: [&str; 13] = [
+    "return",
+    "typeof",
+    "case",
+    "in",
+    "of",
+    "delete",
+    "void",
+    "instanceof",
+    "new",
+    "do",
+    "else",
+    "yield",
+    "await",
+];
+
+/// Can a `/` here start a regex? Decided from the last significant code
+/// character, and the word it belongs to when it is one.
+fn regex_can_start(prev: Option<char>, word: &str) -> bool {
+    match prev {
+        // start of input
+        None => true,
+        Some(c) if "(,=:[!&|?{};+-*%~^<>".contains(c) => true,
+        // an identifier or number ends a value → `/` divides it …
+        Some(c) if c.is_alphanumeric() || c == '_' || c == '$' => REGEX_KEYWORDS.contains(&word),
+        // … as do `)` and `]`; `}` is ambiguous and treated as allowing a
+        // regex, since a false alarm is the worse error (see the type doc).
+        Some(_) => false,
+    }
+}
+
+/// Blank comments and the insides of string/template/REGEX literals, preserving
 /// length and line count so offsets still line up — blanked, not deleted, for
 /// that reason.
 ///
-/// NOT a parser. A regex literal containing an escaped slash can be misread as
-/// a comment opener, which OVER-blanks — costing a missed warning rather than a
-/// false alarm. That is the right way round for something standing between a
-/// person and their commit, and it is why this stays a faithful port rather
-/// than a rewrite (see the PR: a stricter tokenizer is a separate change,
-/// because it can newly BLOCK commits).
+/// Now handles regex literals. It previously did not, and `/a\\/b/` read as a
+/// line comment: everything after it on that line was blanked, so a real
+/// `debugger;` sharing the line went unreported. Missed warnings rather than
+/// false alarms, but missed all the same.
+///
+/// Telling a regex from division needs the preceding token, which is why this
+/// is a tokenizer and not a set of rules over characters. The two ways to be
+/// wrong are NOT symmetric:
+///   - division mistaken for a regex → blanks to the next `/`, so a violation
+///     there is MISSED. Safe direction.
+///   - a regex mistaken for division → its contents are scanned as code, so
+///     `/it\\.only/` would be reported as a violation that does not exist.
+///     A false alarm blocking a commit — the direction to avoid, and why the
+///     "regex allowed" set below is generous.
 pub fn blank_non_code(src: &str) -> String {
     let b: Vec<char> = src.chars().collect();
     let mut out = String::with_capacity(src.len());
     let mut state = S::Code;
     let mut i = 0;
+    // The token before the current position, for the regex-vs-division call.
+    let mut prev_significant: Option<char> = None;
+    let mut word = String::new();
+    let mut in_class = false;
     let keep = |c: char| if c == '\n' { '\n' } else { ' ' };
 
     while i < b.len() {
@@ -167,6 +212,11 @@ pub fn blank_non_code(src: &str) -> String {
                     state = S::Block;
                     out.push_str("  ");
                     i += 2;
+                } else if ch == '/' && regex_can_start(prev_significant, &word) {
+                    state = S::Regex;
+                    in_class = false;
+                    out.push(ch);
+                    i += 1;
                 } else if ch == '\'' || ch == '"' || ch == '`' {
                     state = match ch {
                         '\'' => S::Single,
@@ -176,9 +226,43 @@ pub fn blank_non_code(src: &str) -> String {
                     out.push(ch);
                     i += 1;
                 } else {
+                    if !ch.is_whitespace() {
+                        prev_significant = Some(ch);
+                        if ch.is_alphanumeric() || ch == '_' || ch == '$' {
+                            word.push(ch);
+                        } else {
+                            word.clear();
+                        }
+                    }
                     out.push(ch);
                     i += 1;
                 }
+            }
+            S::Regex => {
+                // `\` escapes anything; `[…]` is a class in which `/` is literal.
+                if ch == '\\' {
+                    out.push_str(if next.is_none() { " " } else { "  " });
+                    i += 2;
+                    continue;
+                }
+                if ch == '[' {
+                    in_class = true;
+                } else if ch == ']' {
+                    in_class = false;
+                } else if ch == '/' && !in_class {
+                    state = S::Code;
+                    prev_significant = Some('/');
+                    word.clear();
+                    out.push(ch);
+                    i += 1;
+                    continue;
+                } else if ch == '\n' {
+                    // An unterminated regex cannot span lines — bail back to
+                    // code rather than blanking the rest of the file.
+                    state = S::Code;
+                }
+                out.push(keep(ch));
+                i += 1;
             }
             S::Line => {
                 if ch == '\n' {
@@ -343,6 +427,75 @@ mod tests {
             "real code after the string must survive"
         );
         assert!(!call_of(&blank_non_code(r#"const s = "a\"fit(";"#), "fit"));
+    }
+
+    /// The bug the tokenizer exists for, with the input that ACTUALLY triggers
+    /// it: an escaped slash immediately before the closing one puts two `/`
+    /// characters next to each other in the stream, which the old blanker read
+    /// as a line comment — blanking the rest of the line, so the real
+    /// `debugger;` after it went unreported.
+    ///
+    /// `/a\/b/` does NOT trigger it (the slashes are not adjacent); my first
+    /// version of this test used that and passed against both implementations,
+    /// proving nothing. Differentially confirmed: old exits 0 on these, new
+    /// exits 1.
+    #[test]
+    fn an_escaped_slash_before_the_terminator_no_longer_swallows_the_line() {
+        for src in [
+            r"const re = /a\//; debugger;",
+            r"const re = /\//; debugger;",
+        ] {
+            assert!(
+                bare_debugger(&blank_non_code(src)),
+                "code after the regex must still be scanned: {src}"
+            );
+        }
+        // and the same shape with nothing to find must stay quiet
+        assert!(!bare_debugger(&blank_non_code(
+            r"const re = /a\//; const ok = 1;"
+        )));
+    }
+
+    /// The dangerous direction: a regex mistaken for division would have its
+    /// contents scanned, reporting a violation that does not exist.
+    #[test]
+    fn terms_inside_a_regex_literal_are_not_violations() {
+        for src in [
+            r"const re = /it\.only/;",
+            r"if (x) { const r = /debugger/; }",
+            r"foo(/fdescribe\(/);",
+            r"return /describe\.skip/;",
+            r"const r = /[/]debugger/;", // `/` inside a class does not end it
+        ] {
+            let b = blank_non_code(src);
+            assert!(!bare_debugger(&b), "false alarm: {src}");
+            assert!(!focused_suite(&b), "false alarm: {src}");
+            assert!(!call_of(&b, "fdescribe"), "false alarm: {src}");
+        }
+    }
+
+    /// Division must stay division, or the blanker eats real code.
+    #[test]
+    fn division_is_not_treated_as_a_regex() {
+        let src = "const x = a / b; debugger;";
+        assert!(bare_debugger(&blank_non_code(src)));
+        let src2 = "const x = (a + b) / c; debugger;";
+        assert!(bare_debugger(&blank_non_code(src2)));
+    }
+
+    #[test]
+    fn an_unterminated_regex_does_not_blank_the_rest_of_the_file() {
+        let src = "const r = /oops
+debugger;";
+        assert!(bare_debugger(&blank_non_code(src)));
+    }
+
+    #[test]
+    fn blanking_still_preserves_length_and_lines() {
+        let src = "const re = /a\\/b/;\ndebugger;\n// x\n";
+        let out = blank_non_code(src);
+        assert_eq!(out.len(), src.len());
+        assert_eq!(out.lines().count(), src.lines().count());
     }
 
     #[test]
