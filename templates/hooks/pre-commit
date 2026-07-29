@@ -1,5 +1,9 @@
 #!/bin/sh
-# git-templates dispatcher shim → the githooks binary.
+# git-templates hook shim → the githooks binary.
+#
+# One shim serves every hook: it passes its own filename through, so the binary
+# knows which hook to run. Dispatchers (pre-commit, pre-push) and ported leaf
+# hooks use the identical file.
 # Author: https://github.com/fredericrous
 #
 # POSIX sh, not zsh: this must run wherever git does, including Git for Windows

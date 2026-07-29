@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 mod dispatch;
+mod git;
+mod hooks;
+mod ui;
 
 fn main() {
     let mut args = std::env::args_os().skip(1);
@@ -44,9 +47,20 @@ fn main() {
         std::process::exit(2);
     };
 
+    // Sub-hook shims keep their original filenames, so the name arrives with a
+    // `.zsh` / `.js` suffix that no longer describes anything. Strip it rather
+    // than rename the files: the existing tests resolve hooks by those exact
+    // paths (docs/rust-migration.md), and renaming is a post-migration tidy-up.
+    let hook = hook
+        .strip_suffix(".zsh")
+        .or_else(|| hook.strip_suffix(".js"))
+        .unwrap_or(&hook)
+        .to_owned();
+
     let code = match hook.as_str() {
         "pre-commit" => dispatch::pre_commit(&hooks_dir, &rest),
         "pre-push" => dispatch::pre_push(&hooks_dir, &rest),
+        "pre-push-branch-pattern" => hooks::branch_pattern::run(&rest),
         other => {
             eprintln!("githooks: unknown hook {other:?}");
             2
