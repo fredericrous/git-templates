@@ -64,7 +64,12 @@ install: chmodx
 	@git init
 	@$(MAKE) --no-print-directory bake-shims DIR=$(GIT_REPO_HOOK_PATH)
 
-# Replace the @BIN@ placeholder with the absolute installed path. This is the
+# Replace the __GITHOOKS_BIN__ placeholder with the absolute installed path,
+# in EVERY shim — not a hardcoded pair. It was written when pre-commit and
+# pre-push were the only two; five later shims silently never got baked.
+# The token is deliberately distinct from anything in the surrounding prose,
+# because a global sed on a placeholder that also appears in the comments
+# EXPLAINING it rewrites the explanation. This is the
 # whole reason GUI git clients work: they launch git without the PATH that a
 # login shell would have, so a shim relying on PATH alone resolves nothing and
 # the hook fails. Idempotent — re-baking an already-baked shim is a no-op
@@ -77,11 +82,11 @@ install: chmodx
 # repos. `install` therefore bakes only real copies: the per-repo .git/hooks/,
 # and ~/.config/... only when it is NOT the source.
 bake-shims:
-	@for f in $(DIR)pre-commit $(DIR)pre-push; do \
+	@for f in $(DIR)*; do \
 		[ -f "$$f" ] || continue; \
-		if grep -q '@BIN@' "$$f" 2>/dev/null; then \
-			sed "s|@BIN@|$(INSTALLED_BIN)|g" "$$f" > "$$f.tmp" && mv "$$f.tmp" "$$f" && chmod +x "$$f"; \
-			echo "  baked $$f -> $(INSTALLED_BIN)"; \
+		if grep -q '__GITHOOKS_BIN__' "$$f" 2>/dev/null; then \
+			sed "s|__GITHOOKS_BIN__|$(INSTALLED_BIN)|g" "$$f" > "$$f.tmp" && mv "$$f.tmp" "$$f" && chmod +x "$$f"; \
+			echo "  baked $$f"; \
 		fi; \
 	done
 
