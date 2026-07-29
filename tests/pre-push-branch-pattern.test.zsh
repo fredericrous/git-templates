@@ -50,4 +50,17 @@ printf "Should still throw without a type prefix\n"
 git branch -m duro-1.50.50
 $HOOK_CHECK &> /dev/null && exit 1
 
+# The grep fallback runs on machines without rg. Without these it is dead code
+# that only executes where nobody is watching, and the two dialects (\w vs
+# [[:alnum:]_]) drift apart unnoticed. Same cases, same verdicts, grep path.
+printf "Should agree with the rg path when falling back to grep\n"
+git branch -m feat/0-test
+HOOKS_FORCE_GREP=1 $HOOK_CHECK &> /dev/null || exit 1
+git branch -m chore/duro-1.50.50
+HOOKS_FORCE_GREP=1 $HOOK_CHECK &> /dev/null || exit 1
+git branch -m feat/duro-1.50.50
+HOOKS_FORCE_GREP=1 $HOOK_CHECK &> /dev/null && exit 1
+git branch -m duro-1.50.50
+HOOKS_FORCE_GREP=1 $HOOK_CHECK &> /dev/null && exit 1
+
 exit 0
