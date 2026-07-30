@@ -50,7 +50,7 @@ fn selected(list: &[&'static str]) -> Vec<&'static str> {
     let (kept, dropped): (Vec<_>, Vec<_>) = list
         .iter()
         .copied()
-        .partition(|n| !skips.iter().any(|s| n.contains(s.as_str())));
+        .partition(|n| !skips.iter().any(|s| crate::skip_suppresses(n, s)));
     announce_skips(&dropped);
     kept
 }

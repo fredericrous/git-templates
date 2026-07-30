@@ -13,11 +13,11 @@
 //! looked in the wrong place", which no scalar can express.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Serialize;
 
 use crate::shim::{self, BakeState, ShimState, DISPATCHERS};
+use crate::skips::{self, SkipEntry};
 
 /// Subtrees never worth descending. Matches the exclusions the shell sweep
 /// used, so the two agree about what "the fleet" means.
@@ -43,8 +43,10 @@ pub struct Repo {
     /// Manifests present at the repo root. Drives inert-vs-failing: a Python
     /// repo with no Cargo.toml is correctly silent about clippy.
     pub languages: Vec<String>,
-    /// `git config --get-all hook.skip`, which suppresses checks by substring.
-    pub skips: Vec<String>,
+    /// `hook.skip` entries, resolved: what each one suppresses and where it
+    /// came from. Bare strings hid both — a value is a SUBSTRING pattern, not a
+    /// check name, and local/global are indistinguishable once merged.
+    pub skips: Vec<SkipEntry>,
 }
 
 /// A whole scan, including how it was performed.
@@ -238,7 +240,7 @@ fn inspect(root: &Path, repo: &Path, hooks: &Path, managed: bool, installed_bina
         foreign_subs,
         hook_pkgjson,
         languages: languages(repo),
-        skips: skips(repo),
+        skips: skips::read(repo),
     }
 }
 
@@ -262,20 +264,4 @@ fn languages(repo: &Path) -> Vec<String> {
         out.push("k8s".into());
     }
     out
-}
-
-fn skips(repo: &Path) -> Vec<String> {
-    let out = Command::new("git")
-        .args(["config", "--get-all", "hook.skip"])
-        .current_dir(repo)
-        .output();
-    match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_owned)
-            .collect(),
-        _ => Vec::new(),
-    }
 }
