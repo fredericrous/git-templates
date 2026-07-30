@@ -34,10 +34,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # The whole point of the Rust migration was that committing requires
-      # nothing installed. A dependency reaches the commit path through
+      # Supply chain: this binary runs on every commit with the developer's
+      # credentials, so every transitive crate is code running in that
+      # position. A dependency reaches the commit path through
       # githooks-runtime as easily as directly, so this checks the RESOLVED
-      # tree. ratatui belongs to githooks-fleet and must stay there.
+      # tree. See scripts/check-no-deps.sh for why, and for when overriding it
+      # is a reasonable call rather than a violation.
       - run: ./scripts/check-no-deps.sh
 
   rust:
