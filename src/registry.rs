@@ -80,6 +80,11 @@ pub const REGISTRY: &[(&str, HookFn)] = &[
     ("pre-push-branch-protect", |c| {
         hooks::branch_protect::run(c.push.get())
     }),
+    ("pre-commit-cargo-fmt", |c| hooks::rust_tools::fmt(c.args)),
+    ("pre-commit-clippy", |c| hooks::rust_tools::clippy(c.args)),
+    ("pre-push-cargo-test", |c| {
+        hooks::rust_tools::test(c.push.get())
+    }),
 ];
 
 /// What `pre-commit` runs, in the order it reports them. This list REPLACES the
@@ -89,6 +94,8 @@ pub const REGISTRY: &[(&str, HookFn)] = &[
 pub const PRE_COMMIT_CHECKS: &[&str] = &[
     "pre-commit-argo-lint",
     "pre-commit-ban-terms",
+    "pre-commit-cargo-fmt",
+    "pre-commit-clippy",
     "pre-commit-kube-linter",
     "pre-commit-kubeconform",
     "pre-commit-lint-js",
@@ -110,6 +117,7 @@ pub const PRE_PUSH_CHECKS: &[&str] = &[
     "pre-push-branch-pattern",
     "pre-push-pull-rebase",
     "pre-push-run-tests-js",
+    "pre-push-cargo-test",
 ];
 
 pub fn lookup(name: &str) -> Option<HookFn> {
@@ -191,6 +199,7 @@ mod tests {
                 "pre-push-branch-pattern",
                 "pre-push-pull-rebase",
                 "pre-push-run-tests-js",
+                "pre-push-cargo-test",
             ]
         );
     }
