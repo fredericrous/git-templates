@@ -112,9 +112,13 @@ bake-shims:
 
 # Push the shim SET to every repo. Only needed when a hook is added, removed
 # or renamed — ordinary binary fixes reach all repos via `make install`, since
-# every shim points at the one binary. Dry-run: `make propagate`.
-propagate:
-	@./scripts/propagate.sh $(if $(APPLY),--apply,)
+# every shim points at the one binary.
+#
+# This was a shell script until a Rust plan was proved to remove exactly the
+# same set on a fixture covering every actionable case. Dry-run by default;
+# APPLY=1 to write.
+propagate: 
+	@cargo run -q -p githooks-fleet -- fix $(if $(APPLY),--apply,)
 
 # The commit path must stay dependency-free; see the script.
 deps:

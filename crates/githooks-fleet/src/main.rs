@@ -10,6 +10,7 @@
 //! not meaningfully work with a TUI.
 
 mod apply;
+mod checks;
 mod fix;
 mod scan;
 mod shim;
