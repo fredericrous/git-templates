@@ -32,6 +32,10 @@ Measured against the 20 checks that exist today:
 | `pre` | **20 / 20** |
 | `e` | **20 / 20** |
 
+Those numbers are **computed from today's 20 names, not a stable property** —
+rename `pre-commit-lint-js` and `lint` stops suppressing five. The UI must
+compute them at runtime rather than quoting this table.
+
 None of those are adversarial. `t` is a plausible shorthand for "tests"; `pre`
 is a plausible shorthand for "prettier". Either one silently disables the entire
 check suite, in a config file nobody reads, with no output at commit time saying
@@ -41,6 +45,32 @@ to catch.
 So the feature is not "let me type less". It is **make the blast radius visible
 before the write happens**, and make an existing over-broad skip discoverable
 after it. Everything below follows from that.
+
+## What already shipped, and why it came first
+
+A UX review against usage traces changed the priority. **1 of 96 repos has any
+skip at all**, and its value (`run-tests-js`) was hand-written at a terminal —
+the very fragment form this spec says the UI must never produce. Nobody reached
+for a dashboard, because editing config takes ten seconds.
+
+Meanwhile, at the moment a skip actually costs something — a commit running
+fewer checks than the developer believes — the output was a wall of green ticks
+that said nothing.
+
+So the toggle governs a rare decision from a rarely-visited surface, while the
+consequence lands on every commit. The dispatcher now announces skips:
+
+```
+  ! 15 checks skipped by hook.skip: pre-commit-argo-lint, pre-commit-ban-terms, …
+```
+
+Silent when nothing is skipped. This reaches **every** skip however it was
+created, needs no dashboard, and turns `hook.skip = e` from invisible into
+unmissable within one commit. It is a few lines in `dispatch::selected`.
+
+The toggle below is still worth building, but its value is smaller than this
+document originally assumed, and it should be judged as a convenience rather
+than as the safety mechanism. The safety mechanism shipped.
 
 ## Non-goals
 
@@ -60,10 +90,13 @@ the fragment is a bet on every future check name — adding
 minimal blast radius is the only defensible default, and the UI is the one
 writer that can guarantee it.
 
-**2. Every write shows what it suppresses, by name, before it happens.**
-Consistent with the dashboard's diff-first rule for destructive actions. Turning
-off a check that catches committed secrets deserves the same confirmation as
-deleting a file.
+**2. Lead with what protection is lost, not with a count.**
+"Suppresses 19 of 20" is an aggregate, and aggregates do not move people the way
+a named consequence does. It also treats every check as interchangeable, which
+they are not: `pre-commit-yamllint` reformats, `pre-push-branch-protect` is what
+stops a push to `main`.
+
+Name them, most consequential first; the count is a subtitle.
 
 ```
  skip pre-commit-ban-terms in Perso/homelab?
@@ -90,6 +123,11 @@ its full expansion, and in the hook view as the reason a check shows `skipped`:
 The threshold is "more than one", not a percentage. Two is already a surprise if
 you meant one.
 
+And offer the correction rather than only the diagnosis. Told "this suppresses
+19 checks", the user is informed they are wrong and left there. The one skip
+that exists in the fleet today, `run-tests-js`, is exactly this case: the UI
+should recognise a fragment and offer `pre-push-run-tests-js` in its place.
+
 **4. Removal is exact, and the exit code is not evidence.**
 
 `git config --unset hook.skip <value>` takes a value-pattern that is a **regex**,
@@ -110,7 +148,24 @@ distinguish "removed it" from "declined to act". This is the same posture the
 apply path already takes — report what happened, never what was intended — and
 here there is a measured reason for it rather than a principle.
 
-**5. Idempotent.**
+**5. Differentiate the interaction by risk; prefer undo to confirmation.**
+The draft gave a 1-of-20 and a 19-of-20 skip the same modal and the same `[y]`.
+Frequency data says habituation is not the danger here — you cannot habituate to
+something done twice a year — but flattening still costs the one signal that
+matters: when every case looks identical, the dangerous case has no way to feel
+dangerous.
+
+- **One check suppressed** — write it, no prompt, and offer `u` to undo. A skip
+  is reversible by a single command, and an undo helps when the user was wrong
+  rather than merely interrupting when they were right (Nielsen's third
+  heuristic; the Undo Send precedent).
+- **More than one** — require typing the check name, not a keypress. Chosen
+  because it cannot be muscle-memoried.
+
+The UI never refuses. Showing the damage is the intervention; refusing invites
+working around the tool by hand, which is worse and unobservable.
+
+**6. Idempotent.**
 `--add` on a value already present creates a duplicate that must then be unset
 twice. The UI checks first and reports "already skipped" rather than writing.
 
@@ -185,11 +240,28 @@ The important ones are about honesty, not mechanics:
 - The resolver agrees with `dispatch::selected` for the same inputs — a property
   test over the check list is cheap here and pins the two together.
 
+## How we would know it worked
+
+The draft had no success measure, which makes a design shippable but not
+evaluable.
+
+- **Zero skips suppressing more than one check unintentionally.** Measurable
+  from `githooks-fleet --json` at any time.
+- **Time-to-discover an over-broad skip.** The shipped announcement drives this
+  to one commit; before it, the honest answer was "possibly never".
+- **Fragment-valued skips trend to zero.** Today: one of one.
+
+## Rendering
+
+Inherits the dashboard's constraints and must not quietly drop them: the preview
+is legible under `NO_COLOR`, degrades below 100 and 60 columns rather than
+scrolling sideways, and encodes nothing by colour alone.
+
 ## Open questions
 
-1. **Should the UI ever refuse a write?** Showing that `e` suppresses everything
-   may be enough. Refusing outright protects against a mis-keystroke but invites
-   working around the tool by hand, which is worse.
+1. ~~**Should the UI ever refuse a write?**~~ RESOLVED: no. Show the damage.
+   Refusing protects against a mis-keystroke but invites working around the tool
+   by hand, which is both worse and unobservable.
 2. **Should `skips` in the fleet table show a count or the values?** A count is
    compact and hides an over-broad entry; the values do not fit in a column.
    Probably a count plus a marker when any entry suppresses more than one.
