@@ -9,7 +9,7 @@
 //! conflict rather than leaving a half-rebased state.
 
 use crate::git;
-use crate::ui::{error_sign, valid_sign, warning_sign};
+use crate::ui::{error_sign, highlight, valid_sign, warning_sign};
 
 /// `ahead[[:space:]]+[0-9]+,[[:space:]]*behind` over `git status -sb`.
 /// Both counts present means the branch and its upstream have diverged, and an
@@ -95,7 +95,11 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
             "{} Branch diverged from its upstream — skip auto pull-rebase.",
             warning_sign()
         );
-        println!("    Reconcile manually: \u{1b}[38;5;208mgit pull --rebase\u{1b}[0m (or \u{1b}[38;5;208mgit merge\u{1b}[0m)");
+        println!(
+            "    Reconcile manually: {} (or {})",
+            highlight("git pull --rebase"),
+            highlight("git merge")
+        );
     } else if !git::succeeds(&["pull", "--rebase"]) {
         // Abort so the tree is never left half-rebased.
         let _ = git::succeeds(&["rebase", "--abort"]);
@@ -103,7 +107,7 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
             "{} pull --rebase hit conflicts (rebase aborted, tree restored).",
             error_sign()
         );
-        println!("    Resolve manually: \u{1b}[38;5;208mgit pull --rebase\u{1b}[0m");
+        println!("    Resolve manually: {}", highlight("git pull --rebase"));
         return 1;
     } else {
         println!("{} Branch is in sync with its upstream", valid_sign());
@@ -133,7 +137,10 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
                 "{} origin/{default_branch} is ahead by {n} commit(s).",
                 warning_sign()
             );
-            println!("    Consider before merging: \u{1b}[38;5;208mgit merge origin/{default_branch}\u{1b}[0m");
+            println!(
+                "    Consider before merging: {}",
+                highlight(&format!("git merge origin/{default_branch}"))
+            );
         }
     }
     0

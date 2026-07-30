@@ -14,6 +14,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
+use crate::check::{Builtin, Scope, Stage};
 use crate::pushrefs::PushRefs;
 use crate::{dispatch, hooks};
 
@@ -36,103 +37,214 @@ pub struct Ctx<'a> {
 pub type HookFn = fn(&Ctx) -> i32;
 
 /// name → handler. The single place a hook is registered.
-pub const REGISTRY: &[(&str, HookFn)] = &[
+/// The four hook names git itself invokes. Everything else is a `Check`.
+pub const ENTRYPOINTS: &[(&str, HookFn)] = &[
     ("pre-commit", dispatch::pre_commit),
     ("pre-push", dispatch::pre_push),
     ("commit-msg", |c| hooks::commit_msg::run(c.args)),
     ("prepare-commit-msg", |c| {
         hooks::prepare_commit_msg::run(c.args)
     }),
-    ("pre-commit-argo-lint", |c| hooks::k8s::argo_lint(c.args)),
-    ("pre-commit-ban-terms", |c| {
-        hooks::ban_terms::run(c.name, c.args)
-    }),
-    ("pre-commit-kube-linter", |c| {
-        hooks::k8s::kube_linter(c.args)
-    }),
-    ("pre-commit-kubeconform", |c| {
-        hooks::k8s::kubeconform(c.args)
-    }),
-    ("pre-commit-lint-js", |c| hooks::lint_js::run(c.args)),
-    ("pre-commit-lint-json-yaml", |c| {
-        hooks::lint_json_yaml::run(c.args)
-    }),
-    ("pre-commit-merge-conflict", |c| {
-        hooks::merge_conflict::run(c.name, c.args)
-    }),
-    ("pre-commit-package-lock", |c| {
-        hooks::package_lock::run(c.args)
-    }),
-    ("pre-commit-prettier", |c| hooks::prettier::run(c.args)),
-    ("pre-commit-pyright", |c| {
-        hooks::python_tools::pyright(c.args)
-    }),
-    ("pre-commit-ruff", |c| hooks::python_tools::ruff(c.args)),
-    ("pre-commit-usual-name", |c| hooks::usual_name::run(c.args)),
-    ("pre-commit-yamllint", |c| hooks::yamllint::run(c.args)),
-    ("pre-push-branch-pattern", |c| {
-        hooks::branch_pattern::run(c.args)
-    }),
-    ("pre-push-pull-rebase", |c| hooks::pull_rebase::run(c.args)),
-    ("pre-push-run-tests-js", |c| {
-        hooks::run_tests::run(c.push.get())
-    }),
-    ("pre-push-branch-protect", |c| {
-        hooks::branch_protect::run(c.push.get())
-    }),
-    ("pre-commit-cargo-fmt", |c| hooks::rust_tools::fmt(c.args)),
-    ("pre-commit-clippy", |c| hooks::rust_tools::clippy(c.args)),
-    ("pre-push-cargo-test", |c| {
-        hooks::rust_tools::test(c.push.get())
-    }),
 ];
 
-/// What `pre-commit` runs, in the order it reports them. This list REPLACES the
-/// old `<hook>-*` filename glob: order used to be lexicographic and therefore
-/// an accident of naming, which is how a rename could silently reorder a gate.
-/// Here it is stated.
-pub const PRE_COMMIT_CHECKS: &[&str] = &[
-    "pre-commit-argo-lint",
-    "pre-commit-ban-terms",
-    "pre-commit-cargo-fmt",
-    "pre-commit-clippy",
-    "pre-commit-kube-linter",
-    "pre-commit-kubeconform",
-    "pre-commit-lint-js",
-    "pre-commit-lint-json-yaml",
-    "pre-commit-merge-conflict",
-    "pre-commit-package-lock",
-    "pre-commit-prettier",
-    "pre-commit-pyright",
-    "pre-commit-ruff",
-    "pre-commit-usual-name",
-    "pre-commit-yamllint",
+/// Every check, in the order its stage runs them.
+///
+/// ONE declaration each: name, stage, scope and function together. This
+/// replaced `REGISTRY` plus `PRE_COMMIT_CHECKS` plus `PRE_PUSH_CHECKS` plus the
+/// fleet crate's `LANGUAGES` — four tables keyed by the same string, kept in
+/// step by reconciliation tests that are now unnecessary rather than passing.
+///
+/// pre-push order is the cost order: refuse a forbidden push before validating
+/// a name, and validate everything structural before paying for a test suite.
+pub const CHECKS: &[Builtin] = &[
+    // ---- pre-commit ----
+    Builtin {
+        name: "pre-commit-argo-lint",
+        stage: Stage::PreCommit,
+        scope: Scope::new(
+            &[".yaml", ".yml"],
+            &["kustomization.yaml", "kustomization.yml"],
+        ),
+        run: |c| hooks::k8s::argo_lint(c.args),
+    },
+    Builtin {
+        name: "pre-commit-ban-terms",
+        stage: Stage::PreCommit,
+        scope: Scope::files(&[".js", ".jsx", ".ts", ".tsx", ".vue"]),
+        run: |c| hooks::ban_terms::run(c.name, c.args),
+    },
+    Builtin {
+        name: "pre-commit-cargo-fmt",
+        stage: Stage::PreCommit,
+        scope: Scope::new(&[".rs"], &["Cargo.toml"]),
+        run: |c| hooks::rust_tools::fmt(c.args),
+    },
+    Builtin {
+        name: "pre-commit-clippy",
+        stage: Stage::PreCommit,
+        scope: Scope::new(&[".rs"], &["Cargo.toml"]),
+        run: |c| hooks::rust_tools::clippy(c.args),
+    },
+    Builtin {
+        name: "pre-commit-kube-linter",
+        stage: Stage::PreCommit,
+        scope: Scope::new(
+            &[".yaml", ".yml"],
+            &[".kube-linter*.yaml", ".kube-linter*.yml"],
+        ),
+        run: |c| hooks::k8s::kube_linter(c.args),
+    },
+    Builtin {
+        name: "pre-commit-kubeconform",
+        stage: Stage::PreCommit,
+        scope: Scope::new(
+            &[".yaml", ".yml"],
+            &["kustomization.yaml", "kustomization.yml"],
+        ),
+        run: |c| hooks::k8s::kubeconform(c.args),
+    },
+    Builtin {
+        name: "pre-commit-lint-js",
+        stage: Stage::PreCommit,
+        scope: Scope::new(&[".js", ".jsx", ".ts", ".tsx", ".vue"], &["package.json"]),
+        run: |c| hooks::lint_js::run(c.args),
+    },
+    Builtin {
+        name: "pre-commit-lint-json-yaml",
+        stage: Stage::PreCommit,
+        scope: Scope::files(&[".json", ".yaml", ".yml"]),
+        run: |c| hooks::lint_json_yaml::run(c.args),
+    },
+    Builtin {
+        name: "pre-commit-merge-conflict",
+        stage: Stage::PreCommit,
+        scope: Scope::ALWAYS,
+        run: |c| hooks::merge_conflict::run(c.name, c.args),
+    },
+    Builtin {
+        name: "pre-commit-package-lock",
+        stage: Stage::PreCommit,
+        scope: Scope::new(&[], &["package.json"]),
+        run: |c| hooks::package_lock::run(c.args),
+    },
+    Builtin {
+        name: "pre-commit-prettier",
+        stage: Stage::PreCommit,
+        scope: Scope::new(
+            &[],
+            &[
+                ".prettierrc",
+                ".prettierrc.json",
+                ".prettierrc.yml",
+                ".prettierrc.yaml",
+                ".prettierrc.js",
+                "prettier.config.js",
+            ],
+        ),
+        run: |c| hooks::prettier::run(c.args),
+    },
+    Builtin {
+        name: "pre-commit-pyright",
+        stage: Stage::PreCommit,
+        scope: Scope::new(
+            &[".py", ".pyi"],
+            &[
+                "pyrightconfig.json",
+                "pyrightconfig.jsonc",
+                "pyproject.toml",
+            ],
+        ),
+        run: |c| hooks::python_tools::pyright(c.args),
+    },
+    Builtin {
+        name: "pre-commit-ruff",
+        stage: Stage::PreCommit,
+        scope: Scope::new(
+            &[".py", ".pyi"],
+            &["ruff.toml", ".ruff.toml", "pyproject.toml"],
+        ),
+        run: |c| hooks::python_tools::ruff(c.args),
+    },
+    Builtin {
+        name: "pre-commit-usual-name",
+        stage: Stage::PreCommit,
+        scope: Scope::ALWAYS,
+        run: |c| hooks::usual_name::run(c.args),
+    },
+    Builtin {
+        name: "pre-commit-yamllint",
+        stage: Stage::PreCommit,
+        scope: Scope::new(
+            &[".yaml", ".yml"],
+            &[".yamllint.yaml", ".yamllint.yml", ".yamllint"],
+        ),
+        run: |c| hooks::yamllint::run(c.args),
+    },
+    // ---- pre-push, cheapest and most decisive first ----
+    Builtin {
+        name: "pre-push-branch-protect",
+        stage: Stage::PrePush,
+        scope: Scope::ALWAYS,
+        run: |c| hooks::branch_protect::run(c.push.get()),
+    },
+    Builtin {
+        name: "pre-push-branch-pattern",
+        stage: Stage::PrePush,
+        scope: Scope::ALWAYS,
+        run: |c| hooks::branch_pattern::run(c.args),
+    },
+    Builtin {
+        name: "pre-push-pull-rebase",
+        stage: Stage::PrePush,
+        scope: Scope::ALWAYS,
+        run: |c| hooks::pull_rebase::run(c.args),
+    },
+    Builtin {
+        name: "pre-push-run-tests-js",
+        stage: Stage::PrePush,
+        scope: Scope::new(&[".js", ".jsx", ".ts", ".tsx", ".vue"], &["package.json"]),
+        run: |c| hooks::run_tests::run(c.push.get()),
+    },
+    Builtin {
+        name: "pre-push-cargo-test",
+        stage: Stage::PrePush,
+        scope: Scope::new(&[".rs"], &["Cargo.toml"]),
+        run: |c| hooks::rust_tools::test(c.push.get()),
+    },
 ];
 
-/// What `pre-push` runs, in order. Serial and fail-fast, so this order is the
-/// cost order: refuse a forbidden push before validating a name, and validate
-/// everything structural before paying for the test suite.
-pub const PRE_PUSH_CHECKS: &[&str] = &[
-    "pre-push-branch-protect",
-    "pre-push-branch-pattern",
-    "pre-push-pull-rebase",
-    "pre-push-run-tests-js",
-    "pre-push-cargo-test",
-];
+/// Checks for one stage, in declared order.
+pub fn stage_checks(stage: Stage) -> impl Iterator<Item = &'static Builtin> {
+    CHECKS.iter().filter(move |c| c.stage == stage)
+}
 
 pub fn lookup(name: &str) -> Option<HookFn> {
-    REGISTRY.iter().find(|(n, _)| *n == name).map(|(_, f)| *f)
+    if let Some((_, f)) = ENTRYPOINTS.iter().find(|(n, _)| *n == name) {
+        return Some(*f);
+    }
+    // A check invoked directly by name — how the tests drive individual checks,
+    // and how `githooks <check>` works from a shell.
+    CHECKS.iter().find(|c| c.name == name).map(|c| c.run)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PRE_COMMIT_CHECKS, PRE_PUSH_CHECKS, REGISTRY};
+    use super::{lookup, Stage, CHECKS, ENTRYPOINTS};
     use std::collections::BTreeSet;
 
-    /// Only FOUR files ship now, and they are exactly the hook names git itself
-    /// invokes. Everything else `.git/hooks` used to hold was our own
-    /// dispatcher's business — 16 identical shims whose only job was to re-exec
-    /// this binary and tell it its own name.
+    #[test]
+    fn names_are_unique_across_entrypoints_and_checks() {
+        let mut seen = BTreeSet::new();
+        for n in ENTRYPOINTS
+            .iter()
+            .map(|(n, _)| *n)
+            .chain(CHECKS.iter().map(|c| c.name))
+        {
+            assert!(seen.insert(n), "duplicate registration: {n}");
+        }
+    }
+
+    /// Only FOUR files ship, and they are exactly the hook names git invokes.
     #[test]
     fn the_shipped_shims_are_exactly_the_git_invoked_hooks() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../templates/hooks");
@@ -144,57 +256,35 @@ mod tests {
         shipped.sort();
         assert_eq!(
             shipped,
-            vec!["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"],
-            "git invokes these four by name; anything else here is a file we \
-             would have to install into 96 repos for no reason"
+            vec!["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"]
         );
         for name in &shipped {
             assert!(
-                super::lookup(name).is_some(),
-                "shipped shim {name:?} has no handler — it would exit 2 and block the commit"
+                lookup(name).is_some(),
+                "shipped shim {name:?} has no handler"
             );
         }
     }
 
-    /// The replacement for the old shim↔handler pairing: a check that is
-    /// registered but named in NEITHER list can never run. That used to be
-    /// caught by "handler with no shim is dead code"; with the shims gone, the
-    /// check lists are what reachability means.
+    /// Every check is reachable by name, which is how a shell — and the tests —
+    /// invoke one directly.
     #[test]
-    fn every_check_is_reachable_and_every_listed_check_exists() {
-        let listed: BTreeSet<&str> = PRE_COMMIT_CHECKS
-            .iter()
-            .chain(PRE_PUSH_CHECKS.iter())
-            .copied()
-            .collect();
-        for n in &listed {
-            assert!(
-                super::lookup(n).is_some(),
-                "{n:?} is listed to run but is not registered — dispatch would panic"
-            );
+    fn every_check_is_reachable_by_name() {
+        for c in CHECKS {
+            assert!(lookup(c.name).is_some(), "{} not reachable", c.name);
         }
-        // Dispatchers are entered by git, not by a list.
-        let dispatchers: BTreeSet<&str> =
-            ["pre-commit", "pre-push", "commit-msg", "prepare-commit-msg"]
-                .into_iter()
-                .collect();
-        let unreachable: Vec<&str> = REGISTRY
-            .iter()
-            .map(|(n, _)| *n)
-            .filter(|n| !listed.contains(n) && !dispatchers.contains(n))
-            .collect();
-        assert!(
-            unreachable.is_empty(),
-            "registered but never run by any dispatcher: {unreachable:?}"
-        );
+        assert!(lookup("pre-commit-not-a-check").is_none());
     }
 
-    /// pre-push is serial and fail-fast, so this list IS the cost order.
+    /// pre-push is serial and fail-fast, so declaration order IS cost order.
     #[test]
     fn pre_push_runs_cheapest_first() {
+        let order: Vec<&str> = super::stage_checks(Stage::PrePush)
+            .map(|c| c.name)
+            .collect();
         assert_eq!(
-            PRE_PUSH_CHECKS,
-            &[
+            order,
+            vec![
                 "pre-push-branch-protect",
                 "pre-push-branch-pattern",
                 "pre-push-pull-rebase",
@@ -204,11 +294,17 @@ mod tests {
         );
     }
 
+    /// The reconciliation tests that used to live here are gone, and that is
+    /// the point of the refactor: there is no second table to disagree with.
     #[test]
-    fn names_are_unique() {
-        let mut seen = BTreeSet::new();
-        for (n, _) in REGISTRY {
-            assert!(seen.insert(*n), "duplicate registration: {n}");
-        }
+    fn every_check_declares_a_stage_and_a_scope() {
+        assert_eq!(CHECKS.len(), 20);
+        let pre_commit = super::stage_checks(Stage::PreCommit).count();
+        let pre_push = super::stage_checks(Stage::PrePush).count();
+        assert_eq!(
+            pre_commit + pre_push,
+            CHECKS.len(),
+            "every check has a stage"
+        );
     }
 }

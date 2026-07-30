@@ -18,6 +18,7 @@
 //! githooks --hooks-dir <dir> pre-commit [args…]
 //! ```
 
+pub mod check;
 pub mod dispatch;
 pub mod git;
 pub mod hooks;
@@ -45,6 +46,63 @@ use std::process::{Command, Stdio};
 /// dispatcher skips it — a difference nobody would notice until it mattered.
 pub fn skip_suppresses(check: &str, skip: &str) -> bool {
     check.contains(skip)
+}
+
+/// Print every check: stage, scope, and whether it would fire in this
+/// repository.
+///
+/// "Why didn't prettier run?" was previously a code-reading exercise. The
+/// answer is a check's `Scope` evaluated against the repo's tracked files, so
+/// the tool can simply say it.
+pub fn list_checks() {
+    use crate::check::Stage;
+    let paths: Vec<String> = Command::new("git")
+        .args(["ls-files"])
+        .output()
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let skips = configured_skips();
+
+    for stage in [Stage::PreCommit, Stage::PrePush] {
+        println!("{}", ui::highlight(stage.as_str()));
+        for c in registry::stage_checks(stage) {
+            let skipped = skips.iter().any(|s| skip_suppresses(c.name, s));
+            let applies = c.scope.matches(&paths);
+            // Three states, three glyphs: a check that is correctly silent must
+            // never look like one that is broken or disabled.
+            let (glyph, why) = if skipped {
+                ('⊘', "skipped via hook.skip".to_string())
+            } else if applies {
+                ('●', String::new())
+            } else {
+                ('○', format!("inert here — needs {}", describe(c.scope)))
+            };
+            println!("  {glyph} {:<28} {why}", c.name);
+        }
+    }
+    println!();
+    println!("  ● runs here   ○ inert   ⊘ skipped via hook.skip");
+}
+
+fn describe(s: crate::check::Scope) -> String {
+    let files = if s.files.is_empty() {
+        String::new()
+    } else {
+        s.files.join(" ")
+    };
+    let opt = s.opt_in.join(" | ");
+    match (files.is_empty(), opt.is_empty()) {
+        (false, false) => format!("{files} + {opt}"),
+        (false, true) => files,
+        (true, false) => opt,
+        (true, true) => "nothing".into(),
+    }
 }
 
 pub fn configured_skips() -> Vec<String> {

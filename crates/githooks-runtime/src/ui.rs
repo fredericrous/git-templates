@@ -104,6 +104,47 @@ mod tests {
         assert!(warning_sign().contains('!'));
     }
 
+    /// No source file may emit a 256-colour escape directly.
+    ///
+    /// The migration to base ANSI converted the sign helpers but missed a raw
+    /// `\u{1b}[38;5;208m` in the pre-push error line, which therefore ignored
+    /// the terminal theme for two more PRs. Checking the helpers was not enough
+    /// because the offender did not use them.
+    #[test]
+    fn no_source_file_emits_a_256_colour_escape() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let mut offenders = Vec::new();
+        fn walk(d: &std::path::Path, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(d).expect("src").flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    for (i, line) in std::fs::read_to_string(&p)
+                        .unwrap_or_default()
+                        .lines()
+                        .enumerate()
+                    {
+                        let mentions_the_pattern =
+                            line.contains("offenders") || line.trim_start().starts_with("//");
+                        if mentions_the_pattern {
+                            continue;
+                        }
+                        // Split so this line is not itself an offender.
+                        if line.contains(concat!("[38", ";5;")) {
+                            out.push(format!("{}:{}", p.display(), i + 1));
+                        }
+                    }
+                }
+            }
+        }
+        walk(std::path::Path::new(dir), &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "a fixed 256-colour code overrides the user's terminal theme: {offenders:?}"
+        );
+    }
+
     /// A success glyph must never be painted with the warning accent.
     ///
     /// The mechanical rewrite from 256-colour codes turned `color("✓", "112")`

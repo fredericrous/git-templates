@@ -273,3 +273,52 @@ fn term_dumb_suppresses_colour() {
         .expect("run");
     assert!(!String::from_utf8_lossy(&out.stdout).contains('\u{1b}'));
 }
+
+/// `githooks list` answers "would this run here, and if not why", which was
+/// previously a code-reading exercise. It lives in the hook binary because that
+/// is the one installed everywhere and the question is about the repo you are
+/// standing in.
+#[test]
+fn list_reports_what_would_run_here() {
+    let r = Repo::new();
+    r.stage("Cargo.toml", "[package]\nname=\"t\"\n");
+    r.stage("src/main.rs", "fn main() {}\n");
+    r.commit("feat: a rust repo");
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("list")
+        .current_dir(&r.dir)
+        .output()
+        .expect("run");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+
+    assert!(text.contains("pre-commit-clippy"), "{text}");
+    assert!(text.contains("pre-commit-ruff"), "{text}");
+    // A rust repo: clippy runs, ruff is INERT — and inert is not failure.
+    let clippy = text.lines().find(|l| l.contains("clippy")).unwrap_or("");
+    let ruff = text.lines().find(|l| l.contains("ruff")).unwrap_or("");
+    assert!(clippy.contains('●'), "clippy should run here: {clippy}");
+    assert!(ruff.contains('○'), "ruff should be inert here: {ruff}");
+    assert!(ruff.contains(".py"), "and say what it would need: {ruff}");
+}
+
+/// A skipped check is shown as skipped, not as inert — they mean different
+/// things and the glyphs must not be interchangeable.
+#[test]
+fn list_distinguishes_skipped_from_inert() {
+    let r = Repo::new();
+    r.stage("Cargo.toml", "[package]\nname=\"t\"\n");
+    r.stage("src/main.rs", "fn main() {}\n");
+    r.commit("feat: a rust repo");
+    r.git(&["config", "--add", "hook.skip", "pre-commit-clippy"]);
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("list")
+        .current_dir(&r.dir)
+        .output()
+        .expect("run");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let clippy = text.lines().find(|l| l.contains("clippy")).unwrap_or("");
+    assert!(clippy.contains('⊘'), "expected the skip glyph: {clippy}");
+    assert!(clippy.contains("hook.skip"), "{clippy}");
+}

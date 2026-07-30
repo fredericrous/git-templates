@@ -8,7 +8,7 @@
 //! `rg` made `! rg …` true and the hook rejected EVERY branch name.
 
 use crate::git;
-use crate::ui::{error_sign, valid_sign};
+use crate::ui::{error_sign, highlight, valid_sign};
 
 use crate::vocabulary;
 
@@ -70,11 +70,12 @@ pub fn run(args: &[std::ffi::OsString]) -> i32 {
     if !conforms(&branch) {
         println!(
             "{} Branch names in this project must adhere to this contract:
-    \u{1b}[38;5;208m{}\u{1b}[0m.
-    Rename your branch with: \u{1b}[38;5;208mgit branch -m\u{1b}[0m <branch name>
+    {}.
+    Rename your branch with: {} <branch name>
     Or bypass this check with git -c hook.skip=branch-pattern push",
             error_sign(),
-            vocabulary::branch_contract()
+            highlight(&vocabulary::branch_contract()),
+            highlight("git branch -m")
         );
         return 1;
     }

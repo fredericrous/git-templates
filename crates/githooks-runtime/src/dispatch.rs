@@ -29,29 +29,21 @@
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
 
-use crate::registry::{Ctx, HookFn, PRE_COMMIT_CHECKS, PRE_PUSH_CHECKS, REGISTRY};
+use crate::check::{Builtin, Check, Stage};
+use crate::registry::{stage_checks, Ctx};
 use crate::ui::{highlight, warning_sign};
 use crate::{cherry_pick_in_progress, configured_skips};
 
-fn handler(name: &str) -> HookFn {
-    REGISTRY
-        .iter()
-        .find(|(r, _)| *r == name)
-        .expect("a declared check is registered — enforced by a registry test")
-        .1
-}
-
-/// The declared checks, minus anything `hook.skip` filters out. `hook.skip`
+/// The checks for a stage, minus anything `hook.skip` filters out. `hook.skip`
 /// yields substrings and matches by CONTAINS, exactly as it did against paths,
 /// so existing config keeps working: `git config hook.skip ruff` still skips
 /// `pre-commit-ruff`.
-fn selected(list: &[&'static str]) -> Vec<&'static str> {
+fn selected(stage: Stage) -> Vec<&'static Builtin> {
     let skips = configured_skips();
-    let (kept, dropped): (Vec<_>, Vec<_>) = list
-        .iter()
-        .copied()
-        .partition(|n| !skips.iter().any(|s| crate::skip_suppresses(n, s)));
-    announce_skips(&dropped);
+    let (kept, dropped): (Vec<_>, Vec<_>) =
+        stage_checks(stage).partition(|c| !skips.iter().any(|s| crate::skip_suppresses(c.name, s)));
+    let names: Vec<&str> = dropped.iter().map(|c| c.name).collect();
+    announce_skips(&names);
     kept
 }
 
@@ -94,24 +86,24 @@ fn announce_skips(dropped: &[&str]) {
 /// Extracted so the concurrency itself can be tested with a rendezvous instead
 /// of a stopwatch — an earlier wall-clock test was flaky the moment the machine
 /// was busy, and a threshold that trips under load teaches you to ignore it.
-fn run_concurrently<F>(names: &[&'static str], run: F) -> Vec<(&'static str, i32)>
+fn run_concurrently<T, F>(items: &[T], run: F) -> Vec<i32>
 where
-    F: Fn(&'static str) -> i32 + Sync,
+    T: Sync,
+    F: Fn(&T) -> i32 + Sync,
 {
-    let slots: Vec<Mutex<Option<i32>>> = names.iter().map(|_| Mutex::new(None)).collect();
+    let slots: Vec<Mutex<Option<i32>>> = items.iter().map(|_| Mutex::new(None)).collect();
     std::thread::scope(|scope| {
-        for (name, slot) in names.iter().zip(&slots) {
+        for (item, slot) in items.iter().zip(&slots) {
             let run = &run;
             scope.spawn(move || {
-                let code = run(name);
+                let code = run(item);
                 *slot.lock().expect("poisoned") = Some(code);
             });
         }
     });
-    names
-        .iter()
-        .zip(slots)
-        .map(|(n, s)| (*n, s.into_inner().expect("poisoned").unwrap_or(1)))
+    slots
+        .into_iter()
+        .map(|s| s.into_inner().expect("poisoned").unwrap_or(1))
         .collect()
 }
 
@@ -119,20 +111,20 @@ pub fn pre_commit(ctx: &Ctx) -> i32 {
     if cherry_pick_in_progress(ctx.hooks_dir) {
         return 0;
     }
-    let checks = selected(PRE_COMMIT_CHECKS);
+    let checks = selected(Stage::PreCommit);
     if checks.is_empty() {
         return 0;
     }
 
     let last_failure = AtomicI32::new(0);
-    let results = run_concurrently(&checks, |name| {
+    let codes = run_concurrently(&checks, |check| {
         let sub = Ctx {
-            name,
+            name: check.name,
             args: ctx.args,
             hooks_dir: ctx.hooks_dir,
             push: ctx.push,
         };
-        let code = handler(name)(&sub);
+        let code = check.run(&sub);
         if code != 0 {
             // Last failure wins the exit code, as the zsh version did.
             last_failure.store(code, Ordering::Relaxed);
@@ -140,10 +132,11 @@ pub fn pre_commit(ctx: &Ctx) -> i32 {
         code
     });
 
-    let failed: Vec<&str> = results
+    let failed: Vec<&str> = checks
         .iter()
-        .filter(|(_, c)| *c != 0)
-        .map(|(n, _)| *n)
+        .zip(&codes)
+        .filter(|(_, c)| **c != 0)
+        .map(|(check, _)| check.name)
         .collect();
     if failed.is_empty() {
         return 0;
@@ -151,25 +144,25 @@ pub fn pre_commit(ctx: &Ctx) -> i32 {
     // Every failure is listed — that is the whole reason this one is concurrent.
     println!("\n🚨  Error raised by:");
     for f in &failed {
-        println!("    - \u{1b}[38;5;208m{f}\u{1b}[0m");
+        println!("    - {}", highlight(f));
     }
     last_failure.load(Ordering::Relaxed)
 }
 
 pub fn pre_push(ctx: &Ctx) -> i32 {
     // NB: no CHERRY_PICK_HEAD check here — the zsh pre-push had none either.
-    for name in selected(PRE_PUSH_CHECKS) {
+    for check in selected(Stage::PrePush) {
         let sub = Ctx {
-            name,
+            name: check.name,
             args: ctx.args,
             hooks_dir: ctx.hooks_dir,
             push: ctx.push,
         };
-        let code = handler(name)(&sub);
+        let code = check.run(&sub);
         if code != 0 {
             // Singular, and stop here: the later steps are expensive and their
             // preconditions no longer hold.
-            println!("\n🚨  Error raised by hook \u{1b}[38;5;208m{name}\u{1b}[0m");
+            println!("\n🚨  Error raised by hook {}", highlight(check.name));
             return code;
         }
     }
@@ -192,7 +185,7 @@ mod tests {
         let names: Vec<&'static str> = vec!["a", "b", "c", "d"];
         let n = names.len();
 
-        let out = run_concurrently(&names, move |_| {
+        let out = run_concurrently(&names, move |_: &&str| {
             ARRIVED.fetch_add(1, Ordering::SeqCst);
             let deadline = Instant::now() + Duration::from_secs(10);
             while ARRIVED.load(Ordering::SeqCst) < n {
@@ -204,7 +197,7 @@ mod tests {
             0
         });
         assert!(
-            out.iter().all(|(_, c)| *c == 0),
+            out.iter().all(|c| *c == 0),
             "tasks did not overlap: {out:?}"
         );
     }
@@ -212,8 +205,8 @@ mod tests {
     #[test]
     fn results_come_back_in_input_order() {
         let names: Vec<&'static str> = vec!["first", "second", "third"];
-        let out = run_concurrently(&names, |n| if n == "second" { 7 } else { 0 });
-        assert_eq!(out, vec![("first", 0), ("second", 7), ("third", 0)]);
+        let out = run_concurrently(&names, |n| if *n == "second" { 7 } else { 0 });
+        assert_eq!(out, vec![0, 7, 0], "results keep the input order");
     }
 
     /// `hook.skip` matches by substring, as it did when it filtered paths.

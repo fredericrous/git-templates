@@ -35,6 +35,14 @@ fn main() {
         }
     }
 
+    // `githooks list` — what would run here, and why. Lives in the HOOK binary
+    // rather than the fleet tool because this is the binary installed
+    // everywhere, and the question is asked about the repo you are standing in.
+    if rest.first().is_some_and(|a| a == "list") || hook.as_deref() == Some("list") {
+        githooks_runtime::list_checks();
+        std::process::exit(0);
+    }
+
     let (Some(hooks_dir), Some(hook)) = (hooks_dir, hook) else {
         eprintln!("usage: githooks --hooks-dir <dir> <hook-name> [args…]");
         std::process::exit(2);

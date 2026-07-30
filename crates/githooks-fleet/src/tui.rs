@@ -987,6 +987,7 @@ mod tests {
             foreign_subs: Vec::new(),
             hook_pkgjson: false,
             languages: vec!["rust".into()],
+            applicable: Vec::new(),
             skips: Vec::new(),
         }
     }
