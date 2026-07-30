@@ -51,12 +51,10 @@ impl Repo {
     }
 
     pub fn git(&self, args: &[&str]) -> Output {
-        Command::new("git")
-            .args(args)
-            .current_dir(&self.dir)
-            .stdin(Stdio::null())
-            .output()
-            .expect("run git")
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(&self.dir).stdin(Stdio::null());
+        Self::strip_git_env_impl(&mut cmd);
+        cmd.output().expect("run git")
     }
 
     /// Write a file (creating parents) and stage it.
@@ -81,6 +79,20 @@ impl Repo {
         self.git(&["commit", "-q", "--no-verify", "-m", msg]);
     }
 
+    /// Remove git's exported environment.
+    ///
+    /// These tests are themselves run by `pre-push-cargo-test`, and git gives a
+    /// hook GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE pointing at the REAL repo.
+    /// Those beat `current_dir`, so without this a fixture's `git commit`
+    /// commits to git-templates itself. It did exactly that once.
+    fn strip_git_env_impl(cmd: &mut Command) {
+        for (k, _) in std::env::vars_os() {
+            if k.to_string_lossy().starts_with("GIT_") {
+                cmd.env_remove(&k);
+            }
+        }
+    }
+
     /// Run a hook through the binary, as the shim would.
     pub fn hook(&self, name: &str, args: &[&str]) -> HookRun {
         let mut cmd = Command::new(bin());
@@ -90,6 +102,7 @@ impl Repo {
             .args(args)
             .current_dir(&self.dir)
             .stdin(Stdio::null());
+        Self::strip_git_env_impl(&mut cmd);
         let out = cmd.output().expect("run githooks");
         HookRun {
             code: out.status.code().unwrap_or(-1),
