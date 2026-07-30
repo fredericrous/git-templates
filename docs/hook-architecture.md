@@ -66,7 +66,7 @@ externals — and stops caring which is which.
 
 What this removes: four tables become one declaration per check, and the
 reconciliation tests become **unnecessary rather than merely passing**. That is
-the win. Five signatures become one. `scope()` becomes authoritative, so the
+the win. Three signatures and eight entry-point names become one shape. `scope()` becomes authoritative, so the
 dashboard asks the check instead of guessing, and the approximation caveat can
 be deleted rather than documented.
 
