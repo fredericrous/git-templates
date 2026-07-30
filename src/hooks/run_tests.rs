@@ -1,13 +1,14 @@
 //! pre-push-run-tests-js — run each touched JS package's gate before pushing.
 //!
-//! git feeds pre-push one line per ref on stdin:
+//! git feeds pre-push one line per ref on stdin. That list is parsed ONCE by
+//! the dispatcher (see `pushrefs`) and lent here, because stdin can only be
+//! consumed once and more than one check needs it:
 //!     <local ref> <local oid> <remote ref> <remote oid>
 //! An all-zero local oid is a deletion; an all-zero remote oid means the branch
 //! is new, so everything it carries is in range.
 
 use super::common::program;
 use crate::git;
-use std::io::BufRead;
 use std::process::{Command, Stdio};
 
 /// Whichever of these the package defines, cheapest first, stopping at the
@@ -155,7 +156,7 @@ fn run_gate(root: &str, folder: &str) -> i32 {
     0
 }
 
-pub fn run(_args: &[std::ffi::OsString]) -> i32 {
+pub fn run(refs: &[crate::pushrefs::PushRef]) -> i32 {
     // An all-zero oid, of whatever length this repo's hash is (sha1 or sha256).
     let zero = git::stdout(&["hash-object", "--stdin"])
         .map(|h| "0".repeat(h.len()))
@@ -168,12 +169,8 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
         .map(|f| package_dirs(&f))
         .unwrap_or_default();
 
-    for line in std::io::stdin().lock().lines().map_while(Result::ok) {
-        let f: Vec<&str> = line.split_whitespace().collect();
-        if f.len() < 4 {
-            continue;
-        }
-        let (local_oid, remote_oid) = (f[1], f[3]);
+    for r in refs {
+        let (local_oid, remote_oid) = (r.local_oid.as_str(), r.remote_oid.as_str());
         if local_oid == zero {
             continue; // deleting a ref pushes no code
         }

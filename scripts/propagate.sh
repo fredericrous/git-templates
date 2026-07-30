@@ -58,7 +58,9 @@ for gitdir in $(find "$ROOT" -maxdepth 6 -type d -name .git 2>/dev/null | sort);
   repos=$((repos + 1))
 
   # 1. Retire stale shims: any of ours whose name is not in the current set.
-  #    Covers the .zsh/.js rename and any hook deleted upstream.
+  #    Since checks moved in-process this removes the 16 sub-hook shims too —
+  #    they are no longer installed, and the binary no longer answers to their
+  #    names, so leaving one behind means a commit dies on `unknown hook`.
   for f in "$hooks"/*; do
     [ -f "$f" ] || continue
     name=$(basename "$f")
@@ -70,7 +72,18 @@ for gitdir in $(find "$ROOT" -maxdepth 6 -type d -name .git 2>/dev/null | sort);
     removed=$((removed + 1))
   done
 
-  # 2. The vestigial node-era package.json: it forced CommonJS for the .js
+  # 2. Hand-written sub-hooks. `pre-push-branch-protect.sh` in two repos is now
+  #    a built-in check; anything else here would be dispatched by a glob that
+  #    no longer exists, so it would silently stop running. Removing it is the
+  #    honest outcome — a file that never runs is worse than no file.
+  for f in "$hooks"/pre-commit-* "$hooks"/pre-push-*; do
+    [ -f "$f" ] || continue
+    say "rm  $f  (sub-hooks are in-process now)"
+    [ "$APPLY" = "1" ] && rm -f "$f"
+    removed=$((removed + 1))
+  done
+
+  # 3. The vestigial node-era package.json: it forced CommonJS for the .js
   #    hooks, and no hook is node any more. Match on content, not just name,
   #    so a repo that put its own package.json here keeps it.
   if [ -f "$hooks/package.json" ] && grep -q 'Forces Node' "$hooks/package.json" 2>/dev/null; then
@@ -79,7 +92,7 @@ for gitdir in $(find "$ROOT" -maxdepth 6 -type d -name .git 2>/dev/null | sort);
     pkgjson=$((pkgjson + 1))
   fi
 
-  # 3. Install the current set, baking the absolute binary path. Git hooks do
+  # 4. Install the current set, baking the absolute binary path. Git hooks do
   #    not inherit an interactive PATH, so a PATH-only shim fails under GUI
   #    clients (see the Makefile's bake-shims).
   for s in "$SRC"/*; do

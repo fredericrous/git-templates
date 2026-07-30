@@ -10,7 +10,6 @@
 //!
 //!     githooks --hooks-dir <dir> pre-commit [args…]
 
-use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -18,6 +17,7 @@ use std::process::{Command, Stdio};
 mod dispatch;
 mod git;
 mod hooks;
+mod pushrefs;
 mod registry;
 mod ui;
 mod vocabulary;
@@ -49,24 +49,12 @@ fn main() {
         std::process::exit(2);
     };
 
-    // The shipped shims no longer carry `.zsh` / `.js` suffixes, but this
-    // stripping STAYS, permanently and on purpose: a repo whose .git/hooks was
-    // seeded before the rename still has the old filenames, and the shim passes
-    // its own filename through. Dropping this would leave every un-swept repo
-    // dispatching an unknown hook — exit 2, and no commit gets through.
-    //
-    // It costs one string compare per invocation and removes any ordering
-    // requirement between installing the binary and sweeping the repos.
-    let hook = hook
-        .strip_suffix(".zsh")
-        .or_else(|| hook.strip_suffix(".js"))
-        .unwrap_or(&hook)
-        .to_owned();
-
+    let push = pushrefs::PushRefs::default();
     let ctx = registry::Ctx {
         name: &hook,
         args: &rest,
         hooks_dir: &hooks_dir,
+        push: &push,
     };
     let code = match registry::lookup(&hook) {
         Some(f) => f(&ctx),
@@ -76,45 +64,6 @@ fn main() {
         }
     };
     std::process::exit(code);
-}
-
-/// Sub-hooks for `hook`, in the order the shell glob produced: `<hook>-*` in
-/// `dir`, sorted. Order is not cosmetic — pre-push relies on branch-pattern
-/// running before pull-rebase before the test suite.
-pub fn sub_hooks(dir: &Path, hook: &str) -> Vec<PathBuf> {
-    let prefix = format!("{hook}-");
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    // BTreeSet gives the glob's lexicographic order, deterministically.
-    let mut found = BTreeSet::new();
-    for e in entries.flatten() {
-        let name = e.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if name.starts_with(&prefix) {
-            found.insert(e.path());
-        }
-    }
-    found.into_iter().collect()
-}
-
-/// Drop sub-hooks the user opted out of. `git config --get-all hook.skip`
-/// yields substrings; the zsh dispatcher removed any path CONTAINING one
-/// (`${HOOKS_PATH:#*$i*}`), which is what makes
-/// `git -c hook.skip=package-lock commit` work. Substring, not equality.
-pub fn apply_skips(hooks: Vec<PathBuf>, skips: &[String]) -> Vec<PathBuf> {
-    if skips.is_empty() {
-        return hooks;
-    }
-    hooks
-        .into_iter()
-        .filter(|p| {
-            let s = p.to_string_lossy();
-            !skips
-                .iter()
-                .any(|skip| !skip.is_empty() && s.contains(skip.as_str()))
-        })
-        .collect()
 }
 
 /// `git config --get-all hook.skip`, or empty when unset/unavailable.
@@ -137,5 +86,13 @@ pub fn configured_skips() -> Vec<String> {
 /// True during a cherry-pick, where the zsh `pre-commit` exited 0 immediately.
 /// The marker sits next to the hooks directory, i.e. in `.git/`.
 pub fn cherry_pick_in_progress(hooks_dir: &Path) -> bool {
-    hooks_dir.join("..").join("CHERRY_PICK_HEAD").exists()
+    // `parent()` is LEXICAL; `join("..")` is not. The latter makes the kernel
+    // resolve `hooks/..`, which fails outright when the hooks directory does
+    // not exist — and `git init --template=` creates no hooks directory. The
+    // check then reports "no cherry-pick" for a reason that has nothing to do
+    // with cherry-picks.
+    hooks_dir
+        .parent()
+        .map(|d| d.join("CHERRY_PICK_HEAD").exists())
+        .unwrap_or(false)
 }

@@ -3,6 +3,7 @@
 //! .zsh suite exercises the Rust implementation unchanged.
 pub mod ban_terms;
 pub mod branch_pattern;
+pub mod branch_protect;
 pub mod commit_msg;
 pub mod common;
 pub mod k8s;
