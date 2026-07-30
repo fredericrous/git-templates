@@ -189,6 +189,7 @@ mod tests {
             languages: Vec::new(),
             applicable: Vec::new(),
             skips: Vec::new(),
+            severities: Vec::new(),
         }
     }
 

@@ -69,13 +69,21 @@ fn kube_linter_ignores_yaml_outside_the_k8s_prefixes() {
 
 /// Stock rules are too noisy to enforce generically, so a repo-local config is
 /// the opt-in. Without one the hook must SAY it skipped, not lint anyway.
+///
+/// And it must say only that: the opt-in is tested before the binary, so a repo
+/// with no config is not also asked to install a linter it does not use.
 #[test]
 fn kube_linter_says_it_skipped_without_a_config() {
     let r = Repo::new();
     r.stage("kubernetes/app/deploy.yaml", DEPLOY);
     let run = r.hook("pre-commit-kube-linter", &[]);
     assert!(run.passed());
-    assert!(run.says("skipping") || run.says("install"));
+    assert!(run.says("skipping"), "no skip notice:\n{}", run.output());
+    assert!(
+        !run.says("install"),
+        "nagged a repo that never opted in:\n{}",
+        run.output()
+    );
 }
 
 // ---- kubeconform --------------------------------------------------------
@@ -89,11 +97,12 @@ fn kubeconform_ignores_yaml_outside_the_k8s_prefixes() {
 
 /// Raw-YAML validation is out of scope: a project either uses kustomize or it
 /// does not. With no kustomization above the file there is nothing to do.
+///
+/// Unconditional: root discovery runs BEFORE the tool gate, so this holds on a
+/// machine with neither kustomize nor kubeconform installed — which is most of
+/// them, and exactly where a wrongly-ordered gate would have gone unnoticed.
 #[test]
 fn kubeconform_is_silent_with_no_kustomization_root() {
-    if missing("kustomize") || missing("kubeconform") {
-        return; // the tool gate runs BEFORE root discovery
-    }
     let r = Repo::new();
     r.stage("kubernetes/loose/deploy.yaml", DEPLOY);
     assert!(r.hook("pre-commit-kubeconform", &[]).silent());

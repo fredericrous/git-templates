@@ -156,13 +156,13 @@ drifted merely because `__GITHOOKS_BIN__` was replaced.
 │ consistency  commit-msg 96/1 ✓   pre-commit 96/1 ✓   pre-push 96/1 ✓             │
 │              prepare-commit-msg 96/1 ✓          ← copies/distinct blobs          │
 ├─────────────────────────────────────────────────────────────────────────────────┤
-│   REPO                          SHIMS  BAKE     LANG        SKIPS   STATE        │
-│ ▸ Perso/homelab                 ●●●●   current  k8s js      –       ✓ ok         │
-│   Perso/application-landscape   ●●●●   current  js          –       ✓ ok         │
-│   Perso/git-templates           ●●●●   current  rust        –       ✓ ok         │
-│   Perso/trade-agents            ●●●○   current  python      –       ✗ missing 1  │
-│   Perso/frontjutsu/mvp          ●●●●   stale    js          2       ! stale bake │
-│   Volkswagen/pos-fr-services    ●●●●   current  js          –       ✓ ok         │
+│   REPO                       SHIMS  BAKE     LANG      SKIPS  WARN  STATE        │
+│ ▸ Perso/homelab              ●●●●   current  k8s js    –      –     ✓ ok         │
+│   Perso/application-landscape ●●●●  current  js        –      –     ✓ ok         │
+│   Perso/git-templates        ●●●●   current  rust      –      –     ✓ ok         │
+│   Perso/trade-agents         ●●●○   current  python    –      –     ✗ missing 1  │
+│   Perso/frontjutsu/mvp       ●●●●   stale    js        2      1     ! stale bake │
+│   Volkswagen/pos-fr-services ●●●●   current  js        –      –     ✓ ok         │
 │   …                                                                              │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │ 96 rows · 0 filtered   ↑↓ move  ⏎ detail  / filter  : command  h hooks  ? help   │
@@ -177,6 +177,13 @@ drifted merely because `__GITHOOKS_BIN__` was replaced.
   on its name.
 - `STATE` is a redundant text summary of the same information, so the screen
   survives `NO_COLOR` and CVD.
+- `SKIPS` and `WARN` are deliberately two columns, not one total. A skipped check
+  does not run; a downgraded one runs, prints its failure, and lets the commit
+  through. Summing them would hide the second — which is the one that looks like
+  enforcement and is not. `WARN` counts only overrides that actually weaken
+  something: an explicit `block`, a misspelt check name and an unrecognised value
+  all change nothing, and inflating the count with them is how a column stops
+  being read. The detail pane names all three.
 
 ### The empty state, which is the point
 
@@ -287,8 +294,9 @@ refuses any path git reports as tracked.
 - **`NO_COLOR`** (and `TERM=dumb`) → glyph-and-text rendering, fully usable.
 - **CVD-safe**: state never encoded by colour alone; every colour is paired with
   a distinct glyph and a word in the legend.
-- **Narrow terminals**: below 100 columns drop `LANG` then `SKIPS`; below 60,
-  fall back to a single-column list. Never horizontal scrolling.
+- **Narrow terminals**: below 100 columns drop `LANG`, `SKIPS` and `WARN`
+  together; below 60, fall back to a single-column list. Never horizontal
+  scrolling.
 - **Screen readers do not meaningfully work with TUIs.** The accessible path is
   therefore `githooks fleet --json`, emitting the full data model for scripting
   and assistive tooling. This is a first-class output, not a debug flag, and the

@@ -6,6 +6,7 @@
 //! another's.
 
 use super::common::{fail, hl, ok, repo_root, staged_files, warn};
+use crate::check::Outcome;
 use std::path::Path;
 
 fn dir_of(path: &str) -> &str {
@@ -87,14 +88,14 @@ fn confirm() -> bool {
     false
 }
 
-pub fn run(_args: &[std::ffi::OsString]) -> i32 {
+pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
     let staged = staged_files(&[]);
     let root = repo_root();
     let v = classify(&staged, |lock| Path::new(&root).join(lock).is_file());
 
     if v.forgot_lock.is_empty() && v.orphan_lock.is_empty() {
         ok("package.json & package-lock.json look in sync");
-        return 0;
+        return Outcome::Passed;
     }
     for f in &v.orphan_lock {
         fail(&format!("{} staged without its package.json", hl(f)));
@@ -107,15 +108,19 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
     }
 
     // An orphan lock is a hard error; a merely-forgotten one can be confirmed past.
+    //
+    // `Warned`, not `Passed`: the lockfile really is out of sync and the commit
+    // goes through anyway. The human waived it, which is not the same as there
+    // being nothing to waive.
     if v.orphan_lock.is_empty() && confirm() {
-        return 0;
+        return Outcome::Warned;
     }
     fail(&format!(
         "Run {} and stage the lockfile, or bypass with {}",
         hl("npm install"),
         hl("git -c hook.skip=package-lock commit")
     ));
-    1
+    Outcome::Failed
 }
 
 #[cfg(test)]

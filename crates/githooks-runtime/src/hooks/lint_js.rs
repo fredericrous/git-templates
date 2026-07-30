@@ -3,11 +3,12 @@
 use super::common::{
     fail, first_existing, hl, ok, repo_root, resolve_tool, run as run_tool, staged_files, warn,
 };
+use crate::check::Outcome;
 
-pub fn run(args: &[std::ffi::OsString]) -> i32 {
+pub fn run(args: &[std::ffi::OsString]) -> Outcome {
     let files = staged_files(&[".js", ".jsx", ".ts", ".tsx", ".vue"]);
     if files.is_empty() {
-        return 0;
+        return Outcome::Passed;
     }
     let root = repo_root();
 
@@ -36,7 +37,7 @@ pub fn run(args: &[std::ffi::OsString]) -> i32 {
             .unwrap_or(false);
     if !has_config {
         ok("ESLint skipped (no eslint config)");
-        return 0;
+        return Outcome::Passed;
     }
 
     let Some(argv) = resolve_tool(&root, "eslint") else {
@@ -46,15 +47,15 @@ pub fn run(args: &[std::ffi::OsString]) -> i32 {
             "eslint config found but no eslint binary. Run {}",
             hl("npm install")
         ));
-        return 0;
+        return Outcome::Unavailable;
     };
 
     let mut extra = files;
     extra.extend(args.iter().filter_map(|a| a.to_str()).map(str::to_owned));
     if !run_tool(&root, &argv, &extra) {
         fail("ESLint issues found. Please fix");
-        return 1;
+        return Outcome::Failed;
     }
     ok("ESLint passed");
-    0
+    Outcome::Passed
 }

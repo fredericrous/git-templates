@@ -90,7 +90,7 @@ pub fn for_test(value: &str) -> SkipEntry {
     }
 }
 
-fn scope_of(origin: &str) -> Scope {
+pub fn scope_of(origin: &str) -> Scope {
     // `--show-origin` prints `file:<path>`; the global file is the one under
     // $HOME rather than inside a repository.
     let path = origin.strip_prefix("file:").unwrap_or(origin);

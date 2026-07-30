@@ -75,12 +75,17 @@ fn go_template_yaml_outside_a_chart_still_fails() {
 
 /// Stock yamllint rules are too noisy to enforce generically, so a repo-local
 /// config is the opt-in signal. Without one the hook must do nothing.
+///
+/// SILENT, not merely passing, and that holds whether or not yamllint is
+/// installed: the opt-in is tested before the binary, so a repo that never
+/// asked for yamllint is never told to install it. One repo in the fleet has
+/// this config; the nag used to reach the other ninety-five.
 #[test]
 fn yamllint_does_nothing_without_a_repo_config() {
     let r = Repo::new();
     r.stage("a.yaml", "a:   1\n");
     let run = r.hook("pre-commit-yamllint", &[]);
-    assert!(run.passed());
+    assert!(run.silent(), "expected silence, got:\n{}", run.output());
 }
 
 #[test]

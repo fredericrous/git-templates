@@ -17,6 +17,7 @@ use std::process::Command;
 
 use serde::Serialize;
 
+use crate::severities::{self, SeverityOverride};
 use crate::shim::{self, BakeState, ShimState, DISPATCHERS};
 use crate::skips::{self, SkipEntry};
 
@@ -51,6 +52,11 @@ pub struct Repo {
     /// came from. Bare strings hid both — a value is a SUBSTRING pattern, not a
     /// check name, and local/global are indistinguishable once merged.
     pub skips: Vec<SkipEntry>,
+    /// `githooks.severity.*` entries. A downgraded check still runs and still
+    /// prints its failure, so unlike a skip it leaves no trace on screen — a
+    /// repo that enforces nothing reads exactly like one that enforces
+    /// everything unless this column says otherwise.
+    pub severities: Vec<SeverityOverride>,
 }
 
 /// A whole scan, including how it was performed.
@@ -246,6 +252,7 @@ fn inspect(root: &Path, repo: &Path, hooks: &Path, managed: bool, installed_bina
         languages: languages(repo),
         applicable: applicable_checks(repo),
         skips: skips::read(repo),
+        severities: severities::read(repo),
     }
 }
 

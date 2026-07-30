@@ -85,12 +85,64 @@ impl Scope {
     }
 }
 
+/// What a check meant, as opposed to what it printed.
+///
+/// The fourth variant is the point. Fifteen sites used to warn and return 0,
+/// collapsing two different situations: "I ran and found something you should
+/// know" and "I could not run at all". `ruff config found but no ruff binary`
+/// was indistinguishable from ruff running clean — to the dispatcher, and to
+/// the dashboard. A repository where a check has silently never executed read
+/// as one where it passes.
+///
+/// That is the same invisibility `hook.skip` had before skipped checks were
+/// announced, and it took three PRs to notice there.
+///
+/// The check still prints its own message; this only classifies the result.
+/// `Default` is `Failed` on purpose: it fills the slot of a check whose thread
+/// died, and a check that vanished must never read as one that passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Outcome {
+    Passed,
+    /// Ran, found a problem. Whether that blocks is `Severity`, not this.
+    #[default]
+    Failed,
+    /// Ran, found something worth saying, which does not block.
+    Warned,
+    /// COULD NOT RUN — a tool is missing, or the opt-in config is absent.
+    Unavailable,
+}
+
+impl Outcome {
+    /// Legacy adapter while checks are converted one at a time.
+    pub fn from_code(code: i32) -> Outcome {
+        if code == 0 {
+            Outcome::Passed
+        } else {
+            Outcome::Failed
+        }
+    }
+}
+
+/// Whether a failing check stops the commit or merely reports.
+///
+/// Declared per check and overridable per repository with
+/// `git config githooks.severity.<check> warn`. That is a better escape hatch
+/// than `hook.skip`, which is all-or-nothing and invisible enough that
+/// `hook.skip = e` disables all twenty checks: a downgrade keeps the signal and
+/// removes only the block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Block,
+    Warn,
+}
+
 /// One check. `Builtin` today; `External` when a declared command implements it.
 pub trait Check {
     fn name(&self) -> &str;
     fn stage(&self) -> Stage;
     fn scope(&self) -> Scope;
-    fn run(&self, ctx: &Ctx) -> i32;
+    fn severity(&self) -> Severity;
+    fn run(&self, ctx: &Ctx) -> Outcome;
 }
 
 /// A check compiled into the binary.
@@ -98,7 +150,8 @@ pub struct Builtin {
     pub name: &'static str,
     pub stage: Stage,
     pub scope: Scope,
-    pub run: fn(&Ctx) -> i32,
+    pub severity: Severity,
+    pub run: fn(&Ctx) -> Outcome,
 }
 
 impl Check for Builtin {
@@ -111,7 +164,10 @@ impl Check for Builtin {
     fn scope(&self) -> Scope {
         self.scope
     }
-    fn run(&self, ctx: &Ctx) -> i32 {
+    fn severity(&self) -> Severity {
+        self.severity
+    }
+    fn run(&self, ctx: &Ctx) -> Outcome {
         (self.run)(ctx)
     }
 }

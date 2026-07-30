@@ -5,6 +5,7 @@
 //! kustomize/kubeconform/argo installed.
 
 use super::common::{fail, hl, ok, program, repo_root, staged_files, warn, which};
+use crate::check::Outcome;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -43,10 +44,10 @@ pub fn declares_argo_kind(content: &str) -> bool {
     })
 }
 
-pub fn argo_lint(_args: &[std::ffi::OsString]) -> i32 {
+pub fn argo_lint(_args: &[std::ffi::OsString]) -> Outcome {
     let staged = k8s_staged();
     if staged.is_empty() {
-        return 0;
+        return Outcome::Passed;
     }
     let root = repo_root();
     let workflows: Vec<String> = staged
@@ -58,14 +59,14 @@ pub fn argo_lint(_args: &[std::ffi::OsString]) -> i32 {
         })
         .collect();
     if workflows.is_empty() {
-        return 0;
+        return Outcome::Passed;
     }
     if which("argo").is_none() {
         warn(&format!(
             "Argo workflow manifests staged. Skipping argo lint; install: {}",
             hl("argo")
         ));
-        return 0;
+        return Outcome::Unavailable;
     }
     // --offline: no cluster needed, inline templates only. Flux ${VAR}
     // postBuild placeholders are inert strings to the linter; Argo {{…}}
@@ -81,14 +82,14 @@ pub fn argo_lint(_args: &[std::ffi::OsString]) -> i32 {
         .unwrap_or(false);
     if !okd {
         fail("argo lint failed (output above)");
-        return 1;
+        return Outcome::Failed;
     }
     let n = workflows.len();
     ok(&format!(
         "argo lint passed ({n} workflow manifest{})",
         if n > 1 { "s" } else { "" }
     ));
-    0
+    Outcome::Passed
 }
 
 /// Repo-root `.kube-linter*.yaml` / `.yml`, sorted for a stable run order.
@@ -105,24 +106,26 @@ pub fn kube_linter_configs(root: &str) -> Vec<String> {
     out
 }
 
-pub fn kube_linter(_args: &[std::ffi::OsString]) -> i32 {
+pub fn kube_linter(_args: &[std::ffi::OsString]) -> Outcome {
     if k8s_staged().is_empty() {
-        return 0;
-    }
-    if which("kube-linter").is_none() {
-        warn(&format!(
-            "Kubernetes manifests staged. To lint them, install {}",
-            hl("kube-linter")
-        ));
-        return 0;
+        return Outcome::Passed;
     }
     let root = repo_root();
     // Stock kube-linter rules are too noisy to enforce generically, so a
-    // repo-local config is the opt-in signal.
+    // repo-local config is the opt-in signal — and it is tested before the
+    // binary, so a repo that never opted in is not told to install a linter it
+    // does not use, and does not report a gap it does not have.
     let configs = kube_linter_configs(&root);
     if configs.is_empty() {
         warn("Kubernetes manifests staged but no .kube-linter*.yaml found; skipping");
-        return 0;
+        return Outcome::Passed;
+    }
+    if which("kube-linter").is_none() {
+        warn(&format!(
+            "This repo configures kube-linter but it is not installed. Install {}",
+            hl("kube-linter")
+        ));
+        return Outcome::Unavailable;
     }
     // One run per config: each config's own `excludes:` and scope (set inside
     // the YAML, not on the CLI) decide which manifests it applies to, so
@@ -142,14 +145,14 @@ pub fn kube_linter(_args: &[std::ffi::OsString]) -> i32 {
         }
     }
     if overall != 0 {
-        return 1;
+        return Outcome::Failed;
     }
     let n = configs.len();
     ok(&format!(
         "kube-linter passed ({n} config{})",
         if n > 1 { "s" } else { "" }
     ));
-    0
+    Outcome::Passed
 }
 
 /// Walk up from each staged file until a directory holding kustomization.yaml
@@ -188,10 +191,18 @@ pub fn skip_kinds(content: &str) -> Vec<String> {
         .collect()
 }
 
-pub fn kubeconform(_args: &[std::ffi::OsString]) -> i32 {
+pub fn kubeconform(_args: &[std::ffi::OsString]) -> Outcome {
     let staged = k8s_staged();
     if staged.is_empty() {
-        return 0;
+        return Outcome::Passed;
+    }
+    let root = repo_root();
+    let roots = kustomization_roots(&root, &staged);
+    // Raw-YAML validation is out of scope: a project either uses kustomize or
+    // it does not — and that, not the toolbox, is what decides whether this
+    // check had anything to do.
+    if roots.is_empty() {
+        return Outcome::Passed;
     }
     let missing: Vec<&str> = ["kustomize", "kubeconform"]
         .into_iter()
@@ -199,17 +210,10 @@ pub fn kubeconform(_args: &[std::ffi::OsString]) -> i32 {
         .collect();
     if !missing.is_empty() {
         warn(&format!(
-            "Kubernetes manifests staged. Skipping kubeconform; install: {}",
+            "Kustomizations staged. Skipping kubeconform; install: {}",
             hl(&missing.join(", "))
         ));
-        return 0;
-    }
-    let root = repo_root();
-    let roots = kustomization_roots(&root, &staged);
-    // Raw-YAML validation is out of scope: a project either uses kustomize or
-    // it does not.
-    if roots.is_empty() {
-        return 0;
+        return Outcome::Unavailable;
     }
 
     let skip = std::fs::read_to_string(Path::new(&root).join(".kubeconform-skip"))
@@ -226,14 +230,14 @@ pub fn kubeconform(_args: &[std::ffi::OsString]) -> i32 {
         }
     }
     if overall != 0 {
-        return 1;
+        return Outcome::Failed;
     }
     let n = roots.len();
     ok(&format!(
         "kubeconform passed ({n} kustomization root{})",
         if n > 1 { "s" } else { "" }
     ));
-    0
+    Outcome::Passed
 }
 
 /// `kustomize build <root> | kubeconform …`, with the shell's `pipefail`

@@ -13,6 +13,7 @@ mod apply;
 mod checks;
 mod fix;
 mod scan;
+mod severities;
 mod shim;
 mod skips;
 mod tui;

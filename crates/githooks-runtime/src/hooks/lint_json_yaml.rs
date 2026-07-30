@@ -2,6 +2,7 @@
 //! reaches the repo. Both linters soft-fail when absent: warn, don't block.
 
 use super::common::{fail, hl, ok, repo_root, staged_files, warn, which};
+use crate::check::Outcome;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -31,14 +32,18 @@ fn parses(root: &str, tool: &str, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-pub fn run(_args: &[std::ffi::OsString]) -> i32 {
+pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
     let json: Vec<String> = staged_files(&[".json"]);
     let yaml: Vec<String> = staged_files(&[".yaml"]);
     if json.is_empty() && yaml.is_empty() {
-        return 0;
+        return Outcome::Passed;
     }
     let root = repo_root();
-    let mut rc = 0;
+    // Two independent halves. A missing parser silences one of them, and a
+    // half that never ran must not be reported as a half that passed — so
+    // both a failure anywhere and a gap anywhere outrank the clean case.
+    let mut failed = false;
+    let mut unavailable = false;
 
     if !json.is_empty() {
         if which("node").is_some() {
@@ -46,7 +51,7 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
                 let script = r#"JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))"#;
                 if !parses(&root, "node", &["-e", script, f]) {
                     fail(&format!("Invalid JSON: {}", hl(f)));
-                    rc = 1;
+                    failed = true;
                 }
             }
         } else {
@@ -54,6 +59,7 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
                 "JSON files detected. To lint them, install {}",
                 hl("node")
             ));
+            unavailable = true;
         }
     }
 
@@ -65,7 +71,7 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
                 }
                 if !parses(&root, "yq", &["e", "true", f]) {
                     fail(&format!("Invalid YAML: {}", hl(f)));
-                    rc = 1;
+                    failed = true;
                 }
             }
         } else {
@@ -73,11 +79,16 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
                 "YAML files detected. To lint them, install {}",
                 hl("yq")
             ));
+            unavailable = true;
         }
     }
 
-    if rc == 0 {
-        ok("Json/Yaml Lint passed");
+    match (failed, unavailable) {
+        (true, _) => Outcome::Failed,
+        (false, true) => Outcome::Unavailable,
+        (false, false) => {
+            ok("Json/Yaml Lint passed");
+            Outcome::Passed
+        }
     }
-    rc
 }

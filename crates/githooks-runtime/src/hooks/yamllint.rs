@@ -2,31 +2,38 @@
 
 use super::common::run as run_tool;
 use super::common::{fail, first_existing, hl, ok, repo_root, staged_files, warn, which};
+use crate::check::Outcome;
 
-pub fn run(_args: &[std::ffi::OsString]) -> i32 {
+pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
     let files = staged_files(&[".yaml", ".yml"]);
     if files.is_empty() {
-        return 0;
-    }
-    if which("yamllint").is_none() {
-        warn(&format!(
-            "YAML files detected. To strict-lint them, install {}",
-            hl("yamllint")
-        ));
-        return 0;
+        return Outcome::Passed;
     }
     let root = repo_root();
     // yamllint's stock rules are too noisy to enforce generically, so a
     // repo-local config is the opt-in signal. Skip silently without one.
+    //
+    // The opt-in is tested BEFORE the binary: one repo in the fleet has this
+    // config, so asking the other ninety-five to install a tool they never
+    // wanted was ninety-five nags, and — since Outcome exists — ninety-five
+    // dashboard rows reading "could not run" for a check that had nothing
+    // to run.
     let Some(config) = first_existing(&root, &[".yamllint.yaml", ".yamllint.yml", ".yamllint"])
     else {
-        return 0;
+        return Outcome::Passed;
+    };
+    if which("yamllint").is_none() {
+        warn(&format!(
+            "This repo configures yamllint but it is not installed. Install {}",
+            hl("yamllint")
+        ));
+        return Outcome::Unavailable;
     };
     let argv = vec!["yamllint".to_string(), "-c".to_string(), config];
     if !run_tool(&root, &argv, &files) {
         fail("yamllint found issues. Please fix");
-        return 1;
+        return Outcome::Failed;
     }
     ok("yamllint passed");
-    0
+    Outcome::Passed
 }
