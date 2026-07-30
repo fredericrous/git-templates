@@ -13,6 +13,7 @@
 //! looked in the wrong place", which no scalar can express.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::Serialize;
 
@@ -40,9 +41,12 @@ pub struct Repo {
     pub foreign_subs: Vec<String>,
     /// The node-era `package.json` that forced CommonJS. No hook is node now.
     pub hook_pkgjson: bool,
-    /// Manifests present at the repo root. Drives inert-vs-failing: a Python
-    /// repo with no Cargo.toml is correctly silent about clippy.
+    /// Manifests present at the repo root. Display only — the LANG column.
     pub languages: Vec<String>,
+    /// Checks that would ever fire here, from each check's own `Scope`
+    /// evaluated against this repo's tracked files. Not inferred by this crate:
+    /// a fourth copy of that rule was what `LANGUAGES` used to be.
+    pub applicable: Vec<String>,
     /// `hook.skip` entries, resolved: what each one suppresses and where it
     /// came from. Bare strings hid both — a value is a SUBSTRING pattern, not a
     /// check name, and local/global are indistinguishable once merged.
@@ -240,6 +244,7 @@ fn inspect(root: &Path, repo: &Path, hooks: &Path, managed: bool, installed_bina
         foreign_subs,
         hook_pkgjson,
         languages: languages(repo),
+        applicable: applicable_checks(repo),
         skips: skips::read(repo),
     }
 }
@@ -264,4 +269,32 @@ fn languages(repo: &Path) -> Vec<String> {
         out.push("k8s".into());
     }
     out
+}
+
+/// Which checks could ever fire in this repository.
+///
+/// One `git ls-files` per repo, evaluated against each check's declared
+/// `Scope`. Coarser than what a check enforces at commit time — `cargo-fmt`
+/// resolves the NEAREST ancestor `Cargo.toml` while this asks whether the repo
+/// contains one at all — and deliberately so: the dispatcher answers "does this
+/// apply to these staged files", and this answers "would it ever fire here".
+/// Over-approximating is the safe direction; the alternative was a table in
+/// this crate guessing at rules the checks already own.
+fn applicable_checks(repo: &Path) -> Vec<String> {
+    let Ok(out) = Command::new("git")
+        .args(["ls-files"])
+        .current_dir(repo)
+        .output()
+    else {
+        return Vec::new();
+    };
+    let paths: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    githooks_runtime::registry::CHECKS
+        .iter()
+        .filter(|c| c.scope.matches(&paths))
+        .map(|c| c.name.to_string())
+        .collect()
 }

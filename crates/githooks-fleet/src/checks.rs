@@ -22,56 +22,20 @@ use githooks_runtime::registry;
 
 use crate::scan::Repo;
 
-/// What makes a check relevant to a repository.
+/// Which checks apply where.
 ///
-/// The NAMES come from the registry — `githooks_runtime::registry` — rather
-/// than a copy. They were hand-copied here at first, and agreed with the
-/// dispatcher only by luck: adding a check to the registry would have left the
-/// dashboard silently omitting it from every view and under-reporting blast
-/// radius. Only the language mapping belongs to this crate, because scoping is
-/// a display concern the dispatcher has no opinion about.
+/// Applicability is no longer modelled here. It used to be a `LANGUAGES` table
+/// keyed by check name — a fourth copy of information the check already had,
+/// and one this module documented as an approximation of what the hooks do.
+/// `Scope` on the check is the declaration; the scanner evaluates it against
+/// each repository's tracked files and stores the answer.
 ///
-/// `every_check_has_a_language_decision` fails if a new check appears without
-/// one, so the choice is forced at the moment it is introduced rather than
-/// defaulted silently — the same reconciliation the commit-type and
-/// branch-prefix vocabularies use.
-const LANGUAGES: &[(&str, Option<&str>)] = &[
-    ("pre-commit-ban-terms", None),
-    ("pre-commit-merge-conflict", None),
-    ("pre-commit-package-lock", Some("js")),
-    ("pre-commit-usual-name", None),
-    ("pre-commit-lint-json-yaml", None),
-    ("pre-commit-yamllint", None),
-    ("pre-commit-lint-js", Some("js")),
-    ("pre-commit-prettier", Some("js")),
-    ("pre-commit-ruff", Some("python")),
-    ("pre-commit-pyright", Some("python")),
-    ("pre-commit-cargo-fmt", Some("rust")),
-    ("pre-commit-clippy", Some("rust")),
-    ("pre-commit-argo-lint", Some("k8s")),
-    ("pre-commit-kube-linter", Some("k8s")),
-    ("pre-commit-kubeconform", Some("k8s")),
-    ("pre-push-branch-protect", None),
-    ("pre-push-branch-pattern", None),
-    ("pre-push-pull-rebase", None),
-    ("pre-push-run-tests-js", Some("js")),
-    ("pre-push-cargo-test", Some("rust")),
-];
-
+/// The distinction that must not blur is inert vs failing. `pre-commit-clippy`
+/// in a Python repo is CORRECTLY silent; rendering that like a broken hook
+/// would manufacture ninety false problems out of the Rust checks alone.
 /// Every check the dispatcher would run, in dispatcher order.
 pub fn all_checks() -> Vec<&'static str> {
-    registry::PRE_COMMIT_CHECKS
-        .iter()
-        .chain(registry::PRE_PUSH_CHECKS.iter())
-        .copied()
-        .collect()
-}
-
-fn language_of(check: &str) -> Option<&'static str> {
-    LANGUAGES
-        .iter()
-        .find(|(n, _)| *n == check)
-        .and_then(|(_, l)| *l)
+    registry::CHECKS.iter().map(|c| c.name).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -97,19 +61,14 @@ fn is_skipped(repo: &Repo, check: &str) -> bool {
 
 pub fn rollup(repos: &[Repo]) -> Vec<CheckRollup> {
     let managed: Vec<&Repo> = repos.iter().filter(|r| r.managed).collect();
-    all_checks()
-        .into_iter()
-        .map(|name| {
-            let lang = language_of(name);
+    registry::CHECKS
+        .iter()
+        .map(|check| {
             let (mut applicable, mut skipped, mut inert) = (0, 0, 0);
             for r in &managed {
-                let applies = match lang {
-                    None => true,
-                    Some(l) => r.languages.iter().any(|x| x == l),
-                };
-                if applies {
+                if r.applicable.iter().any(|a| a == check.name) {
                     applicable += 1;
-                    if is_skipped(r, name) {
+                    if is_skipped(r, check.name) {
                         skipped += 1;
                     }
                 } else {
@@ -117,7 +76,7 @@ pub fn rollup(repos: &[Repo]) -> Vec<CheckRollup> {
                 }
             }
             CheckRollup {
-                name,
+                name: check.name,
                 applicable,
                 active: applicable - skipped,
                 skipped,
@@ -133,7 +92,49 @@ mod tests {
     use crate::shim::{BakeState, ShimState};
     use std::path::PathBuf;
 
+    /// A repo described by the FILES it contains, because that is what a
+    /// check's `Scope` is evaluated against. The fixtures used to be described
+    /// by "languages", which was this crate's own model of applicability — the
+    /// thing the refactor removed.
+    fn repo_with_files(files: &[&str], skips: &[&str], managed: bool) -> Repo {
+        let paths: Vec<String> = files.iter().map(|s| s.to_string()).collect();
+        let applicable = githooks_runtime::registry::CHECKS
+            .iter()
+            .filter(|c| c.scope.matches(&paths))
+            .map(|c| c.name.to_string())
+            .collect();
+        Repo {
+            path: PathBuf::from("r"),
+            managed,
+            shims: vec![ShimState::Ok { baked: "/b".into() }; 4],
+            baked: BakeState::Current,
+            stale_ours: Vec::new(),
+            foreign_subs: Vec::new(),
+            hook_pkgjson: false,
+            languages: Vec::new(),
+            applicable,
+            skips: skips.iter().map(|s| crate::skips::for_test(s)).collect(),
+        }
+    }
+
+    /// Map the old language names onto representative files, so the existing
+    /// cases keep asserting the same thing.
     fn repo(langs: &[&str], skips: &[&str], managed: bool) -> Repo {
+        let mut files = Vec::new();
+        for l in langs {
+            match *l {
+                "rust" => files.extend(["src/main.rs", "Cargo.toml"]),
+                "js" => files.extend(["a.ts", "package.json"]),
+                "python" => files.extend(["a.py", "pyproject.toml"]),
+                "k8s" => files.extend(["k8s/a.yaml", "kustomization.yaml"]),
+                other => panic!("unknown language in fixture: {other}"),
+            }
+        }
+        repo_with_files(&files, skips, managed)
+    }
+
+    #[allow(dead_code)]
+    fn unused_repo(langs: &[&str], skips: &[&str], managed: bool) -> Repo {
         Repo {
             path: PathBuf::from("r"),
             managed,
@@ -143,6 +144,7 @@ mod tests {
             foreign_subs: Vec::new(),
             hook_pkgjson: false,
             languages: langs.iter().map(|s| s.to_string()).collect(),
+            applicable: Vec::new(),
             skips: skips.iter().map(|s| crate::skips::for_test(s)).collect(),
         }
     }
@@ -203,52 +205,32 @@ mod tests {
         }
     }
 
+    /// Only the checks that genuinely have no file condition apply everywhere.
+    ///
+    /// The old `LANGUAGES` table marked `ban-terms` as `None`, meaning "applies
+    /// to every repo" — but it scans `.js/.jsx/.ts/.tsx/.vue` and nothing else,
+    /// so the dashboard was reporting it applicable to all 96 repositories.
+    /// `lint-json-yaml` and `yamllint` were mis-declared the same way. That is
+    /// what a second model of applicability costs: it drifts from the rule the
+    /// check actually applies, and nothing notices.
     #[test]
-    fn language_free_checks_apply_everywhere() {
+    fn only_genuinely_unconditional_checks_apply_everywhere() {
         let rs = rollup(&[repo(&[], &[], true), repo(&["js"], &[], true)]);
-        assert_eq!(find(&rs, "pre-commit-ban-terms").applicable, 2);
-        assert_eq!(find(&rs, "pre-push-branch-protect").applicable, 2);
-    }
-
-    /// Every registered check is listed. A check missing from this table would
-    /// silently never appear in the view.
-    /// Adding a check to the registry must force a language decision here,
-    /// rather than defaulting it silently to "applies everywhere". Same
-    /// reconciliation the commit-type and branch-prefix vocabularies use: make
-    /// the omission fail at the moment it is introduced.
-    #[test]
-    fn every_check_has_a_language_decision() {
-        let mapped: std::collections::BTreeSet<&str> = LANGUAGES.iter().map(|(n, _)| *n).collect();
-        let missing: Vec<&str> = all_checks()
-            .into_iter()
-            .filter(|c| !mapped.contains(c))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "registered checks with no language decision: {missing:?}"
+        assert_eq!(
+            find(&rs, "pre-push-branch-protect").applicable,
+            2,
+            "branch-protect has no file condition"
         );
-        let orphan: Vec<&str> = mapped
-            .iter()
-            .copied()
-            .filter(|n| !all_checks().contains(n))
-            .collect();
-        assert!(
-            orphan.is_empty(),
-            "language decisions for dead checks: {orphan:?}"
+        assert_eq!(
+            find(&rs, "pre-commit-merge-conflict").applicable,
+            2,
+            "nor does merge-conflict"
         );
-    }
-
-    /// And the names come from the registry, not a copy.
-    #[test]
-    fn the_check_list_is_the_registrys() {
-        // NAMES, not a count: a hand-copied table of the same length would
-        // satisfy a length check while omitting the check that was just added.
-        let expected: Vec<&str> = registry::PRE_COMMIT_CHECKS
-            .iter()
-            .chain(registry::PRE_PUSH_CHECKS.iter())
-            .copied()
-            .collect();
-        assert_eq!(all_checks(), expected);
+        assert_eq!(
+            find(&rs, "pre-commit-ban-terms").applicable,
+            1,
+            "ban-terms only scans JS-ish files, whatever the old table said"
+        );
     }
 
     #[test]

@@ -187,6 +187,7 @@ mod tests {
             foreign_subs: Vec::new(),
             hook_pkgjson: false,
             languages: Vec::new(),
+            applicable: Vec::new(),
             skips: Vec::new(),
         }
     }
