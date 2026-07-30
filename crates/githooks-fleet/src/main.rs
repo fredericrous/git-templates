@@ -9,6 +9,7 @@
 //! afterthought — and it is also the accessible path, since screen readers do
 //! not meaningfully work with a TUI.
 
+mod fix;
 mod scan;
 mod shim;
 
@@ -16,14 +17,24 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-usage: githooks-fleet [--root <dir>] [--depth <n>] [--json]
+usage: githooks-fleet [scan|fix] [--root <dir>] [--depth <n>] [--json]
+
+  scan           report the fleet (default)
+  fix            show what would be changed — DRY RUN, nothing is written
 
   --root <dir>   where to look for repositories (default: $HOME/Developer)
   --depth <n>    directory levels to descend  (default: 6)
-  --json         emit the full scan as JSON
+  --json         emit the result as JSON
 ";
 
+#[derive(PartialEq)]
+enum Mode {
+    Scan,
+    Fix,
+}
+
 struct Args {
+    mode: Mode,
     root: PathBuf,
     depth: usize,
     json: bool,
@@ -31,11 +42,25 @@ struct Args {
 
 fn parse(argv: &[String]) -> Result<Args, String> {
     let mut a = Args {
+        mode: Mode::Scan,
         root: default_root(),
         depth: 6,
         json: false,
     };
-    let mut it = argv.iter();
+    let mut it = argv.iter().peekable();
+    if let Some(first) = it.peek() {
+        match first.as_str() {
+            "scan" => {
+                a.mode = Mode::Scan;
+                it.next();
+            }
+            "fix" => {
+                a.mode = Mode::Fix;
+                it.next();
+            }
+            _ => {}
+        }
+    }
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--json" => a.json = true,
@@ -48,6 +73,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                     .parse()
                     .map_err(|_| format!("--depth: {v:?} is not a number"))?;
             }
+            "--apply" => return Err("--apply is not implemented yet; fix is dry-run only".into()),
             "-h" | "--help" => return Err(String::new()),
             other => return Err(format!("unknown argument {other:?}")),
         }
@@ -96,6 +122,27 @@ fn main() -> ExitCode {
     let installed = default_binary();
     let scan = scan::scan(&args.root, args.depth, &installed);
     let elapsed = started.elapsed();
+
+    if args.mode == Mode::Fix {
+        let plans: Vec<fix::FixPlan> = scan
+            .repos
+            .iter()
+            .map(|r| fix::plan(r, &args.root.join(&r.path), &installed))
+            .collect();
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&plans).unwrap_or_default()
+            );
+        } else {
+            report_fix(&plans);
+        }
+        return if scan.looks_like_a_failed_scan() {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        };
+    }
 
     if args.json {
         match serde_json::to_string_pretty(&scan) {
@@ -158,6 +205,46 @@ fn report(s: &scan::FleetScan, elapsed: std::time::Duration) {
             println!("    {}", p.display());
         }
     }
+}
+
+/// Dry-run summary. Counts carry denominators, and a refusal is never folded
+/// into the same number as a change.
+fn report_fix(plans: &[fix::FixPlan]) {
+    let total = plans.len();
+    let refused: Vec<&fix::FixPlan> = plans.iter().filter(|p| p.refused()).collect();
+    let acting: Vec<&fix::FixPlan> = plans
+        .iter()
+        .filter(|p| !p.refused() && !p.is_noop())
+        .collect();
+
+    for p in &acting {
+        println!("{}", p.repo.display());
+        for r in &p.remove {
+            println!("  rm    {}  ({:?})", r.path.display(), r.reason);
+        }
+        for w in p.write.iter().filter(|w| w.changes) {
+            println!("  write {}", w.path.display());
+        }
+    }
+
+    println!();
+    println!(
+        "  {} of {} repositories would change · {} refused · {} already correct",
+        acting.len(),
+        total,
+        refused.len(),
+        total - acting.len() - refused.len()
+    );
+    println!(
+        "  {} removals · {} writes",
+        acting.iter().map(|p| p.remove.len()).sum::<usize>(),
+        acting
+            .iter()
+            .map(|p| p.write.iter().filter(|w| w.changes).count())
+            .sum::<usize>()
+    );
+    println!();
+    println!("  DRY RUN — nothing was written.");
 }
 
 #[cfg(test)]
