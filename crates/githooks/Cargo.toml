@@ -1,0 +1,10 @@
+[package]
+name = "githooks"
+version = "0.1.0"
+edition = "2021"
+description = "The git-templates hooks, as one dependency-free binary"
+license = "MIT"
+
+# Only the runtime, which itself has none. See crates/githooks-runtime.
+[dependencies]
+githooks-runtime = { path = "../githooks-runtime" }

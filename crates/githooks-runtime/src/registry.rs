@@ -135,7 +135,7 @@ mod tests {
     /// this binary and tell it its own name.
     #[test]
     fn the_shipped_shims_are_exactly_the_git_invoked_hooks() {
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/templates/hooks");
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../templates/hooks");
         let mut shipped: Vec<String> = std::fs::read_dir(dir)
             .expect("templates/hooks")
             .flatten()

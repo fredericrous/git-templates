@@ -19,7 +19,7 @@ all: test
 # (commit-msg, pre-commit, pre-push, prepare-commit-msg) get +x while
 # package.json (no shebang) is left untouched. POSIX sh — no zsh needed.
 chmodx:
-	@for f in $(MAKEFILE_DIR)/tests/* $(SRC_CTRL_HOOKS); do \
+	@for f in $(MAKEFILE_DIR)crates/githooks/tests/* $(SRC_CTRL_HOOKS); do \
 		if head -1 "$$f" | grep -q '^#!'; then chmod +x "$$f"; fi; \
 	done
 
@@ -32,6 +32,7 @@ build:
 #
 # RUN=<filter> still works: `make test RUN=branch_pattern`.
 test: chmodx
+	@./scripts/check-no-deps.sh
 	@cargo test $(if $(RUN),--test $(RUN)) -- --show-output
 
 # Never rm/cp/bake into a directory that lives inside a git checkout.
@@ -115,4 +116,8 @@ bake-shims:
 propagate:
 	@./scripts/propagate.sh $(if $(APPLY),--apply,)
 
-.PHONY: all chmodx build test install bake-shims propagate
+# The commit path must stay dependency-free; see the script.
+deps:
+	@./scripts/check-no-deps.sh
+
+.PHONY: all chmodx build test install bake-shims propagate deps
