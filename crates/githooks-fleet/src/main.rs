@@ -1,0 +1,172 @@
+//! `githooks-fleet` — what the hook fleet actually looks like on this machine.
+//!
+//! A separate binary from `githooks` on purpose. This one may have
+//! dependencies; the hook binary may not, because it runs on every commit in
+//! every repo. See `scripts/check-no-deps.sh`, which enforces that in CI.
+//!
+//! This release is the scanner and `--json` only. The TUI will render over
+//! exactly this data, so the JSON is the contract rather than a debug
+//! afterthought — and it is also the accessible path, since screen readers do
+//! not meaningfully work with a TUI.
+
+mod scan;
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+const USAGE: &str = "\
+usage: githooks-fleet [--root <dir>] [--depth <n>] [--json]
+
+  --root <dir>   where to look for repositories (default: $HOME/Developer)
+  --depth <n>    directory levels to descend  (default: 6)
+  --json         emit the full scan as JSON
+";
+
+struct Args {
+    root: PathBuf,
+    depth: usize,
+    json: bool,
+}
+
+fn parse(argv: &[String]) -> Result<Args, String> {
+    let mut a = Args {
+        root: default_root(),
+        depth: 6,
+        json: false,
+    };
+    let mut it = argv.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--json" => a.json = true,
+            "--root" => {
+                a.root = it.next().ok_or("--root needs a directory")?.into();
+            }
+            "--depth" => {
+                let v = it.next().ok_or("--depth needs a number")?;
+                a.depth = v
+                    .parse()
+                    .map_err(|_| format!("--depth: {v:?} is not a number"))?;
+            }
+            "-h" | "--help" => return Err(String::new()),
+            other => return Err(format!("unknown argument {other:?}")),
+        }
+    }
+    Ok(a)
+}
+
+fn default_root() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join("Developer"))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn main() -> ExitCode {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let args = match parse(&argv) {
+        Ok(a) => a,
+        Err(e) => {
+            if !e.is_empty() {
+                eprintln!("githooks-fleet: {e}");
+            }
+            eprint!("{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+
+    if !args.root.is_dir() {
+        eprintln!(
+            "githooks-fleet: --root {} is not a directory",
+            args.root.display()
+        );
+        return ExitCode::from(2);
+    }
+
+    let started = std::time::Instant::now();
+    let scan = scan::scan(&args.root, args.depth);
+    let elapsed = started.elapsed();
+
+    if args.json {
+        match serde_json::to_string_pretty(&scan) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("githooks-fleet: cannot serialise scan: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        report(&scan, elapsed);
+    }
+
+    // A scan that found nothing exits NON-ZERO. "No repositories" has to be
+    // actionable from a script as well as on screen, because the failure this
+    // tool exists for is exactly that emptiness reading as success.
+    if scan.looks_like_a_failed_scan() {
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
+}
+
+/// Every number carries its denominator. No bare adjectives.
+fn report(s: &scan::FleetScan, elapsed: std::time::Duration) {
+    if s.looks_like_a_failed_scan() {
+        println!("No repositories found under {}", s.root.display());
+        println!();
+        println!(
+            "Visited {} directories in {:.1}s and found 0 git repositories.",
+            s.dirs_visited,
+            elapsed.as_secs_f64()
+        );
+        println!("This is a SCAN FAILURE, not a clean fleet.");
+        println!(
+            "  • is --root correct?       (currently: {})",
+            s.root.display()
+        );
+        println!("  • is --depth deep enough?  (currently: {})", s.depth);
+        if !s.unreadable.is_empty() {
+            println!("  • {} path(s) could not be read", s.unreadable.len());
+        }
+        return;
+    }
+
+    println!("{}", s.root.display());
+    println!(
+        "  {} git repositories · {} managed · {} unmanaged",
+        s.git_dirs_found, s.managed_seen, s.unmanaged_seen
+    );
+    println!(
+        "  {} hook directories · {} directories visited · {} subtrees skipped · {:.1}s",
+        s.hook_dirs_seen,
+        s.dirs_visited,
+        s.excluded_dirs,
+        elapsed.as_secs_f64()
+    );
+    if !s.unreadable.is_empty() {
+        println!("  {} unreadable:", s.unreadable.len());
+        for p in s.unreadable.iter().take(5) {
+            println!("    {}", p.display());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_flags_and_defaults() {
+        let a = parse(&[]).expect("defaults");
+        assert_eq!(a.depth, 6);
+        assert!(!a.json);
+
+        let a = parse(&["--depth".into(), "2".into(), "--json".into()]).unwrap();
+        assert_eq!(a.depth, 2);
+        assert!(a.json);
+    }
+
+    #[test]
+    fn rejects_bad_input_loudly() {
+        assert!(parse(&["--depth".into(), "lots".into()]).is_err());
+        assert!(parse(&["--depth".into()]).is_err());
+        assert!(parse(&["--nope".into()]).is_err());
+    }
+}
