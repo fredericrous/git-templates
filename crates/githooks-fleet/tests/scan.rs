@@ -155,6 +155,7 @@ fn paths_are_root_relative_and_sorted() {
         .iter()
         .map(|r| r["path"].as_str().unwrap())
         .collect();
+    // Single components, so no separator appears — safe to compare literally.
     assert_eq!(paths, vec!["alpha", "mid", "zeta"]);
 }
 
@@ -199,7 +200,13 @@ fn a_deeply_nested_repo_is_found_at_default_depth() {
     t.managed_repo("Perso/group/project/sub");
     let v = json(&["--root", t.path().to_str().unwrap()]);
     assert_eq!(v["git_dirs_found"], 1, "default depth must reach it");
-    assert_eq!(v["repos"][0]["path"], "Perso/group/project/sub");
+    // Built through PathBuf: paths serialise with the platform's separator, so
+    // a hardcoded "a/b" passes on Unix and fails on Windows for no real reason.
+    let expected = PathBuf::from("Perso")
+        .join("group")
+        .join("project")
+        .join("sub");
+    assert_eq!(v["repos"][0]["path"], expected.to_string_lossy().as_ref());
 }
 
 /// Files nothing dispatches any more: they look installed and never run.
