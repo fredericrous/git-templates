@@ -1,6 +1,6 @@
 # `githooks fleet` — a TUI for the 96-repo hook fleet
 
-Status: **specification**. Nothing here is built yet.
+Status: **v2 target plan**. Nothing here is built yet.
 
 ## Why this exists
 
@@ -29,6 +29,9 @@ states visually distinct, it has failed and should not be built.
 - **Not part of the commit path.** The hook binary stays dependency-free; see
   "Packaging". A TUI in `pre-commit` would break GUI clients, CI, and piped
   output, and would seize the alternate screen during a commit.
+- **Not a wrapper around the old migration scripts.** The scanner, previewer,
+  and fixer are Rust code. `scripts/propagate.sh` is historical reference only
+  and should disappear once the Rust path can prove the same removals/writes.
 - **Not a git client.** No staging, committing, diffing. `lazygit` and `tig`
   exist and are better at it.
 - **Not a linter runner.** It reports on hook *installation and configuration*,
@@ -86,29 +89,54 @@ One row per repository. Collected read-only; the dashboard never writes without
 an explicit action.
 
 ```
+FleetScan {
+  root             : PathBuf
+  depth            : usize
+  git_dirs_found   : usize
+  hook_dirs_seen   : usize
+  managed_seen     : usize
+  unmanaged_seen   : usize
+  unreadable       : Vec<PathBuf>
+  excluded_dirs    : usize
+  repos            : Vec<Repo>
+}
+
 Repo {
   path         : PathBuf        // displayed repo-relative to the scan root
   managed      : bool           // ≥1 shim dispatches to the binary
   shims        : [ShimState; 4] // commit-msg, pre-commit, pre-push, prepare-commit-msg
-  stale        : Vec<String>    // files matching <hook>-* that we no longer ship
+  stale_ours   : Vec<String>    // our old shims/check shims that are no longer shipped
+  foreign_subs : Vec<String>    // hand-written pre-commit-* / pre-push-* sub-hooks
+  hook_pkgjson : Option<String> // vestigial hooks/package.json from the node era
   baked        : BakeState      // which binary path the shims point at
   languages    : LangSet        // rust | js | python | k8s — from manifest presence
   skips        : Vec<String>    // git config --get-all hook.skip
 }
 
-ShimState = Ok            // blob == template blob
-          | Drifted(hash) // present, different content
+ShimState = Ok            // installed bytes match the expected baked template
+          | Drifted(hash) // present, but not the expected baked template
           | Missing
 BakeState = Current       // == installed binary path
           | Stale(path)   // points somewhere else — the GUI-client failure mode
           | Unbaked       // __GITHOOKS_BIN__ placeholder intact
           | Mixed         // shims disagree with each other
+
+FixPlan {
+  repo    : PathBuf
+  refuse  : Vec<Refusal> // tracked files, unreadable hooks dir, non-managed repo, ...
+  remove  : Vec<Removal>
+  write   : Vec<WriteShim>
+}
 ```
 
 `languages` matters because a check that never fires is not the same as a check
 that is broken: `pre-commit-clippy` in a Python repo is *correctly* inert. The
 dashboard must distinguish **inert** from **failing**, or it will manufacture 90
 false problems out of `pre-commit-cargo-fmt`.
+
+Shim comparison is against the rendered template for the intended binary path,
+not the raw tracked template. A correctly baked shim must never be reported as
+drifted merely because `__GITHOOKS_BIN__` was replaced.
 
 ## Screen 1 — Fleet overview (default)
 
@@ -166,7 +194,7 @@ a failure in words. This single screen is the reason the tool exists.
 │   ✓ commit-msg           blob 7914a85  matches template                         │
 │   ✓ pre-commit           blob 7914a85  matches template                         │
 │   ✓ pre-push             blob 7914a85  matches template                         │
-│   ✗ prepare-commit-msg   MISSING       → `githooks fleet fix` or make propagate  │
+│   ✗ prepare-commit-msg   MISSING       → `githooks fleet fix`                    │
 │                                                                                 │
 │ CHECKS (20)                        pre-commit                                   │
 │   ● ban-terms      ● merge-conflict   ● package-lock   ● usual-name              │
@@ -189,9 +217,9 @@ three glyphs, three words in the legend — no colour required to read it.
 
 ## Screen 3 — Hook-centric view (`h`)
 
-Transposes the matrix. Answers "where is `pre-commit-pyright` actually
-installed?", which was a real question earlier (it was in 6 of 96 repos, by
-historical accident rather than decision).
+Transposes the matrix. Answers "where does `pre-commit-pyright` actually apply,
+run, get skipped, or stay inert?" Checks are no longer installed as per-repo
+files; the view is about runtime applicability, not file presence.
 
 ```
 │   CHECK                 APPLICABLE  ACTIVE   SKIPPED   INERT                    │
@@ -226,11 +254,11 @@ scroll may be supported but nothing is mouse-only.
 | `q` | quit |
 
 **Destructive actions are diff-first.** `f` opens a confirmation listing exactly
-what would be removed and written, per file, in the same shape as
-`propagate.sh --apply`. Nothing in this tool deletes a file without showing the
-list and taking a second keypress. Given `make install` has destroyed tracked
-source twice in this repo's history, the dashboard's write path gets the same
-fail-closed treatment: it refuses any path git reports as tracked.
+what would be removed and written, per file, from a typed Rust `FixPlan`.
+Nothing in this tool deletes a file without showing the list and taking a second
+keypress. Given `make install` has destroyed tracked source twice in this repo's
+history, the dashboard's write path gets the same fail-closed treatment: it
+refuses any path git reports as tracked.
 
 ## Performance
 
@@ -262,30 +290,125 @@ A cargo **workspace**, so the commit path keeps its posture:
 
 ```
 crates/
-  githooks-core/   # the registry, scanning, data model — a real lib
-  githooks/        # the hook binary. ZERO dependencies. unchanged.
-  githooks-fleet/  # the TUI. ratatui + crossterm. installed on demand.
+  githooks-runtime/ # registry + hook logic. std-only.
+  githooks/         # the hook binary. ZERO external dependencies.
+  githooks-fleet/   # scanner, fixer, JSON, TUI. ratatui + crossterm.
 ```
 
-`githooks` must not gain a dependency; that property is the reason the Rust
-migration happened at all. The TUI is a separate artifact that a developer opts
-into, and `make install` continues to install only the hook binary.
+`githooks` must not gain an external dependency, directly or transitively; that
+property is the reason the Rust migration happened at all. The TUI is a separate
+artifact that a developer opts into, and `make install` continues to install
+only the hook binary.
 
-Extracting `githooks-core` has an independent benefit: there is currently no lib
-target, which is why `cargo test --lib` fails outright. Unit tests would move
-into a library where they belong.
+Extracting `githooks-runtime` has an independent benefit: there is currently no
+lib target, which is why `cargo test --lib` fails outright. Unit tests for hook
+logic would move into a library where they belong, without letting TUI
+dependencies into the commit path.
 
-## Open decisions
+## Version plan
 
-1. **Scan root.** `$HOME/Developer` is hard-coded in `propagate.sh`. Config key,
-   CLI flag, or both?
-2. **Does `f` (fix) shell out to `propagate.sh`, or reimplement in Rust?**
-   Shelling out keeps one implementation of the dangerous part; reimplementing
-   gives per-repo granularity. Prefer shelling out for v1.
-3. **Is the hook-centric view worth v1?** It answers a real question but doubles
-   the surface area.
+### v1 — Rust-native fleet truth
+
+Build the minimum useful tool, but build it in the final architecture:
+
+- Workspace split into `githooks-runtime`, `githooks`, and `githooks-fleet`.
+- Rust scanner for `--root` and `--depth`, with explicit counters for found git
+  dirs, seen hook dirs, managed/unmanaged repos, unreadable paths, and excluded
+  directories.
+- Rust shim inspection: four dispatcher states, baked path state, stale managed
+  files, foreign sub-hooks, vestigial hook `package.json`, languages, skips.
+- `githooks-fleet --json`, emitting `FleetScan`.
+- Default TUI overview and repo detail views.
+- Rust `githooks-fleet fix [repo|--all] --dry-run`, producing a `FixPlan`.
+- Rust apply path for that exact `FixPlan`, with a second confirmation in the
+  TUI and tracked-file refusal before any remove/write.
+- Tests for broken root, too-shallow depth, baked-template comparison, managed
+  detection, stale file classification, tracked-file refusal, and dry-run/apply
+  parity.
+
+v1 may omit the hook-centric view and skip toggling if they slow down the first
+usable release. It may not shell out to `propagate.sh`.
+
+### v2 — operational dashboard
+
+Add the workflows that make the grid more than a safer propagation report:
+
+- Hook-centric view (`h`) over applicability, active, skipped, and inert counts.
+- Detail drilldown from a check row to the matching repos.
+- `s` toggle for `hook.skip`, backed by Rust `git config` calls and a preview of
+  the exact config mutation.
+- Command palette entries for `:root`, `:depth`, `:rescan`, `:export json`, and
+  `:fix`.
+- Optional activity signal after measuring cost: last commit date or another
+  cheap recency marker, never on the initial UI thread.
+- Remove `scripts/propagate.sh` once v1/v2 fix coverage has replaced its last
+  practical use.
+
+## Decisions
+
+1. **Scan root.** Use a CLI flag in v1. Add persistent config only after using
+   the tool enough to know where it belongs.
+2. **Fix path.** Native Rust. Do not shell out to `propagate.sh`.
+3. **Delivery target.** Build through v2. v1 is the first shippable slice, not
+   the end state.
 4. **Activity signal.** Sorting by last-commit date would surface "the repos you
    actually use are drifted" — but it costs a `git log` per repo. Measure first.
+
+## Delivery plan
+
+Seven PRs. The ordering is not cosmetic: the destructive code is written only
+after a differential has proven the model it destroys with, and the TUI is last
+because it is the least risky part and the least useful if the data beneath it
+is wrong.
+
+**1. Workspace split, zero behaviour change.** `githooks-runtime` (lib,
+std-only) and `githooks` (bin), no features. The proof is that all 174 tests
+pass UNCHANGED, plus a differential running every hook over the same fixtures
+before and after, comparing bytes and exit codes — the technique that caught
+four bugs during the zsh port. This PR must also land the **zero-dependency CI
+guard** (`cargo tree` for `githooks` shows nothing external); without it the
+packaging rule is a comment, and ratatui arrives transitively three PRs later.
+Highest mechanical risk, no feature value, therefore alone.
+
+**2. Scanner and `--json`, no TUI.** `FleetScan` with every counter. This
+already replaces the ad-hoc `find`/`hash-object` pipelines that misled twice, so
+it is useful before any UI exists. Tests: broken root, too-shallow depth,
+excluded directories counted, unreadable paths recorded.
+
+**3. Shim classification.** Expected shim = the embedded template rendered for
+the intended binary path. The trap is symmetrical and silent in both
+directions: compare against the RAW template and all 96 repos report drifted, so
+the tool cries wolf and gets ignored; compare too loosely and real drift is
+never seen. Both directions get a test.
+
+**4. `FixPlan` dry-run and the parity gate.** A differential over all 96 repos:
+the Rust plan against `propagate.sh --dry-run`, normalised and compared. This is
+what earns the right to delete the shell script, and it is the long pole of the
+project — not the TUI.
+
+**5. Apply path, fail closed.** Refuses tracked paths, unmanaged repos and
+unreadable hook directories. Dry-run/apply parity plus idempotence: applying
+twice must produce an empty second plan. Written only after 4 proves the model.
+
+**6. TUI v1 — overview and detail.** ratatui's `TestBackend` renders into an
+assertable buffer, so the success criterion becomes an automated test: a
+deliberately broken scan must render *SCAN FAILURE*. Same for `NO_COLOR` and the
+60/100-column fallbacks. A success criterion nobody can run is a wish.
+
+**7. v2, then remove `propagate.sh`.** Hook-centric view, `s` skip toggle,
+command palette. The script is deleted once 4 and 5 have replaced its last
+practical use.
+
+### Two details settled before starting
+
+- **Invocation is `githooks-fleet`, not `githooks fleet`.** A subcommand would
+  require the hook binary to locate and exec the TUI binary, coupling the commit
+  path to a tool it must never know about. The screens' `githooks fleet` prompt
+  is shorthand for the separate binary.
+- **Templates are embedded** with `include_str!` against the workspace root, so
+  the tool reports correctly from any directory rather than only inside a
+  checkout. All four dispatcher templates are currently ONE blob, so this is a
+  single embedded string, not four.
 
 ## Success criteria
 
