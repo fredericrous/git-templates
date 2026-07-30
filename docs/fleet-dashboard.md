@@ -1,6 +1,11 @@
 # `githooks fleet` — a TUI for the 96-repo hook fleet
 
-Status: **v2 target plan**. Nothing here is built yet.
+Status: **built**. PRs #41-#47 implement v1 and v2; `scripts/propagate.sh` is
+gone, replaced by `githooks-fleet fix`.
+
+Two items from the plan are deliberately unbuilt: the `s` toggle for `hook.skip`
+and the `:` command palette. Both are useful, neither is load-bearing, and a
+named gap is better than a half-built one.
 
 ## Why this exists
 
