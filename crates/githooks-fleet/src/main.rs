@@ -13,14 +13,16 @@ mod apply;
 mod fix;
 mod scan;
 mod shim;
+mod tui;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-usage: githooks-fleet [scan|fix] [--root <dir>] [--depth <n>] [--json]
+usage: githooks-fleet [scan|tui|fix] [--root <dir>] [--depth <n>] [--json]
 
   scan           report the fleet (default)
+  tui            the interactive dashboard
   fix            show what would be changed — DRY RUN unless --apply
   fix --apply    carry out the plan
 
@@ -34,6 +36,7 @@ usage: githooks-fleet [scan|fix] [--root <dir>] [--depth <n>] [--json]
 enum Mode {
     Scan,
     Fix,
+    Tui,
 }
 
 struct Args {
@@ -66,6 +69,10 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             }
             "fix" => {
                 a.mode = Mode::Fix;
+                it.next();
+            }
+            "tui" => {
+                a.mode = Mode::Tui;
                 it.next();
             }
             _ => {}
@@ -133,6 +140,17 @@ fn main() -> ExitCode {
 
     let started = std::time::Instant::now();
     let installed = args.binary.clone().unwrap_or_else(default_binary);
+
+    if args.mode == Mode::Tui {
+        return match tui::run(args.root.clone(), args.depth, installed.clone()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("githooks-fleet: {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
     let scan = scan::scan(&args.root, args.depth, &installed);
     let elapsed = started.elapsed();
 
