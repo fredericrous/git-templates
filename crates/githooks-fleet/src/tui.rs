@@ -21,14 +21,78 @@ use crate::checks;
 use crate::scan::{FleetScan, Repo};
 use crate::shim::{BakeState, ShimState, DISPATCHERS};
 
+/// What the screen is showing, and what a keystroke therefore means.
+///
+/// Previously this was four independent booleans — `detail`, `hook_view`,
+/// `filtering`, plus `scanning` — which describes sixteen states of which four
+/// are meaningful. Adding a command palette and a type-to-confirm prompt would
+/// have taken it to sixty-four. Making the invalid combinations unrepresentable
+/// is what keeps the next two features testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Browse,
+    Detail,
+    HookView,
+    /// Typing into the filter. The row list narrows as you type.
+    Filter,
+}
+
+/// A keystroke, named. The previous signature was
+/// `on_key(char, bool, bool, bool)`, where a caller had to remember that the
+/// second bool meant Enter, and `'\0'` meant "not a character".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    Char(char),
+    Enter,
+    Esc,
+    Backspace,
+    Up,
+    Down,
+}
+
+/// One line of editable text with a cursor at the end.
+///
+/// Extracted because the filter, the command palette and the type-the-name
+/// confirmation are the same thing wearing different prompts. Building it once
+/// is the point of this refactor.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LineEdit {
+    value: String,
+}
+
+impl LineEdit {
+    pub fn insert(&mut self, c: char) {
+        self.value.push(c);
+    }
+    pub fn backspace(&mut self) {
+        self.value.pop();
+    }
+    pub fn clear(&mut self) {
+        self.value.clear();
+    }
+    pub fn is_empty(&self) -> bool {
+        self.value.is_empty()
+    }
+    pub fn as_str(&self) -> &str {
+        &self.value
+    }
+    /// Test-only until a real caller exists. The palette and the
+    /// type-to-confirm prompt will want it; shipping it as public dead code on
+    /// that promise is how `Progress::Found` sat unused while pretending the
+    /// spec was implemented.
+    #[cfg(test)]
+    pub fn set(&mut self, v: &str) {
+        self.value = v.to_string();
+    }
+}
+
 pub struct App {
     pub scan: FleetScan,
     pub selected: usize,
-    pub detail: bool,
-    /// The transposed view: checks down, repo counts across.
-    pub hook_view: bool,
-    pub filter: String,
-    pub filtering: bool,
+    pub mode: Mode,
+    /// Where Esc returns to when a prompt is dismissed.
+    prev_mode: Mode,
+    pub filter: LineEdit,
     pub scanning: bool,
     pub visited: usize,
     pub elapsed: f64,
@@ -40,10 +104,9 @@ impl App {
         App {
             scan,
             selected: 0,
-            detail: false,
-            hook_view: false,
-            filter: String::new(),
-            filtering: false,
+            mode: Mode::Browse,
+            prev_mode: Mode::Browse,
+            filter: LineEdit::default(),
             scanning: false,
             visited: 0,
             elapsed: 0.0,
@@ -60,39 +123,59 @@ impl App {
                     || r.path
                         .to_string_lossy()
                         .to_lowercase()
-                        .contains(&self.filter.to_lowercase())
+                        .contains(&self.filter.as_str().to_lowercase())
             })
             .collect()
     }
 
-    pub fn on_key(&mut self, key: char, is_enter: bool, is_esc: bool, is_backspace: bool) {
-        if self.filtering {
-            if is_esc {
-                self.filtering = false;
-                self.filter.clear();
-            } else if is_enter {
-                self.filtering = false;
-            } else if is_backspace {
-                self.filter.pop();
-            } else if key != '\0' {
-                self.filter.push(key);
-            }
-            self.selected = 0;
-            return;
+    pub fn on_key(&mut self, key: Key) {
+        match self.mode {
+            Mode::Filter => self.filter_key(key),
+            _ => self.browse_key(key),
         }
+    }
+
+    fn filter_key(&mut self, key: Key) {
+        match key {
+            Key::Esc => {
+                self.filter.clear();
+                self.mode = self.prev_mode;
+            }
+            // Enter keeps the filter and leaves the prompt.
+            Key::Enter => self.mode = self.prev_mode,
+            Key::Backspace => self.filter.backspace(),
+            Key::Char(c) => self.filter.insert(c),
+            Key::Up | Key::Down => {}
+        }
+        self.selected = 0;
+    }
+
+    fn browse_key(&mut self, key: Key) {
         let len = self.rows().len();
-        match (key, is_enter, is_esc) {
-            ('q', _, _) => self.quit = true,
-            ('/', _, _) => self.filtering = true,
-            ('h', _, _) => self.hook_view = !self.hook_view,
-            ('j', _, _) if len > 0 => self.selected = (self.selected + 1).min(len - 1),
-            ('k', _, _) => self.selected = self.selected.saturating_sub(1),
-            (_, true, _) if len > 0 => self.detail = true,
-            (_, _, true) => {
-                if self.detail {
-                    self.detail = false
+        match key {
+            Key::Char('q') => self.quit = true,
+            Key::Char('/') => {
+                self.prev_mode = self.mode;
+                self.mode = Mode::Filter;
+            }
+            Key::Char('h') => {
+                self.mode = if self.mode == Mode::HookView {
+                    Mode::Browse
                 } else {
-                    self.filter.clear()
+                    Mode::HookView
+                }
+            }
+            Key::Char('j') | Key::Down if len > 0 => {
+                self.selected = (self.selected + 1).min(len - 1)
+            }
+            Key::Char('k') | Key::Up => self.selected = self.selected.saturating_sub(1),
+            Key::Enter if len > 0 => self.mode = Mode::Detail,
+            Key::Esc => {
+                // Leave the current screen first; only then clear a filter.
+                if self.mode != Mode::Browse {
+                    self.mode = Mode::Browse;
+                } else {
+                    self.filter.clear();
                 }
             }
             _ => {}
@@ -162,9 +245,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     .split(area);
 
     header(f, chunks[0], app);
-    if app.hook_view {
+    if app.mode == Mode::HookView {
         hooks_view(f, chunks[1], app);
-    } else if app.detail {
+    } else if app.mode == Mode::Detail {
         detail(f, chunks[1], app);
     } else if app.scan.looks_like_a_failed_scan() && !app.scanning {
         failure(f, chunks[1], app);
@@ -408,18 +491,18 @@ fn hooks_view(f: &mut Frame, area: Rect, app: &App) {
 fn footer(f: &mut Frame, area: Rect, app: &App) {
     let rows = app.rows().len();
     let total = app.scan.repos.len();
-    let left = if app.filtering {
-        format!("/{}", app.filter)
+    let left = if app.mode == Mode::Filter {
+        format!("/{}", app.filter.as_str())
     } else if app.filter.is_empty() {
         format!("{rows} rows")
     } else {
         // The match count is always visible while filtering, so an empty result
         // is legible as "the filter excluded everything", not as "nothing here".
-        format!("{rows} of {total} rows match {:?}", app.filter)
+        format!("{rows} of {total} rows match {:?}", app.filter.as_str())
     };
-    let keys = if app.hook_view {
+    let keys = if app.mode == Mode::HookView {
         "h fleet  q quit"
-    } else if app.detail {
+    } else if app.mode == Mode::Detail {
         "esc back  q quit"
     } else {
         "j/k move  enter detail  / filter  h hooks  esc clear  q quit"
@@ -512,14 +595,20 @@ pub fn run(root: std::path::PathBuf, depth: usize, binary: String) -> std::io::R
         if event::poll(Duration::from_millis(16))? {
             if let Event::Key(k) = event::read()? {
                 if k.kind == KeyEventKind::Press {
-                    match k.code {
-                        KeyCode::Char(c) => app.on_key(c, false, false, false),
-                        KeyCode::Enter => app.on_key('\0', true, false, false),
-                        KeyCode::Esc => app.on_key('\0', false, true, false),
-                        KeyCode::Backspace => app.on_key('\0', false, false, true),
-                        KeyCode::Down => app.on_key('j', false, false, false),
-                        KeyCode::Up => app.on_key('k', false, false, false),
-                        _ => {}
+                    // crossterm's key codes map straight onto ours; arrows are
+                    // their own variants rather than being spelled as j/k, so
+                    // they keep working inside a text prompt.
+                    let mapped = match k.code {
+                        KeyCode::Char(c) => Some(Key::Char(c)),
+                        KeyCode::Enter => Some(Key::Enter),
+                        KeyCode::Esc => Some(Key::Esc),
+                        KeyCode::Backspace => Some(Key::Backspace),
+                        KeyCode::Down => Some(Key::Down),
+                        KeyCode::Up => Some(Key::Up),
+                        _ => None,
+                    };
+                    if let Some(key) = mapped {
+                        app.on_key(key);
                     }
                 }
             }
@@ -676,7 +765,7 @@ mod tests {
     #[test]
     fn detail_lists_every_dispatcher() {
         let mut app = App::new(scan_with_repos(vec![repo("a", true)]));
-        app.detail = true;
+        app.mode = Mode::Detail;
         let out = render(&app, 100, 20);
         for n in DISPATCHERS {
             assert!(out.contains(n), "detail must list {n}: {out}");
@@ -690,7 +779,7 @@ mod tests {
             repo("beta", true),
             repo("gamma", true),
         ]));
-        app.filter = "bet".into();
+        app.filter.set("bet");
         assert_eq!(app.rows().len(), 1);
         let out = render(&app, 100, 12);
         assert!(
@@ -702,7 +791,7 @@ mod tests {
     #[test]
     fn the_hook_view_transposes_and_keeps_a_denominator() {
         let mut app = App::new(scan_with_repos(vec![repo("a", true), repo("b", true)]));
-        app.hook_view = true;
+        app.mode = Mode::HookView;
         let out = render(&app, 110, 30);
         assert!(out.contains("APPLICABLE"), "{out}");
         assert!(out.contains("INERT"), "inert must be its own column: {out}");
@@ -717,7 +806,7 @@ mod tests {
         let mut r = repo("only-js", true);
         r.languages = vec!["js".into()];
         let mut app = App::new(scan_with_repos(vec![r]));
-        app.hook_view = true;
+        app.mode = Mode::HookView;
         let out = render(&app, 110, 30);
         assert!(
             out.contains("never"),
@@ -728,41 +817,96 @@ mod tests {
     #[test]
     fn h_toggles_the_hook_view() {
         let mut app = App::new(scan_with_repos(vec![repo("a", true)]));
-        assert!(!app.hook_view);
-        app.on_key('h', false, false, false);
-        assert!(app.hook_view);
-        app.on_key('h', false, false, false);
-        assert!(!app.hook_view);
+        assert_eq!(app.mode, Mode::Browse);
+        app.on_key(Key::Char('h'));
+        assert_eq!(app.mode, Mode::HookView);
+        app.on_key(Key::Char('h'));
+        assert_eq!(app.mode, Mode::Browse);
     }
     #[test]
     fn keys_move_enter_and_quit() {
         let mut app = App::new(scan_with_repos(vec![repo("a", true), repo("b", true)]));
-        app.on_key('j', false, false, false);
+        app.on_key(Key::Char('j'));
         assert_eq!(app.selected, 1);
-        app.on_key('j', false, false, false);
+        app.on_key(Key::Char('j'));
         assert_eq!(app.selected, 1, "must not run past the end");
-        app.on_key('k', false, false, false);
+        app.on_key(Key::Char('k'));
         assert_eq!(app.selected, 0);
-        app.on_key('\0', true, false, false);
-        assert!(app.detail);
-        app.on_key('\0', false, true, false);
-        assert!(!app.detail, "esc leaves detail before clearing a filter");
-        app.on_key('q', false, false, false);
+        app.on_key(Key::Enter);
+        assert_eq!(app.mode, Mode::Detail);
+        app.on_key(Key::Esc);
+        assert_eq!(
+            app.mode,
+            Mode::Browse,
+            "esc leaves detail before clearing a filter"
+        );
+        app.on_key(Key::Char('q'));
         assert!(app.quit);
+    }
+
+    /// Arrows are their own variants rather than aliases for j/k, so they still
+    /// move the selection but do not type letters into a prompt.
+    #[test]
+    fn arrows_move_and_do_not_type() {
+        let mut app = App::new(scan_with_repos(vec![repo("a", true), repo("b", true)]));
+        app.on_key(Key::Down);
+        assert_eq!(app.selected, 1);
+        app.on_key(Key::Up);
+        assert_eq!(app.selected, 0);
+
+        app.on_key(Key::Char('/'));
+        app.on_key(Key::Down);
+        assert_eq!(
+            app.filter.as_str(),
+            "",
+            "an arrow must not become a character"
+        );
     }
 
     #[test]
     fn filter_mode_captures_typing_and_escape_clears_it() {
         let mut app = App::new(scan_with_repos(vec![repo("alpha", true)]));
-        app.on_key('/', false, false, false);
-        assert!(app.filtering);
+        app.on_key(Key::Char('/'));
+        assert_eq!(app.mode, Mode::Filter);
         for c in "alp".chars() {
-            app.on_key(c, false, false, false);
+            app.on_key(Key::Char(c));
         }
-        assert_eq!(app.filter, "alp");
-        app.on_key('\0', false, false, true);
-        assert_eq!(app.filter, "al", "backspace edits rather than exits");
-        app.on_key('\0', false, true, false);
-        assert!(!app.filtering && app.filter.is_empty());
+        assert_eq!(app.filter.as_str(), "alp");
+        app.on_key(Key::Backspace);
+        assert_eq!(
+            app.filter.as_str(),
+            "al",
+            "backspace edits rather than exits"
+        );
+        app.on_key(Key::Esc);
+        assert_eq!(app.mode, Mode::Browse);
+        assert!(app.filter.is_empty());
+    }
+
+    /// `q` inside a prompt is a letter, not a command. Losing this is the
+    /// classic modal-editor bug.
+    #[test]
+    fn q_types_rather_than_quits_while_filtering() {
+        let mut app = App::new(scan_with_repos(vec![repo("a", true)]));
+        app.on_key(Key::Char('/'));
+        app.on_key(Key::Char('q'));
+        assert!(!app.quit, "q must be text here");
+        assert_eq!(app.filter.as_str(), "q");
+    }
+
+    /// Enter keeps the filter and returns to the list; Esc discards it. Two
+    /// different intentions that a single "leave the prompt" would conflate.
+    #[test]
+    fn enter_keeps_the_filter_and_esc_discards_it() {
+        let mut app = App::new(scan_with_repos(vec![
+            repo("alpha", true),
+            repo("beta", true),
+        ]));
+        app.on_key(Key::Char('/'));
+        app.on_key(Key::Char('b'));
+        app.on_key(Key::Enter);
+        assert_eq!(app.mode, Mode::Browse);
+        assert_eq!(app.filter.as_str(), "b", "enter commits the filter");
+        assert_eq!(app.rows().len(), 1);
     }
 }
