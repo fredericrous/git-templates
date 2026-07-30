@@ -36,6 +36,18 @@ test: chmodx
 
 # Never rm/cp/bake into a directory that lives inside a git checkout.
 #
+# This guard has now failed TWICE, destroying tracked source both times. The
+# first version compared paths against $(MAKEFILE_DIR), which a git WORKTREE
+# defeats. The second asked `git rev-parse --show-toplevel` and deleted whenever
+# that command was unhappy — so a single hiccup in an unrelated git invocation
+# was enough to wipe templates/hooks/.
+#
+# Both shared one flaw: they FAILED OPEN. Anything the check could not confirm
+# became "safe to delete". The order below fails CLOSED — every branch that is
+# not a positive proof of safety refuses — and the FIRST question asked is the
+# one that actually matters: does git TRACK anything here? A tracked file must
+# never be deleted by an install step, whatever the path resolution says.
+#
 # ~/.config/git/git-templates is commonly a SYMLINK to a checkout of this repo,
 # in which case "installing" there means deleting and overwriting TRACKED source
 # files. Comparing it against $(MAKEFILE_DIR) is not enough: run `make install`
@@ -53,13 +65,19 @@ install: chmodx
 	@install -m 0755 $(RELEASE_BIN) $(INSTALLED_BIN)
 	@echo "installed $(INSTALLED_BIN)"
 	@mkdir -p $(HOME_PATH_HOOKS)
-	@HOME_REAL="$$(cd $(HOME_PATH_HOOKS) && pwd -P)"; \
-	if git -C "$$HOME_REAL" rev-parse --show-toplevel > /dev/null 2>&1; then \
-		echo "$(HOME_PATH_HOOKS) is inside a git checkout — leaving it alone"; \
+	@HOME_REAL="$$(cd $(HOME_PATH_HOOKS) 2>/dev/null && pwd -P)"; \
+	if [ -z "$$HOME_REAL" ]; then \
+		echo "cannot resolve $(HOME_PATH_HOOKS) — skipping"; \
+	elif ! command -v git > /dev/null 2>&1; then \
+		echo "git not on PATH — refusing to delete anything"; \
+	elif git -C "$$HOME_REAL" ls-files --error-unmatch . > /dev/null 2>&1; then \
+		echo "$$HOME_REAL holds TRACKED files — leaving it alone"; \
+	elif git -C "$$HOME_REAL" rev-parse --git-dir > /dev/null 2>&1; then \
+		echo "$$HOME_REAL is inside a git checkout — leaving it alone"; \
 	else \
-		rm -v $(HOME_PATH_HOOKS)* 2>/dev/null || true; \
-		cp $(SRC_CTRL_HOOKS) $(HOME_PATH_HOOKS); \
-		$(MAKE) --no-print-directory bake-shims DIR=$(HOME_PATH_HOOKS); \
+		rm -f "$$HOME_REAL"/*; \
+		cp $(SRC_CTRL_HOOKS) "$$HOME_REAL"/; \
+		$(MAKE) --no-print-directory bake-shims DIR="$$HOME_REAL"/; \
 	fi
 	@rm -v $(GIT_REPO_HOOK_PATH)* 2>/dev/null || true
 	@git init
