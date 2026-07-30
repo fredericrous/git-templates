@@ -7,6 +7,11 @@ Two items from the plan are deliberately unbuilt: the `s` toggle for `hook.skip`
 and the `:` command palette. Both are useful, neither is load-bearing, and a
 named gap is better than a half-built one.
 
+The skip toggle is specified separately in
+[`hook-skip-management.md`](hook-skip-management.md) — it turned out to be a
+safety feature rather than an ergonomic one, since `hook.skip` matches by
+SUBSTRING and `hook.skip = e` silently disables all 20 checks.
+
 ## Why this exists
 
 `scripts/propagate.sh` prints a text summary. That summary has misled its author
