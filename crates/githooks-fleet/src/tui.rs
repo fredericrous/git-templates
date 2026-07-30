@@ -104,6 +104,10 @@ pub struct App {
     pub notice: Option<String>,
     pub undo: Option<crate::skips::SkipPlan>,
     pub scanning: bool,
+    /// Whether to emit colour. Read from the environment once at construction
+    /// rather than consulted per cell: `colors_enabled()` memoises, so a test
+    /// could otherwise never exercise both branches in one run.
+    pub color: bool,
     pub visited: usize,
     pub elapsed: f64,
     pub quit: bool,
@@ -123,6 +127,7 @@ impl App {
             notice: None,
             undo: None,
             scanning: false,
+            color: githooks_runtime::ui::colors_enabled(),
             visited: 0,
             elapsed: 0.0,
             quit: false,
@@ -333,12 +338,39 @@ impl App {
 /// Returns `Style::default()` when colour is off, so `NO_COLOR` yields a screen
 /// that is still fully legible — the glyph and the word carry the state, the
 /// colour only reinforces it.
-fn tint(c: Color) -> Style {
-    if githooks_runtime::ui::colors_enabled() {
+fn tint(on: bool, c: Color) -> Style {
+    if on {
         Style::default().fg(c)
     } else {
         Style::default()
     }
+}
+
+/// Structure, as opposed to status.
+///
+/// Green/yellow/red are spoken for — they mean ok/warning/error — so headers
+/// and the cursor need a slot that carries no verdict. Which HUE this is
+/// remains the terminal's business; only the slot is chosen here.
+const ACCENT: Color = Color::Cyan;
+
+/// How the highlighted row is marked.
+///
+/// Reverse video, NOT an accent foreground. A row style with `fg` overrides the
+/// per-cell colour, so accenting the selected row erased its ok/drifted status —
+/// on precisely the row the reader is looking at. Reverse swaps whatever colour
+/// the cell already has, so an ok row reads as selected AND green.
+///
+/// The accent goes on the cursor instead; see `selection_cursor`.
+fn selection_style() -> Style {
+    Style::default().add_modifier(Modifier::REVERSED)
+}
+
+/// The `> ` cursor, in the accent when colour is available.
+///
+/// Three independent signals mark the selection: the symbol itself, reverse
+/// video, and this colour. Under `NO_COLOR` the first two remain.
+fn selection_cursor(color: bool) -> Span<'static> {
+    Span::styled("> ", tint(color, ACCENT).add_modifier(Modifier::BOLD))
 }
 
 /// `●` ok, `◐` drifted, `○` missing — position encodes WHICH hook, so the
@@ -426,7 +458,9 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
         format!("{} directories · {:.1}s", s.dirs_visited, app.elapsed)
     };
     let text = vec![
-        Line::from(format!("{}   {status}", s.root.display())),
+        // Only the title line is accented; tinting the counts would make the
+        // numbers harder to read for decoration's sake.
+        Line::from(format!("{}   {status}", s.root.display())).style(tint(app.color, ACCENT)),
         Line::from(format!(
             "{} repositories · {} managed · {} unmanaged · {} skipped subtrees",
             s.git_dirs_found, s.managed_seen, s.unmanaged_seen, s.excluded_dirs
@@ -509,11 +543,10 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
             if mid {
                 let g = shim_glyphs(r);
                 let all_ok = g.chars().all(|c| c == '●');
-                cells.push(Cell::from(g).style(tint(if all_ok {
-                    Color::Green
-                } else {
-                    Color::Red
-                })));
+                cells.push(Cell::from(g).style(tint(
+                    app.color,
+                    if all_ok { Color::Green } else { Color::Red },
+                )));
                 cells.push(Cell::from(bake_word(&r.baked)));
             }
             if wide {
@@ -532,7 +565,7 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 Color::Green
             };
-            cells.push(Cell::from(word).style(tint(colour)));
+            cells.push(Cell::from(word).style(tint(app.color, colour)));
             Row::new(cells)
         })
         .collect();
@@ -561,9 +594,9 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
     state.select(Some(app.selected.min(rows.len().saturating_sub(1))));
     f.render_stateful_widget(
         Table::new(body, widths)
-            .header(Row::new(header))
-            .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-            .highlight_symbol("> "),
+            .header(Row::new(header).style(tint(app.color, ACCENT)))
+            .row_highlight_style(selection_style())
+            .highlight_symbol(selection_cursor(app.color)),
         area,
         &mut state,
     );
@@ -597,7 +630,7 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
             bake_word(&r.baked)
         )),
         Line::from(""),
-        Line::from("DISPATCHERS"),
+        Line::from("DISPATCHERS").style(tint(app.color, ACCENT)),
     ];
     for (i, n) in DISPATCHERS.iter().enumerate() {
         let s = match r.shims.get(i) {
@@ -609,7 +642,9 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
     }
     if !r.stale_ours.is_empty() || !r.foreign_subs.is_empty() || r.hook_pkgjson {
         lines.push(Line::from(""));
-        lines.push(Line::from("LEFTOVERS (nothing dispatches these)"));
+        lines.push(
+            Line::from("LEFTOVERS (nothing dispatches these)").style(tint(app.color, ACCENT)),
+        );
         for n in r.stale_ours.iter().chain(r.foreign_subs.iter()) {
             lines.push(Line::from(format!("  {n}")));
         }
@@ -619,7 +654,7 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
     }
     if !r.skips.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from("hook.skip"));
+        lines.push(Line::from("hook.skip").style(tint(app.color, ACCENT)));
         for e in &r.skips {
             // What it COSTS, not what it says. A value is a substring pattern,
             // and its reach is invisible from the config line itself.
@@ -663,10 +698,10 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
         }
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(format!(
-        "CHECKS ({})",
-        crate::checks::all_checks().len()
-    )));
+    lines.push(
+        Line::from(format!("CHECKS ({})", crate::checks::all_checks().len()))
+            .style(tint(app.color, ACCENT)),
+    );
     // Windowed around the cursor. The full list is twenty lines plus a legend,
     // which on a short terminal pushed the hook.skip diagnostic off screen —
     // the section a reader most needs was the one that disappeared.
@@ -737,13 +772,10 @@ fn hooks_view(f: &mut Frame, area: Rect, app: &App) {
                 Constraint::Length(7),
             ],
         )
-        .header(Row::new(vec![
-            "CHECK",
-            "APPLICABLE",
-            "ACTIVE",
-            "SKIPPED",
-            "INERT",
-        ])),
+        .header(
+            Row::new(vec!["CHECK", "APPLICABLE", "ACTIVE", "SKIPPED", "INERT"])
+                .style(tint(app.color, ACCENT)),
+        ),
         area,
     );
 }
@@ -1017,7 +1049,8 @@ mod tests {
     fn state_is_tinted_with_a_named_colour() {
         let mut bad = repo("x", true);
         bad.shims[1] = ShimState::Drifted;
-        let app = App::new(scan_with_repos(vec![repo("ok", true), bad]));
+        let mut app = App::new(scan_with_repos(vec![repo("ok", true), bad]));
+        app.color = true; // explicit: never depend on the ambient environment
 
         let mut term = Terminal::new(ratatui::backend::TestBackend::new(110, 12)).unwrap();
         term.draw(|f| draw(f, &app)).unwrap();
@@ -1037,6 +1070,99 @@ mod tests {
                 .any(|c| matches!(c, Color::Indexed(n) if *n > 15)),
             "a fixed palette entry overrides the user's theme"
         );
+    }
+
+    /// The selection must not erase the status of the row it is on.
+    ///
+    /// A row style with `fg` overrides the per-cell colour, so accenting the
+    /// selected row hid whether it was ok or drifted — on exactly the row being
+    /// read. Reverse video swaps the cell's own colour instead.
+    #[test]
+    fn the_selected_row_keeps_its_status_colour() {
+        let mut app = App::new(scan_with_repos(vec![repo("ok", true), repo("b", true)]));
+        app.color = true;
+        app.selected = 0;
+
+        let mut term = Terminal::new(ratatui::backend::TestBackend::new(110, 12)).unwrap();
+        term.draw(|f| draw(f, &app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let used: Vec<Color> = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].fg)
+            .collect();
+        assert!(
+            used.contains(&Color::Green),
+            "the selected ok row must still read as ok"
+        );
+        assert!(used.contains(&ACCENT), "and the cursor carries the accent");
+    }
+
+    /// Headers use the accent, which is a slot rather than a hue — the terminal
+    /// decides what cyan looks like.
+    #[test]
+    fn headers_carry_the_accent() {
+        let mut app = App::new(scan_with_repos(vec![repo("a", true)]));
+        app.color = true;
+        let mut term = Terminal::new(ratatui::backend::TestBackend::new(110, 14)).unwrap();
+        term.draw(|f| draw(f, &app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        // The column header row.
+        // Find the rows by CONTENT, not by counting. Counting accented rows
+        // passed even with the column header un-accented, because the title
+        // line alone satisfied it — an assertion that could not fail.
+        let row_text = |y: u16| -> String {
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let accented = |y: u16| (0..buf.area.width).any(|x| buf[(x, y)].fg == ACCENT);
+
+        let header_y = (0..buf.area.height)
+            .find(|y| row_text(*y).contains("REPO") && row_text(*y).contains("STATE"))
+            .expect("column header row");
+        assert!(accented(header_y), "the column header must be accented");
+
+        let title_y = (0..buf.area.height)
+            .find(|y| row_text(*y).contains("/root"))
+            .expect("title row");
+        assert!(accented(title_y), "the title line must be accented");
+    }
+
+    /// With colour off, the selection is still marked — by the symbol and by
+    /// reverse video. An accent that vanishes must not take the cursor with it.
+    #[test]
+    fn the_selection_survives_no_color() {
+        let mut app = App::new(scan_with_repos(vec![repo("a", true), repo("b", true)]));
+        app.color = false;
+        app.selected = 1;
+
+        let mut term = Terminal::new(ratatui::backend::TestBackend::new(110, 12)).unwrap();
+        term.draw(|f| draw(f, &app)).unwrap();
+        let buf = term.backend().buffer().clone();
+
+        let reversed = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .any(|(x, y)| buf[(x, y)].modifier.contains(Modifier::REVERSED));
+        assert!(reversed, "reverse video marks the row without colour");
+
+        // Search every row rather than assume a layout offset.
+        let screen: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            screen.contains('>'),
+            "the cursor symbol is there:\n{screen}"
+        );
+
+        let coloured = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .any(|(x, y)| buf[(x, y)].fg != Color::Reset);
+        assert!(!coloured, "NO_COLOR must leave no foreground colour set");
     }
 
     #[test]
