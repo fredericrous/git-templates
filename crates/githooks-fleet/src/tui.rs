@@ -322,6 +322,25 @@ impl App {
     }
 }
 
+/// Semantic colour, in the TERMINAL's palette.
+///
+/// ratatui's named colours emit base ANSI (30-37 / 90-97), which a terminal
+/// theme remaps — unlike the 256-colour cube, which is fixed. So these follow
+/// whatever palette is configured, including a `vivid`-generated one, without
+/// reading any file. `LS_COLORS` is not consulted: it maps file types, not
+/// ok/warning/error.
+///
+/// Returns `Style::default()` when colour is off, so `NO_COLOR` yields a screen
+/// that is still fully legible — the glyph and the word carry the state, the
+/// colour only reinforces it.
+fn tint(c: Color) -> Style {
+    if githooks_runtime::ui::colors_enabled() {
+        Style::default().fg(c)
+    } else {
+        Style::default()
+    }
+}
+
 /// `●` ok, `◐` drifted, `○` missing — position encodes WHICH hook, so the
 /// column costs four characters instead of four names.
 fn shim_glyphs(r: &Repo) -> String {
@@ -488,7 +507,13 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
             let path = r.path.to_string_lossy().into_owned();
             let mut cells = vec![Cell::from(path)];
             if mid {
-                cells.push(Cell::from(shim_glyphs(r)));
+                let g = shim_glyphs(r);
+                let all_ok = g.chars().all(|c| c == '●');
+                cells.push(Cell::from(g).style(tint(if all_ok {
+                    Color::Green
+                } else {
+                    Color::Red
+                })));
                 cells.push(Cell::from(bake_word(&r.baked)));
             }
             if wide {
@@ -499,7 +524,15 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
                     r.skips.len().to_string()
                 }));
             }
-            cells.push(Cell::from(state_word(r)));
+            let word = state_word(r);
+            let colour = if word.starts_with('x') {
+                Color::Red
+            } else if word.starts_with('!') {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
+            cells.push(Cell::from(word).style(tint(colour)));
             Row::new(cells)
         })
         .collect();
@@ -972,6 +1005,38 @@ mod tests {
         let out = render(&app, 110, 16);
         assert!(out.contains("2/2"), "expected N/M per hook: {out}");
         assert!(out.contains("repositories"), "{out}");
+    }
+
+    /// Colour comes from the terminal's palette, not from a fixed cube.
+    ///
+    /// ratatui's named colours emit base ANSI, which a terminal theme remaps.
+    /// Asserting the NAMED colour is the closest a test can get to "follows
+    /// your theme" — the actual hue is the terminal's business, which is the
+    /// entire point.
+    #[test]
+    fn state_is_tinted_with_a_named_colour() {
+        let mut bad = repo("x", true);
+        bad.shims[1] = ShimState::Drifted;
+        let app = App::new(scan_with_repos(vec![repo("ok", true), bad]));
+
+        let mut term = Terminal::new(ratatui::backend::TestBackend::new(110, 12)).unwrap();
+        term.draw(|f| draw(f, &app)).unwrap();
+        let buf = term.backend().buffer().clone();
+
+        // Color is not Ord, so a Vec rather than a set.
+        let used: Vec<Color> = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].fg)
+            .collect();
+        assert!(used.contains(&Color::Green), "an ok row should be green");
+        assert!(used.contains(&Color::Red), "a drifted row should be red");
+        // Nothing from the fixed 256-colour cube, which would ignore the theme.
+        assert!(
+            !used
+                .iter()
+                .any(|c| matches!(c, Color::Indexed(n) if *n > 15)),
+            "a fixed palette entry overrides the user's theme"
+        );
     }
 
     #[test]

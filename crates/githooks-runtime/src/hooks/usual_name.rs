@@ -5,7 +5,7 @@
 //! Warning only: it never blocks a commit.
 
 use crate::git;
-use crate::ui::WARNING_SIGN;
+use crate::ui::{highlight, warning_sign};
 
 pub fn run(_args: &[std::ffi::OsString]) -> i32 {
     // An empty repo has no history to compare against.
@@ -26,7 +26,9 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
 
     if !seen {
         println!(
-            "{WARNING_SIGN} It is the first time you commit as \u{1b}[38;5;208m{full}\u{1b}[0m"
+            "{} It is the first time you commit as {}",
+            warning_sign(),
+            highlight(&full)
         );
     }
     0

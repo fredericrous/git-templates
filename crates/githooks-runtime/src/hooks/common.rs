@@ -6,7 +6,7 @@
 //! hook keeps only what is actually specific to it.
 
 use crate::git;
-use crate::ui::{ERROR_SIGN, VALID_SIGN, WARNING_SIGN};
+use crate::ui::{error_sign, valid_sign, warning_sign};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -191,18 +191,18 @@ pub fn run(root: &str, argv: &[String], extra: &[String]) -> bool {
 }
 
 pub fn ok(msg: &str) {
-    println!("{VALID_SIGN} {msg}");
+    println!("{} {msg}", valid_sign());
 }
 pub fn fail(msg: &str) {
-    println!("{ERROR_SIGN} {msg}");
+    println!("{} {msg}", error_sign());
 }
 pub fn warn(msg: &str) {
-    println!("{WARNING_SIGN} {msg}");
+    println!("{} {msg}", warning_sign());
 }
 
 /// Orange, for the fragments these hooks highlight.
 pub fn hl(s: &str) -> String {
-    crate::ui::color(s, "208")
+    crate::ui::highlight(s)
 }
 
 #[cfg(test)]

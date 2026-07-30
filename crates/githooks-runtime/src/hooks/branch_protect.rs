@@ -14,7 +14,7 @@
 //! is deliberate — a hook that cannot be bypassed is a hook people delete.
 
 use crate::pushrefs::PushRef;
-use crate::ui::{color, ERROR_SIGN};
+use crate::ui::{error_sign, highlight};
 
 /// Matched against the REMOTE ref — what you are writing to, not what you are
 /// pushing from. `git push origin feature:main` is a push to main however the
@@ -47,13 +47,14 @@ pub fn run(refs: &[PushRef]) -> i32 {
     for (name, deleting) in &blocked {
         let what = if *deleting { "Deleting" } else { "Pushing to" };
         println!(
-            "{ERROR_SIGN} {what} branch {} is forbidden. Open a Pull Request.",
-            color(name, "208")
+            "{} {what} branch {} is forbidden. Open a Pull Request.",
+            error_sign(),
+            highlight(name)
         );
     }
     println!(
         "    (if you really mean it: {})",
-        color("git push --no-verify", "208")
+        highlight("git push --no-verify")
     );
     1
 }

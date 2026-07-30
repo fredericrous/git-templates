@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
 
 use crate::registry::{Ctx, HookFn, PRE_COMMIT_CHECKS, PRE_PUSH_CHECKS, REGISTRY};
-use crate::ui::{color, WARNING_SIGN};
+use crate::ui::{highlight, warning_sign};
 use crate::{cherry_pick_in_progress, configured_skips};
 
 fn handler(name: &str) -> HookFn {
@@ -81,9 +81,10 @@ fn announce_skips(dropped: &[&str]) {
         "checks"
     };
     println!(
-        "{WARNING_SIGN} {} {plural} skipped by {}: {}",
+        "{} {} {plural} skipped by {}: {}",
+        warning_sign(),
         dropped.len(),
-        color("hook.skip", "208"),
+        highlight("hook.skip"),
         dropped.join(", ")
     );
 }
