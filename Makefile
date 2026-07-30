@@ -110,6 +110,25 @@ bake-shims:
 		fi; \
 	done
 
+# The dashboard, installed SEPARATELY and on purpose.
+#
+# `make install` ships only the hook binary. That one runs on every commit in
+# every repo, and its dependency-free posture is the entire reason the Rust
+# migration happened; githooks-fleet pulls ratatui, crossterm and serde. Keeping
+# the two installs apart is what stops "I wanted the dashboard" from becoming
+# "every commit now depends on a TUI library".
+#
+# Nothing is deleted here — it writes one binary — so this needs none of the
+# fail-closed machinery `install` carries.
+install-fleet:
+	@cargo build --release --quiet -p githooks-fleet
+	@mkdir -p $(INSTALL_BIN_DIR)
+	@install -m 0755 $(MAKEFILE_DIR)target/release/githooks-fleet $(INSTALL_BIN_DIR)/githooks-fleet
+	@echo "installed $(INSTALL_BIN_DIR)/githooks-fleet"
+	@echo "  githooks-fleet          report the fleet"
+	@echo "  githooks-fleet tui      the dashboard"
+	@echo "  githooks-fleet fix      what would change (dry run; --apply to write)"
+
 # Push the shim SET to every repo. Only needed when a hook is added, removed
 # or renamed — ordinary binary fixes reach all repos via `make install`, since
 # every shim points at the one binary.
@@ -124,4 +143,4 @@ propagate:
 deps:
 	@./scripts/check-no-deps.sh
 
-.PHONY: all chmodx build test install bake-shims propagate deps
+.PHONY: all chmodx build test install install-fleet bake-shims propagate deps
