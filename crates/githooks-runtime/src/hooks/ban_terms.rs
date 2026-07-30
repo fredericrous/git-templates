@@ -11,7 +11,7 @@
 //! a loose prefilter costs one extra file read, a strict one misses violations.
 
 use crate::git;
-use crate::ui::color;
+use crate::ui::{error_sign, highlight, valid_sign};
 
 /// (label, loose `git diff -G` prefilter, precise matcher)
 struct Term {
@@ -403,23 +403,20 @@ pub fn run(hook_name: &str, _args: &[std::ffi::OsString]) -> i32 {
 
         if !matches.is_empty() {
             if status == 0 {
-                eprintln!("  {} Unwanted terms found", color("\u{2717}", "160"));
+                eprintln!("  {} Unwanted terms found", error_sign().trim());
             }
             status = 1;
             println!(
                 "    The following files contains '{}' in them:",
-                color(term.label, "208")
+                highlight(term.label)
             );
             for m in matches {
-                println!("    - {}", color(m, "208"));
+                println!("    - {}", highlight(m));
             }
         }
     }
     if status == 0 {
-        println!(
-            "  {} No unwanted terms where found",
-            color("\u{2713}", "112")
-        );
+        println!("  {} No unwanted terms where found", valid_sign().trim());
     }
     status
 }

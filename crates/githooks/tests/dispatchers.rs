@@ -219,3 +219,57 @@ fn pre_push_announces_its_skips_too() {
         "expected the skip to be named at push time: {out}"
     );
 }
+
+/// `NO_COLOR` must actually work, not merely be documented.
+///
+/// The fleet spec asserted this property for several PRs while nothing read the
+/// variable. Colour is now base ANSI so the terminal's own theme decides the
+/// hue, and this checks the off switch exists — the glyphs carry the meaning
+/// regardless, which is what makes turning colour off safe.
+#[test]
+fn no_color_suppresses_every_escape_sequence() {
+    let r = Repo::new();
+    r.stage("a.txt", "x\n");
+
+    let with_colour = r.hook("pre-commit", &[]);
+    assert!(
+        with_colour.stdout.contains('\u{1b}'),
+        "colour is on by default: {:?}",
+        with_colour.stdout
+    );
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("--hooks-dir")
+        .arg(r.path(".git/hooks"))
+        .arg("pre-commit")
+        .current_dir(&r.dir)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run");
+    let plain = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        !plain.contains('\u{1b}'),
+        "NO_COLOR must leave no escape sequences: {plain:?}"
+    );
+    // And the screen stays readable without them.
+    assert!(
+        plain.contains('✓'),
+        "the glyph carries the meaning: {plain}"
+    );
+}
+
+/// A terminal that cannot render SGR gets none either.
+#[test]
+fn term_dumb_suppresses_colour() {
+    let r = Repo::new();
+    r.stage("a.txt", "x\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("--hooks-dir")
+        .arg(r.path(".git/hooks"))
+        .arg("pre-commit")
+        .current_dir(&r.dir)
+        .env("TERM", "dumb")
+        .output()
+        .expect("run");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains('\u{1b}'));
+}

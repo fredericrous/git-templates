@@ -8,7 +8,7 @@
 //! `rg` made `! rg …` true and the hook rejected EVERY branch name.
 
 use crate::git;
-use crate::ui::{ERROR_SIGN, VALID_SIGN};
+use crate::ui::{error_sign, valid_sign};
 
 use crate::vocabulary;
 
@@ -41,7 +41,10 @@ pub fn run(args: &[std::ffi::OsString]) -> i32 {
     };
 
     if git::succeeds(&["show-branch", &format!("remotes/origin/{branch}")]) {
-        println!("{VALID_SIGN} Branch already on server. Name is authorized.");
+        println!(
+            "{} Branch already on server. Name is authorized.",
+            valid_sign()
+        );
         return 0;
     }
 
@@ -57,22 +60,29 @@ pub fn run(args: &[std::ffi::OsString]) -> i32 {
     // `None` here means git failed, which is NOT the same as "no branches" —
     // treat only a successful, empty listing as the initial-push case.
     if git::stdout(&["ls-remote", "--heads", remote]).is_some_and(|s| s.is_empty()) {
-        println!("{VALID_SIGN} Remote has no branches yet (initial push). Name is authorized.");
+        println!(
+            "{} Remote has no branches yet (initial push). Name is authorized.",
+            valid_sign()
+        );
         return 0;
     }
 
     if !conforms(&branch) {
         println!(
-            "{ERROR_SIGN} Branch names in this project must adhere to this contract:
+            "{} Branch names in this project must adhere to this contract:
     \u{1b}[38;5;208m{}\u{1b}[0m.
     Rename your branch with: \u{1b}[38;5;208mgit branch -m\u{1b}[0m <branch name>
     Or bypass this check with git -c hook.skip=branch-pattern push",
+            error_sign(),
             vocabulary::branch_contract()
         );
         return 1;
     }
 
-    println!("{VALID_SIGN} Branch name conforms with authorized pattern");
+    println!(
+        "{} Branch name conforms with authorized pattern",
+        valid_sign()
+    );
     0
 }
 

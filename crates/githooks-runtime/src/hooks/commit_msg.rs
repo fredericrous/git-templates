@@ -9,7 +9,7 @@
 //! optional leading emoji is recognised — see `split_leading_emoji`.
 
 use crate::git;
-use crate::ui::color;
+use crate::ui::{error_sign, highlight, valid_sign};
 
 const MAX_SUMMARY_LINE_SIZE: usize = 72;
 const MAX_DESCRIPTION_SIZE: usize = 50;
@@ -196,13 +196,13 @@ pub fn group_footer(text: &str) -> String {
 }
 
 fn valid(msg: &str) {
-    println!("  {} {msg}", color("\u{2713}", "112"));
+    println!("  {} {msg}", valid_sign().trim());
 }
 fn error(msg: &str) {
-    eprintln!("  {} {msg}", color("\u{2717}", "160"));
+    eprintln!("  {} {msg}", error_sign().trim());
 }
 fn orange(s: &str) -> String {
-    color(s, "208")
+    highlight(s)
 }
 
 pub fn run(args: &[std::ffi::OsString]) -> i32 {

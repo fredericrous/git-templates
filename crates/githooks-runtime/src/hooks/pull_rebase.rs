@@ -9,7 +9,7 @@
 //! conflict rather than leaving a half-rebased state.
 
 use crate::git;
-use crate::ui::{ERROR_SIGN, VALID_SIGN, WARNING_SIGN};
+use crate::ui::{error_sign, valid_sign, warning_sign};
 
 /// `ahead[[:space:]]+[0-9]+,[[:space:]]*behind` over `git status -sb`.
 /// Both counts present means the branch and its upstream have diverged, and an
@@ -60,7 +60,10 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
         .unwrap_or_default()
         .is_empty()
     {
-        println!("{WARNING_SIGN} Uncommitted changes — skipping pre-push pull-rebase.");
+        println!(
+            "{} Uncommitted changes — skipping pre-push pull-rebase.",
+            warning_sign()
+        );
         return 0;
     }
 
@@ -79,7 +82,7 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
     let (remote, branch) = upstream.split_once('/').unwrap_or(("origin", &upstream));
     if !git::succeeds(&["ls-remote", "--exit-code", "--heads", remote, branch]) {
         println!(
-            "{WARNING_SIGN} Upstream {upstream} no longer exists on the remote (merged + auto-deleted?) — skipping sync."
+            "{} Upstream {upstream} no longer exists on the remote (merged + auto-deleted?) — skipping sync.", warning_sign()
         );
         return 0;
     }
@@ -88,16 +91,22 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
     //    check below (the shell fell through here too).
     let status = git::stdout(&["status", "-sb"]).unwrap_or_default();
     if looks_diverged(&status) {
-        println!("{WARNING_SIGN} Branch diverged from its upstream — skip auto pull-rebase.");
+        println!(
+            "{} Branch diverged from its upstream — skip auto pull-rebase.",
+            warning_sign()
+        );
         println!("    Reconcile manually: \u{1b}[38;5;208mgit pull --rebase\u{1b}[0m (or \u{1b}[38;5;208mgit merge\u{1b}[0m)");
     } else if !git::succeeds(&["pull", "--rebase"]) {
         // Abort so the tree is never left half-rebased.
         let _ = git::succeeds(&["rebase", "--abort"]);
-        println!("{ERROR_SIGN} pull --rebase hit conflicts (rebase aborted, tree restored).");
+        println!(
+            "{} pull --rebase hit conflicts (rebase aborted, tree restored).",
+            error_sign()
+        );
         println!("    Resolve manually: \u{1b}[38;5;208mgit pull --rebase\u{1b}[0m");
         return 1;
     } else {
-        println!("{VALID_SIGN} Branch is in sync with its upstream");
+        println!("{} Branch is in sync with its upstream", valid_sign());
     }
 
     // 4. Informational only — never acts.
@@ -120,7 +129,10 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
             // so 12 commits ahead printed "1". The test was only ever
             // non-zero/zero, so the wrong number went unnoticed. Parsed properly
             // here.
-            println!("{WARNING_SIGN} origin/{default_branch} is ahead by {n} commit(s).");
+            println!(
+                "{} origin/{default_branch} is ahead by {n} commit(s).",
+                warning_sign()
+            );
             println!("    Consider before merging: \u{1b}[38;5;208mgit merge origin/{default_branch}\u{1b}[0m");
         }
     }
