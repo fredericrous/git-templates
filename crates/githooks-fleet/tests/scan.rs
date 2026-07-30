@@ -155,6 +155,7 @@ fn paths_are_root_relative_and_sorted() {
         .iter()
         .map(|r| r["path"].as_str().unwrap())
         .collect();
+    // Single components, so no separator appears — safe to compare literally.
     assert_eq!(paths, vec!["alpha", "mid", "zeta"]);
 }
 
@@ -184,4 +185,98 @@ fn json_carries_every_counter() {
     ] {
         assert!(!v[k].is_null(), "missing {k} from the scan contract");
     }
+}
+
+/// A repo four directories down must be found at the default depth.
+///
+/// Not hypothetical: `Perso/jellyfish/tuna/Coinbase-OAuth2` sat at that depth
+/// and was invisible to every sweep, because `propagate.sh` and the hand-run
+/// verification both used `find -maxdepth 6` while its hook files are eight
+/// path components deep. It is still running pre-migration zsh hooks. The whole
+/// fleet was reported consistent while one repo had never been touched.
+#[test]
+fn a_deeply_nested_repo_is_found_at_default_depth() {
+    let t = Tree::new("nested");
+    t.managed_repo("Perso/group/project/sub");
+    let v = json(&["--root", t.path().to_str().unwrap()]);
+    assert_eq!(v["git_dirs_found"], 1, "default depth must reach it");
+    // Built through PathBuf: paths serialise with the platform's separator, so
+    // a hardcoded "a/b" passes on Unix and fails on Windows for no real reason.
+    let expected = PathBuf::from("Perso")
+        .join("group")
+        .join("project")
+        .join("sub");
+    assert_eq!(v["repos"][0]["path"], expected.to_string_lossy().as_ref());
+}
+
+/// Files nothing dispatches any more: they look installed and never run.
+#[test]
+fn stale_and_foreign_hook_files_are_reported_separately() {
+    let t = Tree::new("leftovers");
+    t.managed_repo("a");
+    let hooks = t.path().join("a/.git/hooks");
+    // Ours, but no longer shipped (a retired per-check shim).
+    std::fs::write(
+        hooks.join("pre-commit-ruff"),
+        "#!/bin/sh\nexec x --hooks-dir y pre-commit-ruff\n",
+    )
+    .unwrap();
+    // Somebody's own sub-hook: not ours, and now dispatched by nothing.
+    std::fs::write(hooks.join("pre-push-mine.sh"), "#!/bin/sh\necho hi\n").unwrap();
+    std::fs::write(hooks.join("package.json"), "{\"//\":\"Forces Node\"}").unwrap();
+
+    let v = json(&["--root", t.path().to_str().unwrap()]);
+    let r = &v["repos"][0];
+    assert_eq!(r["stale_ours"][0], "pre-commit-ruff");
+    assert_eq!(r["foreign_subs"][0], "pre-push-mine.sh");
+    assert_eq!(r["hook_pkgjson"], true);
+}
+
+/// A shim installed by `make install` must classify as OK, not drifted — the
+/// failure that would make the tool cry wolf on all 96 repos.
+#[test]
+fn a_baked_shim_is_ok_and_a_hand_edited_one_is_not() {
+    let t = Tree::new("baked");
+    let hooks = t.path().join("r/.git/hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let template = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../templates/hooks/pre-commit"
+    ))
+    .unwrap();
+    for n in ["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"] {
+        std::fs::write(
+            hooks.join(n),
+            template.replace("__GITHOOKS_BIN__", "/opt/githooks"),
+        )
+        .unwrap();
+    }
+    let v = json(&["--root", t.path().to_str().unwrap(), "--depth", "3"]);
+    let r = &v["repos"][0];
+    assert!(
+        r["shims"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["state"] == "ok"),
+        "baked shims must not read as drift: {:?}",
+        r["shims"]
+    );
+    assert_eq!(
+        r["baked"]["bake"], "stale",
+        "and /opt is not where we install"
+    );
+
+    std::fs::write(hooks.join("pre-push"), "#!/bin/sh\necho tampered\n").unwrap();
+    let v = json(&["--root", t.path().to_str().unwrap(), "--depth", "3"]);
+    let states: Vec<&str> = v["repos"][0]["shims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["state"].as_str().unwrap())
+        .collect();
+    assert!(
+        states.contains(&"drifted"),
+        "real drift must show: {states:?}"
+    );
 }
