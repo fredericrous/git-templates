@@ -129,12 +129,6 @@ jobs:
             sed -i "s|__GITHOOKS_BIN__|$BIN|g" ".git/hooks/$h"
             chmod +x ".git/hooks/$h"
           done
-          # sub-hooks the dispatcher will find
-          for h in pre-commit-merge-conflict pre-commit-package-lock; do
-            cp "$GITHUB_WORKSPACE/templates/hooks/$h" ".git/hooks/$h"
-            sed -i "s|__GITHOOKS_BIN__|$BIN|g" ".git/hooks/$h"
-            chmod +x ".git/hooks/$h"
-          done
 
           echo "hello" > a.txt && git add a.txt
           git commit -m "feat: a windows commit through the rust hooks"

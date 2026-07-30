@@ -14,26 +14,31 @@
 use std::ffi::OsString;
 use std::path::Path;
 
+use crate::pushrefs::PushRefs;
 use crate::{dispatch, hooks};
 
 /// Everything a hook is given. One shape for all of them, so a handler that
 /// needs the invoked name (ban-terms excludes its own source by it) or the
 /// hooks directory (the dispatchers glob it) does not need its own signature.
 pub struct Ctx<'a> {
-    /// The hook name as invoked, suffix already stripped.
+    /// The hook name as invoked.
     pub name: &'a str,
     /// Arguments git passed the hook.
     pub args: &'a [OsString],
-    /// Directory the shim lives in — where sub-hooks are discovered.
+    /// Directory the shim lives in. Only foreign sub-hooks are found here now;
+    /// our own checks are functions in this binary.
     pub hooks_dir: &'a Path,
+    /// The pre-push ref list, read from stdin at most once and lent to every
+    /// check that asks. See `pushrefs`.
+    pub push: &'a PushRefs,
 }
 
 pub type HookFn = fn(&Ctx) -> i32;
 
 /// name → handler. The single place a hook is registered.
 pub const REGISTRY: &[(&str, HookFn)] = &[
-    ("pre-commit", |c| dispatch::pre_commit(c.hooks_dir, c.args)),
-    ("pre-push", |c| dispatch::pre_push(c.hooks_dir, c.args)),
+    ("pre-commit", dispatch::pre_commit),
+    ("pre-push", dispatch::pre_push),
     ("commit-msg", |c| hooks::commit_msg::run(c.args)),
     ("prepare-commit-msg", |c| {
         hooks::prepare_commit_msg::run(c.args)
@@ -69,7 +74,42 @@ pub const REGISTRY: &[(&str, HookFn)] = &[
         hooks::branch_pattern::run(c.args)
     }),
     ("pre-push-pull-rebase", |c| hooks::pull_rebase::run(c.args)),
-    ("pre-push-run-tests-js", |c| hooks::run_tests::run(c.args)),
+    ("pre-push-run-tests-js", |c| {
+        hooks::run_tests::run(c.push.get())
+    }),
+    ("pre-push-branch-protect", |c| {
+        hooks::branch_protect::run(c.push.get())
+    }),
+];
+
+/// What `pre-commit` runs, in the order it reports them. This list REPLACES the
+/// old `<hook>-*` filename glob: order used to be lexicographic and therefore
+/// an accident of naming, which is how a rename could silently reorder a gate.
+/// Here it is stated.
+pub const PRE_COMMIT_CHECKS: &[&str] = &[
+    "pre-commit-argo-lint",
+    "pre-commit-ban-terms",
+    "pre-commit-kube-linter",
+    "pre-commit-kubeconform",
+    "pre-commit-lint-js",
+    "pre-commit-lint-json-yaml",
+    "pre-commit-merge-conflict",
+    "pre-commit-package-lock",
+    "pre-commit-prettier",
+    "pre-commit-pyright",
+    "pre-commit-ruff",
+    "pre-commit-usual-name",
+    "pre-commit-yamllint",
+];
+
+/// What `pre-push` runs, in order. Serial and fail-fast, so this order is the
+/// cost order: refuse a forbidden push before validating a name, and validate
+/// everything structural before paying for the test suite.
+pub const PRE_PUSH_CHECKS: &[&str] = &[
+    "pre-push-branch-protect",
+    "pre-push-branch-pattern",
+    "pre-push-pull-rebase",
+    "pre-push-run-tests-js",
 ];
 
 pub fn lookup(name: &str) -> Option<HookFn> {
@@ -78,8 +118,82 @@ pub fn lookup(name: &str) -> Option<HookFn> {
 
 #[cfg(test)]
 mod tests {
-    use super::REGISTRY;
+    use super::{PRE_COMMIT_CHECKS, PRE_PUSH_CHECKS, REGISTRY};
     use std::collections::BTreeSet;
+
+    /// Only FOUR files ship now, and they are exactly the hook names git itself
+    /// invokes. Everything else `.git/hooks` used to hold was our own
+    /// dispatcher's business — 16 identical shims whose only job was to re-exec
+    /// this binary and tell it its own name.
+    #[test]
+    fn the_shipped_shims_are_exactly_the_git_invoked_hooks() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/templates/hooks");
+        let mut shipped: Vec<String> = std::fs::read_dir(dir)
+            .expect("templates/hooks")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        shipped.sort();
+        assert_eq!(
+            shipped,
+            vec!["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"],
+            "git invokes these four by name; anything else here is a file we \
+             would have to install into 96 repos for no reason"
+        );
+        for name in &shipped {
+            assert!(
+                super::lookup(name).is_some(),
+                "shipped shim {name:?} has no handler — it would exit 2 and block the commit"
+            );
+        }
+    }
+
+    /// The replacement for the old shim↔handler pairing: a check that is
+    /// registered but named in NEITHER list can never run. That used to be
+    /// caught by "handler with no shim is dead code"; with the shims gone, the
+    /// check lists are what reachability means.
+    #[test]
+    fn every_check_is_reachable_and_every_listed_check_exists() {
+        let listed: BTreeSet<&str> = PRE_COMMIT_CHECKS
+            .iter()
+            .chain(PRE_PUSH_CHECKS.iter())
+            .copied()
+            .collect();
+        for n in &listed {
+            assert!(
+                super::lookup(n).is_some(),
+                "{n:?} is listed to run but is not registered — dispatch would panic"
+            );
+        }
+        // Dispatchers are entered by git, not by a list.
+        let dispatchers: BTreeSet<&str> =
+            ["pre-commit", "pre-push", "commit-msg", "prepare-commit-msg"]
+                .into_iter()
+                .collect();
+        let unreachable: Vec<&str> = REGISTRY
+            .iter()
+            .map(|(n, _)| *n)
+            .filter(|n| !listed.contains(n) && !dispatchers.contains(n))
+            .collect();
+        assert!(
+            unreachable.is_empty(),
+            "registered but never run by any dispatcher: {unreachable:?}"
+        );
+    }
+
+    /// pre-push is serial and fail-fast, so this list IS the cost order.
+    #[test]
+    fn pre_push_runs_cheapest_first() {
+        assert_eq!(
+            PRE_PUSH_CHECKS,
+            &[
+                "pre-push-branch-protect",
+                "pre-push-branch-pattern",
+                "pre-push-pull-rebase",
+                "pre-push-run-tests-js",
+            ]
+        );
+    }
 
     #[test]
     fn names_are_unique() {
@@ -87,74 +201,5 @@ mod tests {
         for (n, _) in REGISTRY {
             assert!(seen.insert(*n), "duplicate registration: {n}");
         }
-    }
-
-    /// The registry and the shipped shims must describe the same set.
-    ///
-    /// A shim the binary does not recognise exits 2 and BLOCKS the commit; a
-    /// handler with no shim is dead code that ships forever. Both were possible
-    /// while the name lived in a match arm and in a filename with nothing
-    /// comparing them.
-    /// pre-push is SERIAL and fail-fast, and the order is the glob's — so the
-    /// shipped filenames decide it. Cheap structural checks run before the
-    /// expensive suite: reject a bad branch name and rebase before paying for
-    /// the tests, not after.
-    ///
-    /// `pre_push_runs_sub_hooks_in_glob_order` proves the dispatcher sorts, using
-    /// synthetic aaa/mmm/zzz names. It cannot notice that a RENAME reordered the
-    /// real ones — dropping the `.zsh`/`.js` suffixes was very nearly such a
-    /// change. This pins the actual shipped names.
-    #[test]
-    fn the_shipped_pre_push_hooks_sort_cheapest_first() {
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/templates/hooks");
-        let mut names: Vec<String> = std::fs::read_dir(dir)
-            .expect("templates/hooks")
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with("pre-push-"))
-            .collect();
-        names.sort();
-        assert_eq!(
-            names,
-            vec![
-                "pre-push-branch-pattern",
-                "pre-push-pull-rebase",
-                "pre-push-run-tests-js",
-            ],
-            "pre-push order is decided by these filenames"
-        );
-    }
-
-    #[test]
-    fn every_shim_has_a_handler_and_vice_versa() {
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/templates/hooks");
-        let mut shims = BTreeSet::new();
-        for e in std::fs::read_dir(dir).expect("templates/hooks").flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            // Only the shims dispatch to the binary; anything else is not ours.
-            let body = std::fs::read_to_string(e.path()).unwrap_or_default();
-            if !body.contains("--hooks-dir") {
-                continue;
-            }
-            assert!(
-                !name.contains('.'),
-                "shim {name:?} carries an extension: the filename is what the \
-                 dispatcher passes as the hook name, so a suffix here has to be \
-                 stripped in main.rs forever and lies about the language"
-            );
-            shims.insert(name);
-        }
-        let registered: BTreeSet<String> = REGISTRY.iter().map(|(n, _)| n.to_string()).collect();
-
-        let missing: Vec<_> = shims.difference(&registered).collect();
-        assert!(
-            missing.is_empty(),
-            "shims with no handler (exit 2 on use): {missing:?}"
-        );
-        let orphan: Vec<_> = registered.difference(&shims).collect();
-        assert!(
-            orphan.is_empty(),
-            "handlers with no shim (dead code): {orphan:?}"
-        );
     }
 }

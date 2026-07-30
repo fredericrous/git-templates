@@ -98,16 +98,6 @@ impl Repo {
         }
     }
 
-    /// Write an executable sub-hook. `sh`, because that is what the shims are
-    /// and what the dispatcher's Windows shebang emulation expects.
-    pub fn sub_hook(&self, name: &str, body: &str) {
-        let dir = self.dir.join(".git/hooks");
-        std::fs::create_dir_all(&dir).expect("hooks dir");
-        let p = dir.join(name);
-        std::fs::write(&p, format!("#!/bin/sh\n{body}")).expect("write sub-hook");
-        make_executable(&p);
-    }
-
     pub fn path(&self, rel: &str) -> PathBuf {
         self.dir.join(rel)
     }
