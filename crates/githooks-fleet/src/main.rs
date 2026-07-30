@@ -10,6 +10,7 @@
 //! not meaningfully work with a TUI.
 
 mod scan;
+mod shim;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -54,6 +55,16 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     Ok(a)
 }
 
+/// Where `make install` puts the binary. Shims baked with anything else are
+/// reported as stale, which is the GUI-client failure mode.
+fn default_binary() -> String {
+    std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join(".local/bin/githooks"))
+        .unwrap_or_else(|| PathBuf::from("githooks"))
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn default_root() -> PathBuf {
     std::env::var_os("HOME")
         .map(|h| PathBuf::from(h).join("Developer"))
@@ -82,7 +93,8 @@ fn main() -> ExitCode {
     }
 
     let started = std::time::Instant::now();
-    let scan = scan::scan(&args.root, args.depth);
+    let installed = default_binary();
+    let scan = scan::scan(&args.root, args.depth, &installed);
     let elapsed = started.elapsed();
 
     if args.json {

@@ -13,8 +13,11 @@
 //! looked in the wrong place", which no scalar can express.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::Serialize;
+
+use crate::shim::{self, BakeState, ShimState, DISPATCHERS};
 
 /// Subtrees never worth descending. Matches the exclusions the shell sweep
 /// used, so the two agree about what "the fleet" means.
@@ -26,6 +29,22 @@ pub struct Repo {
     pub path: PathBuf,
     /// At least one file in `.git/hooks` dispatches to the binary.
     pub managed: bool,
+    /// One entry per git-invoked hook, in `DISPATCHERS` order.
+    pub shims: Vec<ShimState>,
+    pub baked: BakeState,
+    /// Our files that we no longer ship — the 16 per-check shims retired when
+    /// checks moved in-process, and anything else removed upstream.
+    pub stale_ours: Vec<String>,
+    /// Hand-written `pre-commit-*` / `pre-push-*` sub-hooks. Nothing dispatches
+    /// these any more, so they LOOK installed and never run.
+    pub foreign_subs: Vec<String>,
+    /// The node-era `package.json` that forced CommonJS. No hook is node now.
+    pub hook_pkgjson: bool,
+    /// Manifests present at the repo root. Drives inert-vs-failing: a Python
+    /// repo with no Cargo.toml is correctly silent about clippy.
+    pub languages: Vec<String>,
+    /// `git config --get-all hook.skip`, which suppresses checks by substring.
+    pub skips: Vec<String>,
 }
 
 /// A whole scan, including how it was performed.
@@ -73,7 +92,7 @@ fn is_managed(hooks: &Path) -> bool {
     })
 }
 
-pub fn scan(root: &Path, depth: usize) -> FleetScan {
+pub fn scan(root: &Path, depth: usize, installed_binary: &str) -> FleetScan {
     let mut s = FleetScan {
         root: root.to_path_buf(),
         depth,
@@ -86,12 +105,12 @@ pub fn scan(root: &Path, depth: usize) -> FleetScan {
         dirs_visited: 0,
         repos: Vec::new(),
     };
-    walk(root, root, depth, &mut s);
+    walk(root, root, depth, installed_binary, &mut s);
     s.repos.sort_by(|a, b| a.path.cmp(&b.path));
     s
 }
 
-fn walk(root: &Path, dir: &Path, budget: usize, s: &mut FleetScan) {
+fn walk(root: &Path, dir: &Path, budget: usize, installed_binary: &str, s: &mut FleetScan) {
     s.dirs_visited += 1;
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -122,10 +141,8 @@ fn walk(root: &Path, dir: &Path, budget: usize, s: &mut FleetScan) {
                 s.unmanaged_seen += 1;
             }
             let repo = path.parent().unwrap_or(&path);
-            s.repos.push(Repo {
-                path: repo.strip_prefix(root).unwrap_or(repo).to_path_buf(),
-                managed,
-            });
+            s.repos
+                .push(inspect(root, repo, &hooks, managed, installed_binary));
             // A repository is a leaf for this purpose; nothing inside .git is
             // another repo, and worktrees keep their hooks in the main one.
             continue;
@@ -142,6 +159,92 @@ fn walk(root: &Path, dir: &Path, budget: usize, s: &mut FleetScan) {
         return;
     }
     for d in subdirs {
-        walk(root, &d, budget - 1, s);
+        walk(root, &d, budget - 1, installed_binary, s);
+    }
+}
+
+/// Everything we can learn about one repository from its hooks directory.
+fn inspect(root: &Path, repo: &Path, hooks: &Path, managed: bool, installed_binary: &str) -> Repo {
+    let shims: Vec<ShimState> = DISPATCHERS
+        .iter()
+        .map(|n| shim::classify(&hooks.join(n)))
+        .collect();
+
+    let (mut stale_ours, mut foreign_subs) = (Vec::new(), Vec::new());
+    let mut hook_pkgjson = false;
+    if let Ok(entries) = std::fs::read_dir(hooks) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".sample") || DISPATCHERS.contains(&name.as_str()) {
+                continue;
+            }
+            if name == "package.json" {
+                hook_pkgjson = std::fs::read_to_string(&p)
+                    .map(|c| c.contains("Forces Node"))
+                    .unwrap_or(false);
+                continue;
+            }
+            if is_ours(&p) {
+                stale_ours.push(name);
+            } else if name.starts_with("pre-commit-") || name.starts_with("pre-push-") {
+                foreign_subs.push(name);
+            }
+        }
+    }
+    stale_ours.sort();
+    foreign_subs.sort();
+
+    Repo {
+        path: repo.strip_prefix(root).unwrap_or(repo).to_path_buf(),
+        managed,
+        baked: shim::bake_state(&shims, installed_binary),
+        shims,
+        stale_ours,
+        foreign_subs,
+        hook_pkgjson,
+        languages: languages(repo),
+        skips: skips(repo),
+    }
+}
+
+/// Root-level manifests only. Deliberately an approximation: the hooks
+/// themselves resolve the NEAREST manifest, so a repo can hold Rust in a
+/// subdirectory and show no `rust` here. It drives a display column, never a
+/// verdict.
+fn languages(repo: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let has = |f: &str| repo.join(f).is_file();
+    if has("Cargo.toml") {
+        out.push("rust".into());
+    }
+    if has("package.json") {
+        out.push("js".into());
+    }
+    if has("pyproject.toml") || has("requirements.txt") || has("setup.py") {
+        out.push("python".into());
+    }
+    if has("kustomization.yaml") || has("kustomization.yml") || repo.join("k8s").is_dir() {
+        out.push("k8s".into());
+    }
+    out
+}
+
+fn skips(repo: &Path) -> Vec<String> {
+    let out = Command::new("git")
+        .args(["config", "--get-all", "hook.skip"])
+        .current_dir(repo)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
     }
 }
