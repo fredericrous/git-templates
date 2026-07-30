@@ -27,7 +27,7 @@ APPLY=0
 
 say() { [ "$APPLY" = "1" ] && echo "$@" || echo "would $@"; }
 
-repos=0 removed=0 installed=0 pkgjson=0 skipped=0
+repos=0 removed=0 installed=0 pkgjson=0 skipped=0 foreign=0
 
 # A file is OURS only if it dispatches to the binary. Anything else in
 # .git/hooks is someone's own hook and is never touched.
@@ -76,11 +76,15 @@ for gitdir in $(find "$ROOT" -maxdepth 6 -type d -name .git 2>/dev/null | sort);
   #    a built-in check; anything else here would be dispatched by a glob that
   #    no longer exists, so it would silently stop running. Removing it is the
   #    honest outcome — a file that never runs is worse than no file.
+  #    Step 1 already retired OUR files; this is only for the ones it skips
+  #    because is_ours() says they are somebody else's. Without the exclusion
+  #    both steps claim the same files and the counts double.
   for f in "$hooks"/pre-commit-* "$hooks"/pre-push-*; do
     [ -f "$f" ] || continue
+    is_ours "$f" && continue
     say "rm  $f  (sub-hooks are in-process now)"
     [ "$APPLY" = "1" ] && rm -f "$f"
-    removed=$((removed + 1))
+    foreign=$((foreign + 1))
   done
 
   # 3. The vestigial node-era package.json: it forced CommonJS for the .js
@@ -109,6 +113,7 @@ done
 echo
 echo "repos (managed):  $repos"
 echo "stale shims:      $removed"
+echo "foreign sub-hooks: $foreign"
 echo "package.json:     $pkgjson"
 echo "shims installed:  $installed"
 echo "skipped (unmanaged, e.g. app data repos): $skipped"
