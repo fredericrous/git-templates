@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/githooks", "crates/githooks-runtime"]
+members = ["crates/githooks", "crates/githooks-fleet", "crates/githooks-runtime"]
 
 # Shared release posture. The hook binary runs on every commit, so size and
 # start-up cost are features.
