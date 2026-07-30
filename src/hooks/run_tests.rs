@@ -142,11 +142,15 @@ fn run_gate(root: &str, folder: &str) -> i32 {
         return 0;
     };
     for script in GATE.iter().filter(|s| defines_script(&pkg, s)) {
-        let status = Command::new(program("npm"))
-            .args(["run", script])
+        // Same hazard as cargo test: git exports GIT_DIR to hooks, and a JS
+        // test that shells out to git would then operate on this repo rather
+        // than its own fixture.
+        let mut cmd = Command::new(program("npm"));
+        cmd.args(["run", script])
             .current_dir(&dir)
-            .stdin(Stdio::null())
-            .status();
+            .stdin(Stdio::null());
+        super::common::strip_git_env(&mut cmd);
+        let status = cmd.status();
         match status {
             Ok(s) if s.success() => {}
             Ok(s) => return s.code().unwrap_or(1),

@@ -154,19 +154,40 @@ pub fn first_existing(root: &str, names: &[&str]) -> Option<String> {
         .map(|n| (*n).to_string())
 }
 
+/// Strip git's own environment before handing a Command to another tool.
+///
+/// git exports GIT_DIR, GIT_INDEX_FILE, GIT_WORK_TREE and friends to every
+/// hook. Those OVERRIDE the working directory, so any tool that shells out to
+/// git operates on the hook's repository no matter where it was launched.
+///
+/// That is not hypothetical: `pre-push-cargo-test` runs a project's test suite,
+/// and this repo's own suite creates throwaway repos and commits to them. With
+/// GIT_DIR inherited, `git commit` in a test wrote into the REAL repository —
+/// an actual stray commit, authored by the test fixture, pushed to a branch.
+///
+/// A test suite should behave exactly as it does when run by hand, which means
+/// seeing no git environment at all.
+pub fn strip_git_env(cmd: &mut Command) {
+    for (k, _) in std::env::vars_os() {
+        let key = k.to_string_lossy();
+        if key.starts_with("GIT_") {
+            cmd.env_remove(&k);
+        }
+    }
+}
+
 /// Run `argv` from `root`, inheriting stdio. True when it exits 0.
 pub fn run(root: &str, argv: &[String], extra: &[String]) -> bool {
     let Some((program, rest)) = argv.split_first() else {
         return true;
     };
-    Command::new(program)
-        .args(rest)
+    let mut cmd = Command::new(program);
+    cmd.args(rest)
         .args(extra)
         .current_dir(root)
-        .stdin(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .stdin(Stdio::null());
+    strip_git_env(&mut cmd);
+    cmd.status().map(|s| s.success()).unwrap_or(false)
 }
 
 pub fn ok(msg: &str) {

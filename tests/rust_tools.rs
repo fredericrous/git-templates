@@ -171,3 +171,52 @@ fn a_docs_only_push_runs_no_tests() {
     r.commit("docs: readme");
     assert_eq!(pre_push(&r, &base, &head(&r)), 0);
 }
+
+/// The gate runs a project's test suite, and git hands every hook a GIT_DIR
+/// pointing at the REAL repository. Those variables beat `current_dir`, so a
+/// suite that shells out to git operates on the wrong repo entirely.
+///
+/// This is not theoretical: running the gate on this very repo let a fixture's
+/// `git commit` land a stray commit on a real branch, authored by the test
+/// user. The suite must see no git environment at all.
+#[test]
+fn the_test_gate_does_not_leak_git_env_to_the_suite() {
+    if missing("cargo") {
+        return;
+    }
+    let r = Repo::new();
+    // A test that fails IF it can see git's environment.
+    crate_files(
+        &r,
+        "fn main() {}\n\n#[test]\nfn no_git_env() {\n    \
+         for (k, _) in std::env::vars() {\n        \
+         assert!(!k.starts_with(\"GIT_\"), \"leaked {k}\");\n    }\n}\n",
+    );
+    r.commit("feat: base");
+    let base = head(&r);
+    r.stage("src/main.rs", "fn main() {}\n\n#[test]\nfn no_git_env() {\n    for (k, _) in std::env::vars() {\n        assert!(!k.starts_with(\"GIT_\"), \"leaked {k}\");\n    }\n}\n// touch\n");
+    r.commit("feat: touch");
+
+    // Run the gate with git's variables set, as git itself would.
+    let line = format!("refs/heads/feat/x {} refs/heads/feat/x {base}\n", head(&r));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("--hooks-dir")
+        .arg(r.path(".git/hooks"))
+        .arg("pre-push-cargo-test")
+        .current_dir(&r.dir)
+        .env("GIT_DIR", r.path(".git"))
+        .env("GIT_INDEX_FILE", r.path(".git/index"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(line.as_bytes())
+        .expect("write");
+    let code = child.wait().expect("wait").code().unwrap_or(-1);
+    assert_eq!(code, 0, "the suite saw git's environment");
+}

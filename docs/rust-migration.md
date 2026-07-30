@@ -351,3 +351,56 @@ no shebang support, so every sub-hook the dispatcher spawned failed with
 - ~~**`pre-commit-pyright` in 6 of 96 repos**~~ Done — it self-scopes on a
   pyright config, so installing it everywhere changes nothing for the 90 repos
   without one. `governance-ts` had it for months and it never fired.
+
+
+## Checks moved in-process (PR #36)
+
+Git invokes exactly **four** hook names — `pre-commit`, `pre-push`, `commit-msg`,
+`prepare-commit-msg`. The other 16 files in every `.git/hooks` were our own
+dispatcher's business: byte-identical `sh` shims whose only job was to re-exec
+the binary and tell it their own filename. One commit cost 27 processes to run
+work the binary already had in a table.
+
+Fleet-wide 1920 files → 384; steady-state pre-commit ~383 ms → ~293 ms. Most of
+a commit is the linters, so 24% is the whole timing prize; the structural wins
+are larger: order is **declared** rather than emerging from a lexicographic
+filename glob, the Windows shebang emulation is deleted, and stdin is read once.
+
+That last one fixed a silent bug. git feeds pre-push its ref list on stdin,
+consumable **once**. As separate processes with INHERITED stdin, whichever check
+ran first drained it — two repos carried a `pre-push-branch-protect.sh` sorting
+before `pre-push-run-tests-js`, so the JS gate saw EOF and ran nothing, for as
+long as both existed.
+
+`branch-protect` is now built in, first in pre-push, protecting `main`/`master`
+everywhere; it matches the REMOTE ref and treats a delete as a write.
+
+## Rust checks (PR #38)
+
+| check | dispatcher | command |
+|---|---|---|
+| `pre-commit-cargo-fmt` | pre-commit | `cargo fmt --all -- --check` |
+| `pre-commit-clippy` | pre-commit | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
+| `pre-push-cargo-test` | pre-push | `cargo test --workspace --all-features` |
+
+Split by cost as the other languages are: fmt/clippy with ruff and pyright, test
+with `run-tests-js`. Three separate checks so `hook.skip` disables them
+individually. Scoping runs on the **nearest ancestor `Cargo.toml`**, not the repo
+root, so a Rust component in a subdirectory works; `--workspace` covers the
+members from there. `Cargo.toml`/`Cargo.lock` count as touching Rust for clippy.
+
+**Two bugs the tests caught:**
+
+1. Availability was probed with `cargo <sub> --version`. That works for rustfmt
+   and clippy, which are separately installable components, but
+   `cargo test --version` is *"unexpected argument"* — so the probe reported
+   test as unavailable and the gate **silently passed**. It would never have run
+   a test in any repo. Built-in subcommands need no probe; only components do.
+
+2. **git exports `GIT_DIR`/`GIT_INDEX_FILE`/`GIT_WORK_TREE` to every hook, and
+   they OVERRIDE the working directory.** Running a project's test suite from a
+   hook therefore hands it the hook's repository. This repo's own suite creates
+   throwaway repos and commits to them — so the first real run of the gate put a
+   stray commit, authored by the test fixture, onto a live branch and pushed it.
+   `strip_git_env` now clears them before spawning any tool, npm included; a
+   suite must behave exactly as it does when run by hand.
