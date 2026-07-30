@@ -148,6 +148,7 @@ name = "githooks-fleet"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "githooks-runtime",
  "ratatui",
  "serde",
  "serde_json",

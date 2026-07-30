@@ -30,6 +30,23 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// `git config --get-all hook.skip`, or empty when unset/unavailable.
+/// Does `skip`, as configured in `hook.skip`, suppress `check`?
+///
+/// SUBSTRING, not equality — `hook.skip = clippy` disables
+/// `pre-commit-clippy`, which is what makes the config usable by hand. It is
+/// also why `hook.skip = e` disables everything: every check name contains an
+/// `e`. That is a sharp edge, not a bug, and the dispatcher announces the
+/// consequence on every commit.
+///
+/// Defined ONCE because three callers need it and a fourth is coming: the
+/// dispatcher decides what runs, the fleet view reports where a check applies,
+/// and the skip resolver computes blast radius. A reimplementation that
+/// disagreed would have the dashboard claim a check is active while the
+/// dispatcher skips it — a difference nobody would notice until it mattered.
+pub fn skip_suppresses(check: &str, skip: &str) -> bool {
+    check.contains(skip)
+}
+
 pub fn configured_skips() -> Vec<String> {
     let Ok(out) = Command::new("git")
         .args(["config", "--get-all", "hook.skip"])

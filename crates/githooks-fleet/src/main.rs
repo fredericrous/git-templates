@@ -14,6 +14,7 @@ mod checks;
 mod fix;
 mod scan;
 mod shim;
+mod skips;
 mod tui;
 
 use std::path::PathBuf;

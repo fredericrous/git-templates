@@ -437,7 +437,48 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
     }
     if !r.skips.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from(format!("hook.skip: {}", r.skips.join(", "))));
+        lines.push(Line::from("hook.skip"));
+        for e in &r.skips {
+            // What it COSTS, not what it says. A value is a substring pattern,
+            // and its reach is invisible from the config line itself.
+            let scope = match &e.scope {
+                crate::skips::Scope::Local => "local",
+                crate::skips::Scope::Global => "global",
+                crate::skips::Scope::Other { .. } => "other",
+            };
+            // The verdict goes FIRST. Appending it after the names put the
+            // warning past the right edge of the terminal for exactly the
+            // values that needed it — nineteen check names is a long line, and
+            // the alarm was the first thing truncated.
+            let head = match e.suppresses.len() {
+                0 => "suppresses nothing — matches no check".to_string(),
+                1 => e.suppresses[0].to_string(),
+                n if e.is_over_broad() => format!("! {n} checks — probably not intended"),
+                n => format!("{n} checks"),
+            };
+            lines.push(Line::from(format!(
+                "  {:<22} {scope:<7} -> {head}",
+                e.value
+            )));
+            // Names on their own line, where truncation costs detail rather
+            // than the warning.
+            if e.suppresses.len() > 1 {
+                lines.push(Line::from(format!(
+                    "  {:<22} {:<7}    {}",
+                    "",
+                    "",
+                    e.suppresses.join(", ")
+                )));
+            }
+            // A fragment reaches one check today and is a bet on every future
+            // name, so offer the correction rather than only the diagnosis.
+            if let Some(c) = e.canonical() {
+                lines.push(Line::from(format!(
+                    "  {:<22} {:<7}    did you mean {c}?",
+                    "", ""
+                )));
+            }
+        }
     }
     f.render_widget(Paragraph::new(lines), area);
 }
@@ -770,6 +811,53 @@ mod tests {
         for n in DISPATCHERS {
             assert!(out.contains(n), "detail must list {n}: {out}");
         }
+    }
+
+    /// The preview half of the skip work: a config line says `t`, and what
+    /// matters is that `t` costs nineteen checks. The detail view must show the
+    /// cost, not the value.
+    #[test]
+    fn detail_shows_what_each_skip_actually_suppresses() {
+        let mut r = repo("a", true);
+        r.skips = vec![crate::skips::for_test("t")];
+        let mut app = App::new(scan_with_repos(vec![r]));
+        app.mode = Mode::Detail;
+        let out = render(&app, 120, 30);
+        assert!(out.contains("hook.skip"), "{out}");
+        assert!(out.contains("19 checks"), "expected the count: {out}");
+        assert!(
+            out.contains("probably not intended"),
+            "an over-broad skip must be flagged: {out}"
+        );
+    }
+
+    /// A precise skip is reported without alarm — crying wolf on the correct
+    /// case is how a warning stops being read.
+    #[test]
+    fn an_exact_skip_is_not_flagged() {
+        let mut r = repo("a", true);
+        r.skips = vec![crate::skips::for_test("pre-commit-clippy")];
+        let mut app = App::new(scan_with_repos(vec![r]));
+        app.mode = Mode::Detail;
+        let out = render(&app, 120, 30);
+        assert!(out.contains("pre-commit-clippy"), "{out}");
+        assert!(!out.contains("probably not intended"), "{out}");
+        assert!(!out.contains("did you mean"), "nothing to correct: {out}");
+    }
+
+    /// And a fragment gets the correction offered, not just a diagnosis. This
+    /// is the one that exists in the fleet today.
+    #[test]
+    fn a_fragment_skip_is_offered_its_canonical_name() {
+        let mut r = repo("a", true);
+        r.skips = vec![crate::skips::for_test("run-tests-js")];
+        let mut app = App::new(scan_with_repos(vec![r]));
+        app.mode = Mode::Detail;
+        let out = render(&app, 120, 30);
+        assert!(
+            out.contains("did you mean pre-push-run-tests-js"),
+            "expected the correction: {out}"
+        );
     }
 
     #[test]

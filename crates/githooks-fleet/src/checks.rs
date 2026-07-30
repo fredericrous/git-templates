@@ -18,100 +18,61 @@
 
 use serde::Serialize;
 
+use githooks_runtime::registry;
+
 use crate::scan::Repo;
 
-/// A check, and what makes it relevant to a repository.
-pub struct Check {
-    pub name: &'static str,
-    /// `None` — applies to every managed repo, because the check scopes on the
-    /// staged files rather than on any manifest.
-    pub language: Option<&'static str>,
+/// What makes a check relevant to a repository.
+///
+/// The NAMES come from the registry — `githooks_runtime::registry` — rather
+/// than a copy. They were hand-copied here at first, and agreed with the
+/// dispatcher only by luck: adding a check to the registry would have left the
+/// dashboard silently omitting it from every view and under-reporting blast
+/// radius. Only the language mapping belongs to this crate, because scoping is
+/// a display concern the dispatcher has no opinion about.
+///
+/// `every_check_has_a_language_decision` fails if a new check appears without
+/// one, so the choice is forced at the moment it is introduced rather than
+/// defaulted silently — the same reconciliation the commit-type and
+/// branch-prefix vocabularies use.
+const LANGUAGES: &[(&str, Option<&str>)] = &[
+    ("pre-commit-ban-terms", None),
+    ("pre-commit-merge-conflict", None),
+    ("pre-commit-package-lock", Some("js")),
+    ("pre-commit-usual-name", None),
+    ("pre-commit-lint-json-yaml", None),
+    ("pre-commit-yamllint", None),
+    ("pre-commit-lint-js", Some("js")),
+    ("pre-commit-prettier", Some("js")),
+    ("pre-commit-ruff", Some("python")),
+    ("pre-commit-pyright", Some("python")),
+    ("pre-commit-cargo-fmt", Some("rust")),
+    ("pre-commit-clippy", Some("rust")),
+    ("pre-commit-argo-lint", Some("k8s")),
+    ("pre-commit-kube-linter", Some("k8s")),
+    ("pre-commit-kubeconform", Some("k8s")),
+    ("pre-push-branch-protect", None),
+    ("pre-push-branch-pattern", None),
+    ("pre-push-pull-rebase", None),
+    ("pre-push-run-tests-js", Some("js")),
+    ("pre-push-cargo-test", Some("rust")),
+];
+
+/// Every check the dispatcher would run, in dispatcher order.
+pub fn all_checks() -> Vec<&'static str> {
+    registry::PRE_COMMIT_CHECKS
+        .iter()
+        .chain(registry::PRE_PUSH_CHECKS.iter())
+        .copied()
+        .collect()
 }
 
-pub const CHECKS: &[Check] = &[
-    // pre-commit
-    Check {
-        name: "pre-commit-ban-terms",
-        language: None,
-    },
-    Check {
-        name: "pre-commit-merge-conflict",
-        language: None,
-    },
-    Check {
-        name: "pre-commit-package-lock",
-        language: Some("js"),
-    },
-    Check {
-        name: "pre-commit-usual-name",
-        language: None,
-    },
-    Check {
-        name: "pre-commit-lint-json-yaml",
-        language: None,
-    },
-    Check {
-        name: "pre-commit-yamllint",
-        language: None,
-    },
-    Check {
-        name: "pre-commit-lint-js",
-        language: Some("js"),
-    },
-    Check {
-        name: "pre-commit-prettier",
-        language: Some("js"),
-    },
-    Check {
-        name: "pre-commit-ruff",
-        language: Some("python"),
-    },
-    Check {
-        name: "pre-commit-pyright",
-        language: Some("python"),
-    },
-    Check {
-        name: "pre-commit-cargo-fmt",
-        language: Some("rust"),
-    },
-    Check {
-        name: "pre-commit-clippy",
-        language: Some("rust"),
-    },
-    Check {
-        name: "pre-commit-argo-lint",
-        language: Some("k8s"),
-    },
-    Check {
-        name: "pre-commit-kube-linter",
-        language: Some("k8s"),
-    },
-    Check {
-        name: "pre-commit-kubeconform",
-        language: Some("k8s"),
-    },
-    // pre-push
-    Check {
-        name: "pre-push-branch-protect",
-        language: None,
-    },
-    Check {
-        name: "pre-push-branch-pattern",
-        language: None,
-    },
-    Check {
-        name: "pre-push-pull-rebase",
-        language: None,
-    },
-    Check {
-        name: "pre-push-run-tests-js",
-        language: Some("js"),
-    },
-    Check {
-        name: "pre-push-cargo-test",
-        language: Some("rust"),
-    },
-];
+fn language_of(check: &str) -> Option<&'static str> {
+    LANGUAGES
+        .iter()
+        .find(|(n, _)| *n == check)
+        .and_then(|(_, l)| *l)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CheckRollup {
@@ -129,26 +90,26 @@ pub struct CheckRollup {
 /// `hook.skip` matches by SUBSTRING, exactly as the dispatcher does. Anything
 /// else here would report a check as active while the dispatcher skips it.
 fn is_skipped(repo: &Repo, check: &str) -> bool {
-    repo.skips.iter().any(|s| check.contains(s.as_str()))
-}
-
-fn applies(repo: &Repo, check: &Check) -> bool {
-    match check.language {
-        None => true,
-        Some(lang) => repo.languages.iter().any(|l| l == lang),
-    }
+    repo.skips
+        .iter()
+        .any(|s| githooks_runtime::skip_suppresses(check, &s.value))
 }
 
 pub fn rollup(repos: &[Repo]) -> Vec<CheckRollup> {
     let managed: Vec<&Repo> = repos.iter().filter(|r| r.managed).collect();
-    CHECKS
-        .iter()
-        .map(|c| {
+    all_checks()
+        .into_iter()
+        .map(|name| {
+            let lang = language_of(name);
             let (mut applicable, mut skipped, mut inert) = (0, 0, 0);
             for r in &managed {
-                if applies(r, c) {
+                let applies = match lang {
+                    None => true,
+                    Some(l) => r.languages.iter().any(|x| x == l),
+                };
+                if applies {
                     applicable += 1;
-                    if is_skipped(r, c.name) {
+                    if is_skipped(r, name) {
                         skipped += 1;
                     }
                 } else {
@@ -156,7 +117,7 @@ pub fn rollup(repos: &[Repo]) -> Vec<CheckRollup> {
                 }
             }
             CheckRollup {
-                name: c.name,
+                name,
                 applicable,
                 active: applicable - skipped,
                 skipped,
@@ -182,7 +143,7 @@ mod tests {
             foreign_subs: Vec::new(),
             hook_pkgjson: false,
             languages: langs.iter().map(|s| s.to_string()).collect(),
-            skips: skips.iter().map(|s| s.to_string()).collect(),
+            skips: skips.iter().map(|s| crate::skips::for_test(s)).collect(),
         }
     }
 
@@ -251,10 +212,49 @@ mod tests {
 
     /// Every registered check is listed. A check missing from this table would
     /// silently never appear in the view.
+    /// Adding a check to the registry must force a language decision here,
+    /// rather than defaulting it silently to "applies everywhere". Same
+    /// reconciliation the commit-type and branch-prefix vocabularies use: make
+    /// the omission fail at the moment it is introduced.
+    #[test]
+    fn every_check_has_a_language_decision() {
+        let mapped: std::collections::BTreeSet<&str> = LANGUAGES.iter().map(|(n, _)| *n).collect();
+        let missing: Vec<&str> = all_checks()
+            .into_iter()
+            .filter(|c| !mapped.contains(c))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "registered checks with no language decision: {missing:?}"
+        );
+        let orphan: Vec<&str> = mapped
+            .iter()
+            .copied()
+            .filter(|n| !all_checks().contains(n))
+            .collect();
+        assert!(
+            orphan.is_empty(),
+            "language decisions for dead checks: {orphan:?}"
+        );
+    }
+
+    /// And the names come from the registry, not a copy.
+    #[test]
+    fn the_check_list_is_the_registrys() {
+        // NAMES, not a count: a hand-copied table of the same length would
+        // satisfy a length check while omitting the check that was just added.
+        let expected: Vec<&str> = registry::PRE_COMMIT_CHECKS
+            .iter()
+            .chain(registry::PRE_PUSH_CHECKS.iter())
+            .copied()
+            .collect();
+        assert_eq!(all_checks(), expected);
+    }
+
     #[test]
     fn the_table_covers_twenty_checks() {
-        assert_eq!(CHECKS.len(), 20);
-        let mut names: Vec<&str> = CHECKS.iter().map(|c| c.name).collect();
+        assert_eq!(all_checks().len(), 20);
+        let mut names: Vec<&str> = all_checks();
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), 20, "duplicate check name");
