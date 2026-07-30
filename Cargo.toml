@@ -1,16 +1,9 @@
-[package]
-name = "githooks"
-version = "0.1.0"
-edition = "2021"
-description = "The git-templates hooks, as one dependency-free binary"
-license = "MIT"
+[workspace]
+resolver = "2"
+members = ["crates/githooks", "crates/githooks-runtime"]
 
-# No dependencies, on purpose. The whole point of this migration is that a repo
-# needs nothing installed to commit; a dependency tree would be a strange way to
-# start. Phase 0 needs only std (process spawning, threads, fs). The `regex` and
-# `ignore` crates arrive in Phase 1 with ban-terms, and nothing else should.
-[dependencies]
-
+# Shared release posture. The hook binary runs on every commit, so size and
+# start-up cost are features.
 [profile.release]
 strip = true
 opt-level = "s"

@@ -190,7 +190,8 @@ pub fn missing(tool: &str) -> bool {
 
 /// Absolute path to the repo's own templates/hooks, for tests that need a shim.
 pub fn template_hook(name: &str) -> PathBuf {
+    // ../../ — templates live at the WORKSPACE root, not in this crate.
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("templates/hooks")
+        .join("../../templates/hooks")
         .join(name)
 }

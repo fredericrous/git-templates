@@ -1,0 +1,17 @@
+[package]
+name = "githooks-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "The git-templates hook logic: registry, dispatchers and checks"
+license = "MIT"
+
+# NO DEPENDENCIES, and this one is load-bearing rather than aspirational.
+#
+# The hook binary depends on this crate, so anything added here reaches the
+# commit path transitively. The whole Rust migration existed because a Python
+# repo needed node and zsh installed merely to commit; re-acquiring a dependency
+# tree through a library would undo it silently. The fleet TUI depends on this
+# crate too, and ratatui belongs in THAT crate, never here.
+#
+# CI asserts this emptiness — see the `deps` job.
+[dependencies]
