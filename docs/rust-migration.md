@@ -415,3 +415,32 @@ golden test, because deleting the gate along with the script would have thrown
 away the only evidence the rewrite was faithful.
 
 `make propagate` now runs the Rust path. Dry-run by default, `APPLY=1` to write.
+
+
+## Why the dependency guard exists (corrected)
+
+`scripts/check-no-deps.sh` asserts that `githooks` resolves to nothing outside
+the workspace. Its original comment said the migration existed because a Python
+repo needed node and zsh to commit, so a dependency tree "would undo it".
+
+**That reasoning was wrong** and is corrected in the script. node and zsh were
+RUNTIME requirements — they had to exist on `PATH` in every repo or the hook
+failed. A Rust crate is compiled in and statically linked; adding `serde` would
+make nobody install anything. The two are not the same problem.
+
+The guard is still worth having, for reasons that survive scrutiny:
+
+1. **Supply chain.** The binary runs on every commit in 96 repos, with the
+   developer's credentials, reading every staged file. Every transitive crate is
+   code executing in that position. This argument is specific to THIS binary —
+   `githooks-fleet` pulls ratatui and a dozen crates without concern, because it
+   is opt-in.
+2. **Offline reproducibility.** A std-only crate builds without a registry,
+   indefinitely. Real but modest.
+3. **A forcing function.** It makes each dependency in the commit path an argued
+   decision rather than a default.
+
+So it is a strong default to argue *with*, not a wall. If the commit path ever
+needs a real parser, weigh that crate's tree against the code it replaces. The
+answer today is still "hand-roll the twenty lines", because the config format
+under discussion is trivial — not because a dependency is forbidden.

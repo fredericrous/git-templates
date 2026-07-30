@@ -5,13 +5,18 @@ edition = "2021"
 description = "The git-templates hook logic: registry, dispatchers and checks"
 license = "MIT"
 
-# NO DEPENDENCIES, and this one is load-bearing rather than aspirational.
+# NO DEPENDENCIES — a default to argue against, not a prohibition.
 #
 # The hook binary depends on this crate, so anything added here reaches the
-# commit path transitively. The whole Rust migration existed because a Python
-# repo needed node and zsh installed merely to commit; re-acquiring a dependency
-# tree through a library would undo it silently. The fleet TUI depends on this
-# crate too, and ratatui belongs in THAT crate, never here.
+# commit path transitively, and that path runs on every commit in 96 repos with
+# the developer's credentials. The reason is SUPPLY CHAIN: every transitive
+# crate is code executing in that position. It is NOT that a dependency would
+# recreate the node/zsh problem — those were runtime requirements on PATH, while
+# a crate is compiled in and installs nothing. See scripts/check-no-deps.sh for
+# the full argument, including when it is reasonable to override this.
+#
+# githooks-fleet depends on this crate too and pulls ratatui quite happily,
+# because it is opt-in and does not run on every commit.
 #
 # CI asserts this emptiness — see the `deps` job.
 [dependencies]
