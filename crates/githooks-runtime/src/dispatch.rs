@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
 
 use crate::registry::{Ctx, HookFn, PRE_COMMIT_CHECKS, PRE_PUSH_CHECKS, REGISTRY};
+use crate::ui::{color, WARNING_SIGN};
 use crate::{cherry_pick_in_progress, configured_skips};
 
 fn handler(name: &str) -> HookFn {
@@ -46,10 +47,45 @@ fn handler(name: &str) -> HookFn {
 /// `pre-commit-ruff`.
 fn selected(list: &[&'static str]) -> Vec<&'static str> {
     let skips = configured_skips();
-    list.iter()
+    let (kept, dropped): (Vec<_>, Vec<_>) = list
+        .iter()
         .copied()
-        .filter(|n| !skips.iter().any(|s| n.contains(s.as_str())))
-        .collect()
+        .partition(|n| !skips.iter().any(|s| n.contains(s.as_str())));
+    announce_skips(&dropped);
+    kept
+}
+
+/// Say out loud which checks did not run.
+///
+/// A skip is otherwise invisible at exactly the moment it matters. With
+/// `hook.skip = merge-conflict` set, a commit printed six green ticks and no
+/// hint that a seventh check had been disabled — the developer sees a clean run
+/// and concludes they are covered.
+///
+/// It is worse than it sounds, because `hook.skip` matches by SUBSTRING.
+/// `hook.skip = e` suppresses all twenty checks, and `t` suppresses nineteen;
+/// both are plausible shorthand rather than adversarial input. Without this
+/// line, a commit under either looks indistinguishable from a commit that had
+/// nothing to report.
+///
+/// One line, only when something was actually skipped, so a normal commit is
+/// unchanged. This reaches every skip however it was created — hand-edited
+/// config included — which no dashboard can claim.
+fn announce_skips(dropped: &[&str]) {
+    if dropped.is_empty() {
+        return;
+    }
+    let plural = if dropped.len() == 1 {
+        "check"
+    } else {
+        "checks"
+    };
+    println!(
+        "{WARNING_SIGN} {} {plural} skipped by {}: {}",
+        dropped.len(),
+        color("hook.skip", "208"),
+        dropped.join(", ")
+    );
 }
 
 /// Run every item concurrently and collect `(name, code)` in the INPUT order.

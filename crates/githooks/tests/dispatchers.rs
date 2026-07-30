@@ -155,3 +155,67 @@ fn an_unknown_hook_exits_two() {
     assert_eq!(run.code, 2);
     assert!(run.says("unknown hook"));
 }
+
+/// A skip is otherwise invisible at exactly the moment it matters: with
+/// `hook.skip` set, a commit printed a wall of green ticks and no hint that a
+/// check had been disabled. The developer sees a clean run and concludes they
+/// are covered.
+#[test]
+fn skipped_checks_are_announced_by_name() {
+    let r = Repo::new();
+    r.stage("a.txt", "x\n");
+    r.git(&["config", "--add", "hook.skip", "merge-conflict"]);
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed());
+    assert!(
+        run.says("pre-commit-merge-conflict"),
+        "the skipped check must be named: {}",
+        run.stdout
+    );
+    assert!(run.says("skipped by"), "{}", run.stdout);
+}
+
+/// And silent otherwise — a line on every ordinary commit would be noise, and
+/// noise is how a warning stops being read.
+#[test]
+fn no_skips_means_no_extra_output() {
+    let r = Repo::new();
+    r.stage("a.txt", "x\n");
+    let run = r.hook("pre-commit", &[]);
+    assert!(!run.says("skipped by"), "{}", run.stdout);
+}
+
+/// The case this exists for. `hook.skip` matches by SUBSTRING, so `e` — a
+/// plausible shorthand, not adversarial input — disables every pre-commit
+/// check. Before this, such a commit was indistinguishable from one with
+/// nothing to report.
+#[test]
+fn an_over_broad_skip_reports_the_full_damage() {
+    let r = Repo::new();
+    r.stage("a.txt", "x\n");
+    r.git(&["config", "--add", "hook.skip", "e"]);
+    let run = r.hook("pre-commit", &[]);
+    assert!(
+        run.says("15 checks skipped"),
+        "a one-letter skip disables everything and must say so: {}",
+        run.stdout
+    );
+    // Named, not just counted: a number alone does not tell you what you lost.
+    assert!(run.says("pre-commit-ban-terms"), "{}", run.stdout);
+}
+
+/// pre-push announces its own, separately — the two dispatchers have different
+/// check lists and run at different moments.
+#[test]
+fn pre_push_announces_its_skips_too() {
+    let r = Repo::new();
+    r.stage("a.txt", "x\n");
+    r.commit("feat: a");
+    r.git(&["checkout", "-q", "-b", "feat/x"]);
+    r.git(&["config", "--add", "hook.skip", "branch-protect"]);
+    let (_, out) = pre_push(&r, "refs/heads/feat/x");
+    assert!(
+        out.contains("pre-push-branch-protect"),
+        "expected the skip to be named at push time: {out}"
+    );
+}
