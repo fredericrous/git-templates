@@ -83,12 +83,17 @@ than as the safety mechanism. The safety mechanism shipped.
 
 ## Rules
 
-**1. The UI writes the full check name, never a fragment.**
-`pre-commit-clippy`, not `clippy`. Both suppress exactly one check today, but
-the fragment is a bet on every future check name — adding
-`pre-commit-clippy-nursery` would silently widen an existing `clippy` skip. The
-minimal blast radius is the only defensible default, and the UI is the one
-writer that can guarantee it.
+**1. The UI writes the full check name, never a fragment — but that is not
+always minimal.**
+`pre-commit-clippy`, not `clippy`: the fragment is a bet on every future check
+name, since adding `pre-commit-clippy-nursery` would silently widen it.
+
+The full name is still not a guarantee. **`pre-commit-lint-js` is a PREFIX of
+`pre-commit-lint-json-yaml`**, so skipping the first unavoidably skips the
+second, and no value expresses "this check only" under substring matching. The
+UI therefore computes the radius even for a full name and requires the typed
+confirmation when it exceeds one. Assuming the full name is safe is exactly the
+kind of reasoning this document exists to prevent.
 
 **2. Lead with what protection is lost, not with a count.**
 "Suppresses 19 of 20" is an aggregate, and aggregates do not move people the way
@@ -136,17 +141,18 @@ not a literal. Measured:
 - `--unset hook.skip 'pre-commit-lint.js'` removes `pre-commit-lint-js` — the
   `.` is a wildcard. Any value the UI does not escape can over-match.
 - When the pattern matches **more than one** value, git prints
-  `warning: hook.skip has multiple values`, **removes nothing, and exits 0**.
-  So `--unset hook.skip clippy` against a config holding both `clippy` and
-  `pre-commit-clippy` is a silent no-op that reports success.
+  `warning: hook.skip has multiple values`, **removes nothing, and exits 5**.
+  An earlier revision of this document said it exits 0 and called that a silent
+  no-op; that was a mis-measurement — `$?` was read after a pipe, so it reported
+  the last command in the pipeline rather than git. git does signal the refusal.
 - `--unset-all` with the same fragment removes **both**, which is the opposite
-  surprise.
+  surprise, and duplicates are legal so an anchored pattern can match twice.
 
-So the UI must pass an anchored, escaped pattern (`^pre-commit-clippy$`) and
-then **re-read the config to confirm the value is gone**. The exit code cannot
-distinguish "removed it" from "declined to act". This is the same posture the
-apply path already takes — report what happened, never what was intended — and
-here there is a measured reason for it rather than a principle.
+So the UI passes an anchored, escaped pattern (`^pre-commit-clippy$`) and then
+**re-reads the config to confirm**. Not because the exit code lies, but because
+a status code reports what the command believes it did while a re-read reports
+what is true. Config is small and the read is cheap; there is no reason to
+prefer the weaker evidence.
 
 **5. Differentiate the interaction by risk; prefer undo to confirmation.**
 The draft gave a 1-of-20 and a 19-of-20 skip the same modal and the same `[y]`.
