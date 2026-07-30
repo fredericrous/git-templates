@@ -92,7 +92,25 @@ fn is_managed(hooks: &Path) -> bool {
     })
 }
 
+/// Progress emitted while walking, so a caller can paint rows as they are
+/// found rather than after 7 seconds of nothing. Visibility of system status is
+/// the first usability heuristic, and this scan is well past the ~400ms at
+/// which an interface stops feeling immediate.
+pub enum Progress<'a> {
+    Visited(usize),
+    Found(&'a Repo),
+}
+
 pub fn scan(root: &Path, depth: usize, installed_binary: &str) -> FleetScan {
+    scan_with(root, depth, installed_binary, &mut |_| {})
+}
+
+pub fn scan_with(
+    root: &Path,
+    depth: usize,
+    installed_binary: &str,
+    on: &mut dyn FnMut(Progress),
+) -> FleetScan {
     let mut s = FleetScan {
         root: root.to_path_buf(),
         depth,
@@ -105,13 +123,21 @@ pub fn scan(root: &Path, depth: usize, installed_binary: &str) -> FleetScan {
         dirs_visited: 0,
         repos: Vec::new(),
     };
-    walk(root, root, depth, installed_binary, &mut s);
+    walk(root, root, depth, installed_binary, on, &mut s);
     s.repos.sort_by(|a, b| a.path.cmp(&b.path));
     s
 }
 
-fn walk(root: &Path, dir: &Path, budget: usize, installed_binary: &str, s: &mut FleetScan) {
+fn walk(
+    root: &Path,
+    dir: &Path,
+    budget: usize,
+    installed_binary: &str,
+    on: &mut dyn FnMut(Progress),
+    s: &mut FleetScan,
+) {
     s.dirs_visited += 1;
+    on(Progress::Visited(s.dirs_visited));
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => {
@@ -141,8 +167,9 @@ fn walk(root: &Path, dir: &Path, budget: usize, installed_binary: &str, s: &mut 
                 s.unmanaged_seen += 1;
             }
             let repo = path.parent().unwrap_or(&path);
-            s.repos
-                .push(inspect(root, repo, &hooks, managed, installed_binary));
+            let found = inspect(root, repo, &hooks, managed, installed_binary);
+            on(Progress::Found(&found));
+            s.repos.push(found);
             // A repository is a leaf for this purpose; nothing inside .git is
             // another repo, and worktrees keep their hooks in the main one.
             continue;
@@ -159,7 +186,7 @@ fn walk(root: &Path, dir: &Path, budget: usize, installed_binary: &str, s: &mut 
         return;
     }
     for d in subdirs {
-        walk(root, &d, budget - 1, installed_binary, s);
+        walk(root, &d, budget - 1, installed_binary, on, s);
     }
 }
 
