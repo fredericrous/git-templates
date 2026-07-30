@@ -9,6 +9,7 @@
 //! afterthought — and it is also the accessible path, since screen readers do
 //! not meaningfully work with a TUI.
 
+mod apply;
 mod fix;
 mod scan;
 mod shim;
@@ -20,10 +21,12 @@ const USAGE: &str = "\
 usage: githooks-fleet [scan|fix] [--root <dir>] [--depth <n>] [--json]
 
   scan           report the fleet (default)
-  fix            show what would be changed — DRY RUN, nothing is written
+  fix            show what would be changed — DRY RUN unless --apply
+  fix --apply    carry out the plan
 
   --root <dir>   where to look for repositories (default: $HOME/Developer)
   --depth <n>    directory levels to descend  (default: 6)
+  --binary <p>   the binary shims should point at (default: $HOME/.local/bin/githooks)
   --json         emit the result as JSON
 ";
 
@@ -38,6 +41,11 @@ struct Args {
     root: PathBuf,
     depth: usize,
     json: bool,
+    apply: bool,
+    /// Which binary the shims should point at. Overridable because an install
+    /// is not always at the default path, and because a comparison is only
+    /// meaningful when both sides agree on the target.
+    binary: Option<String>,
 }
 
 fn parse(argv: &[String]) -> Result<Args, String> {
@@ -46,6 +54,8 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         root: default_root(),
         depth: 6,
         json: false,
+        apply: false,
+        binary: None,
     };
     let mut it = argv.iter().peekable();
     if let Some(first) = it.peek() {
@@ -73,7 +83,10 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                     .parse()
                     .map_err(|_| format!("--depth: {v:?} is not a number"))?;
             }
-            "--apply" => return Err("--apply is not implemented yet; fix is dry-run only".into()),
+            "--apply" => a.apply = true,
+            "--binary" => {
+                a.binary = Some(it.next().ok_or("--binary needs a path")?.clone());
+            }
             "-h" | "--help" => return Err(String::new()),
             other => return Err(format!("unknown argument {other:?}")),
         }
@@ -119,7 +132,7 @@ fn main() -> ExitCode {
     }
 
     let started = std::time::Instant::now();
-    let installed = default_binary();
+    let installed = args.binary.clone().unwrap_or_else(default_binary);
     let scan = scan::scan(&args.root, args.depth, &installed);
     let elapsed = started.elapsed();
 
@@ -129,6 +142,31 @@ fn main() -> ExitCode {
             .iter()
             .map(|r| fix::plan(r, &args.root.join(&r.path), &installed))
             .collect();
+        if args.apply {
+            let reports: Vec<apply::ApplyReport> = plans
+                .iter()
+                .map(|p| apply::ApplyReport {
+                    repo: p.repo.clone(),
+                    outcome: apply::apply(p),
+                })
+                .collect();
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&reports).unwrap_or_default()
+                );
+            } else {
+                report_apply(&reports);
+            }
+            let failed = reports
+                .iter()
+                .any(|r| matches!(r.outcome, apply::Outcome::Failed { .. }));
+            return if failed {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            };
+        }
         if args.json {
             println!(
                 "{}",
@@ -245,6 +283,42 @@ fn report_fix(plans: &[fix::FixPlan]) {
     );
     println!();
     println!("  DRY RUN — nothing was written.");
+}
+
+/// What actually happened. A failure is never folded into the same count as a
+/// success, and "refused" is reported separately from "unchanged" — they look
+/// identical in a total and mean opposite things.
+fn report_apply(reports: &[apply::ApplyReport]) {
+    let mut applied = 0usize;
+    let (mut removed, mut written, mut refused, mut unchanged) = (0usize, 0usize, 0usize, 0usize);
+    for r in reports {
+        match &r.outcome {
+            apply::Outcome::Applied {
+                removed: rm,
+                written: wr,
+            } => {
+                applied += 1;
+                removed += rm;
+                written += wr;
+                println!("{}  -{rm} +{wr}", r.repo.display());
+            }
+            apply::Outcome::Refused => refused += 1,
+            apply::Outcome::Unchanged => unchanged += 1,
+            apply::Outcome::Failed { error, at } => {
+                println!("{}  FAILED at {at}: {error}", r.repo.display());
+            }
+        }
+    }
+    let failed = reports
+        .iter()
+        .filter(|r| matches!(r.outcome, apply::Outcome::Failed { .. }))
+        .count();
+    println!();
+    println!(
+        "  {applied} of {} repositories changed · {refused} refused · {unchanged} already correct · {failed} failed",
+        reports.len()
+    );
+    println!("  {removed} removed · {written} written");
 }
 
 #[cfg(test)]
