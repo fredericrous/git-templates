@@ -404,3 +404,14 @@ members from there. `Cargo.toml`/`Cargo.lock` count as touching Rust for clippy.
    stray commit, authored by the test fixture, onto a live branch and pushed it.
    `strip_git_env` now clears them before spawning any tool, npm included; a
    suite must behave exactly as it does when run by hand.
+
+
+## `propagate.sh` is gone (PR #47)
+
+Replaced by `githooks-fleet fix`, after a differential proved the Rust plan
+removes exactly the same set on a fixture covering every actionable case. That
+comparison is what earned the deletion; the expectation it produced is kept as a
+golden test, because deleting the gate along with the script would have thrown
+away the only evidence the rewrite was faithful.
+
+`make propagate` now runs the Rust path. Dry-run by default, `APPLY=1` to write.

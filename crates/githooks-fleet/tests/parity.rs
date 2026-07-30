@@ -1,8 +1,14 @@
-//! The parity gate: the Rust `FixPlan` against `scripts/propagate.sh --dry-run`.
+//! What the Rust `FixPlan` removes, pinned as a GOLDEN expectation.
 //!
-//! This is what earns the right to delete the shell script. Until the two agree
-//! on what would be removed, the Rust apply path is an untested rewrite of
-//! something that has already destroyed tracked files twice.
+//! This began as a differential against `scripts/propagate.sh --dry-run`. That
+//! comparison is what earned the right to delete the shell script — until the
+//! two agreed, the Rust apply path was an untested rewrite of something that
+//! had already destroyed tracked files twice.
+//!
+//! The script is now gone, so the comparison is against the set it produced,
+//! recorded here. Deleting the gate along with the script would have thrown
+//! away the only evidence the rewrite was faithful; keeping the expectation
+//! keeps the behaviour pinned without keeping the shell.
 //!
 //! It runs on a SYNTHETIC fleet, deliberately. The real fleet is currently
 //! clean, so comparing the two implementations over it would compare an empty
@@ -12,7 +18,7 @@
 //! and the test asserts up front that the comparison is not vacuous.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 fn repo_root() -> PathBuf {
@@ -121,25 +127,21 @@ impl Fleet {
         self
     }
 
-    fn propagate_removals(&self) -> BTreeSet<String> {
-        let out = Command::new("sh")
-            .arg(repo_root().join("scripts/propagate.sh"))
-            .env("ROOT", &self.root)
-            .env("GITHOOKS_BIN", &self.binary)
-            .output()
-            .expect("propagate.sh");
-        assert!(
-            out.status.success(),
-            "propagate.sh failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|l| l.trim().strip_prefix("would rm  "))
-            .map(|p| p.split("  (").next().unwrap_or(p).trim().to_string())
-            .collect()
+    /// The removals `propagate.sh` produced for this exact fixture, recorded
+    /// from its last run before it was deleted. Relative to the fleet root so
+    /// the expectation survives a different temp directory.
+    fn golden_removals(&self) -> BTreeSet<String> {
+        [
+            "foreign/.git/hooks/pre-push-branch-protect.sh",
+            "pkg/.git/hooks/package.json",
+            "stale/.git/hooks/pre-commit-ruff",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
     }
 
+    /// Rust removals, made root-relative so they compare with the golden set.
     fn rust_removals(&self) -> BTreeSet<String> {
         let out = Command::new(env!("CARGO_BIN_EXE_githooks-fleet"))
             .args(["fix", "--json", "--root"])
@@ -154,7 +156,14 @@ impl Fleet {
             .expect("array")
             .iter()
             .flat_map(|p| p["remove"].as_array().cloned().unwrap_or_default())
-            .map(|r| r["path"].as_str().unwrap_or_default().to_string())
+            .map(|r| {
+                let p = r["path"].as_str().unwrap_or_default();
+                let root = self.root.to_string_lossy();
+                p.strip_prefix(root.as_ref())
+                    .unwrap_or(p)
+                    .trim_start_matches(std::path::MAIN_SEPARATOR)
+                    .replace(std::path::MAIN_SEPARATOR, "/")
+            })
             .collect()
     }
 }
@@ -165,21 +174,8 @@ impl Drop for Fleet {
     }
 }
 
-/// Normalise for comparison: the shell prints paths as it found them, and macOS
-/// hands out `/var` symlinks to `/private/var`.
-fn norm(set: BTreeSet<String>) -> BTreeSet<String> {
-    set.into_iter()
-        .map(|p| {
-            Path::new(&p)
-                .canonicalize()
-                .map(|c| c.to_string_lossy().into_owned())
-                .unwrap_or(p)
-        })
-        .collect()
-}
-
 #[test]
-fn the_rust_plan_removes_exactly_what_the_shell_sweep_removes() {
+fn the_plan_removes_exactly_the_recorded_set() {
     let f = Fleet::new("parity");
     f.healthy("clean")
         .with_stale_ours("stale")
@@ -188,22 +184,22 @@ fn the_rust_plan_removes_exactly_what_the_shell_sweep_removes() {
         .unmanaged("legacy")
         .missing_a_shim("incomplete");
 
-    let shell = norm(f.propagate_removals());
-    let rust = norm(f.rust_removals());
+    let golden = f.golden_removals();
+    let rust = f.rust_removals();
 
-    // Guard against a vacuous pass. If the fixture stops producing removals,
-    // this comparison proves nothing — which is exactly how the original sweep
-    // reported a clean fleet it had never looked at.
+    // Guard against a vacuous pass: if the fixture stops producing removals
+    // this proves nothing, which is how the original sweep reported a clean
+    // fleet it had never looked at.
     assert!(
-        shell.len() >= 3,
-        "fixture produced too few removals to be a real comparison: {shell:?}"
+        golden.len() >= 3,
+        "expectation is too small to mean anything"
     );
 
-    let only_shell: Vec<_> = shell.difference(&rust).collect();
-    let only_rust: Vec<_> = rust.difference(&shell).collect();
+    let missing: Vec<_> = golden.difference(&rust).collect();
+    let extra: Vec<_> = rust.difference(&golden).collect();
     assert!(
-        only_shell.is_empty() && only_rust.is_empty(),
-        "plans disagree.\n  only propagate.sh: {only_shell:?}\n  only Rust: {only_rust:?}"
+        missing.is_empty() && extra.is_empty(),
+        "plan drifted from the recorded behaviour.\n  not removed: {missing:?}\n  unexpected: {extra:?}"
     );
 }
 
@@ -214,10 +210,7 @@ fn neither_implementation_touches_an_unmanaged_repo() {
     let f = Fleet::new("unmanaged");
     f.healthy("ok").unmanaged("legacy");
 
-    for path in norm(f.propagate_removals())
-        .iter()
-        .chain(norm(f.rust_removals()).iter())
-    {
+    for path in f.rust_removals() {
         assert!(
             !path.contains("legacy"),
             "an unmanaged repo must be left alone: {path}"

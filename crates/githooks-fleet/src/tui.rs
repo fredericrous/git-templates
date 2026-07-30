@@ -17,6 +17,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 
+use crate::checks;
 use crate::scan::{FleetScan, Repo};
 use crate::shim::{BakeState, ShimState, DISPATCHERS};
 
@@ -24,6 +25,8 @@ pub struct App {
     pub scan: FleetScan,
     pub selected: usize,
     pub detail: bool,
+    /// The transposed view: checks down, repo counts across.
+    pub hook_view: bool,
     pub filter: String,
     pub filtering: bool,
     pub scanning: bool,
@@ -38,6 +41,7 @@ impl App {
             scan,
             selected: 0,
             detail: false,
+            hook_view: false,
             filter: String::new(),
             filtering: false,
             scanning: false,
@@ -80,6 +84,7 @@ impl App {
         match (key, is_enter, is_esc) {
             ('q', _, _) => self.quit = true,
             ('/', _, _) => self.filtering = true,
+            ('h', _, _) => self.hook_view = !self.hook_view,
             ('j', _, _) if len > 0 => self.selected = (self.selected + 1).min(len - 1),
             ('k', _, _) => self.selected = self.selected.saturating_sub(1),
             (_, true, _) if len > 0 => self.detail = true,
@@ -157,7 +162,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     .split(area);
 
     header(f, chunks[0], app);
-    if app.detail {
+    if app.hook_view {
+        hooks_view(f, chunks[1], app);
+    } else if app.detail {
         detail(f, chunks[1], app);
     } else if app.scan.looks_like_a_failed_scan() && !app.scanning {
         failure(f, chunks[1], app);
@@ -352,6 +359,52 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
+/// The transposed matrix: checks down the side, repo counts across.
+///
+/// Answers "where does this check actually apply?", which the old text output
+/// could not. `APPLICABLE = ACTIVE + SKIPPED`, and INERT is counted separately
+/// because a check that is correctly silent is not a problem — conflating the
+/// two would invent ninety false problems out of the Rust checks alone.
+fn hooks_view(f: &mut Frame, area: Rect, app: &App) {
+    let rows = checks::rollup(&app.scan.repos);
+    let managed = app.scan.managed_seen;
+    let body: Vec<Row> = rows
+        .iter()
+        .map(|r| {
+            // A check that can never fire anywhere is either dead or
+            // misconfigured, and that is invisible in a plain list.
+            let flag = if r.applicable == 0 { "  <- never" } else { "" };
+            Row::new(vec![
+                Cell::from(format!("{}{flag}", r.name)),
+                Cell::from(format!("{}/{managed}", r.applicable)),
+                Cell::from(r.active.to_string()),
+                Cell::from(r.skipped.to_string()),
+                Cell::from(r.inert.to_string()),
+            ])
+        })
+        .collect();
+    f.render_widget(
+        Table::new(
+            body,
+            [
+                Constraint::Min(30),
+                Constraint::Length(12),
+                Constraint::Length(8),
+                Constraint::Length(9),
+                Constraint::Length(7),
+            ],
+        )
+        .header(Row::new(vec![
+            "CHECK",
+            "APPLICABLE",
+            "ACTIVE",
+            "SKIPPED",
+            "INERT",
+        ])),
+        area,
+    );
+}
+
 fn footer(f: &mut Frame, area: Rect, app: &App) {
     let rows = app.rows().len();
     let total = app.scan.repos.len();
@@ -364,10 +417,12 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         // is legible as "the filter excluded everything", not as "nothing here".
         format!("{rows} of {total} rows match {:?}", app.filter)
     };
-    let keys = if app.detail {
+    let keys = if app.hook_view {
+        "h fleet  q quit"
+    } else if app.detail {
         "esc back  q quit"
     } else {
-        "j/k move  enter detail  / filter  esc clear  q quit"
+        "j/k move  enter detail  / filter  h hooks  esc clear  q quit"
     };
     f.render_widget(Paragraph::new(Line::from(format!("{left}   {keys}"))), area);
 }
@@ -644,6 +699,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_hook_view_transposes_and_keeps_a_denominator() {
+        let mut app = App::new(scan_with_repos(vec![repo("a", true), repo("b", true)]));
+        app.hook_view = true;
+        let out = render(&app, 110, 30);
+        assert!(out.contains("APPLICABLE"), "{out}");
+        assert!(out.contains("INERT"), "inert must be its own column: {out}");
+        assert!(out.contains("pre-commit-clippy"), "{out}");
+        assert!(out.contains("2/2"), "counts carry the managed total: {out}");
+    }
+
+    /// A check that applies nowhere is called out, because "0 everywhere" is
+    /// invisible in a column of numbers.
+    #[test]
+    fn a_check_that_applies_nowhere_is_flagged() {
+        let mut r = repo("only-js", true);
+        r.languages = vec!["js".into()];
+        let mut app = App::new(scan_with_repos(vec![r]));
+        app.hook_view = true;
+        let out = render(&app, 110, 30);
+        assert!(
+            out.contains("never"),
+            "expected a marker on the dead rows: {out}"
+        );
+    }
+
+    #[test]
+    fn h_toggles_the_hook_view() {
+        let mut app = App::new(scan_with_repos(vec![repo("a", true)]));
+        assert!(!app.hook_view);
+        app.on_key('h', false, false, false);
+        assert!(app.hook_view);
+        app.on_key('h', false, false, false);
+        assert!(!app.hook_view);
+    }
     #[test]
     fn keys_move_enter_and_quit() {
         let mut app = App::new(scan_with_repos(vec![repo("a", true), repo("b", true)]));

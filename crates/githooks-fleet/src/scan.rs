@@ -74,8 +74,12 @@ impl FleetScan {
 }
 
 /// A file is ours only if it dispatches to the binary. Anything else in
-/// `.git/hooks` is somebody's own hook and is never counted as ours — the same
-/// test `propagate.sh` used, kept identical on purpose so the two agree.
+/// `.git/hooks` is somebody's own hook and is never counted as ours.
+///
+/// This was deliberately identical to the test `propagate.sh` used, so the two
+/// could not drift on what "managed" means while both existed. The script is
+/// gone; the definition stays because it is the right one, not because
+/// something else depends on it.
 fn is_ours(path: &Path) -> bool {
     std::fs::read_to_string(path)
         .map(|s| s.contains("--hooks-dir"))
