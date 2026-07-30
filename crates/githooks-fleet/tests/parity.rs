@@ -144,6 +144,8 @@ impl Fleet {
         let out = Command::new(env!("CARGO_BIN_EXE_githooks-fleet"))
             .args(["fix", "--json", "--root"])
             .arg(&self.root)
+            .arg("--binary")
+            .arg(&self.binary)
             .output()
             .expect("githooks-fleet");
         let plans: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json");
@@ -259,12 +261,82 @@ fn fix_writes_nothing() {
     );
 }
 
+/// End to end through the CLI, and then AGAIN to prove idempotence.
+///
+/// Note the explicit `--root`. The version of this test that came before it
+/// invoked `fix --apply` with no root, so it fell back to $HOME/Developer and
+/// ran the apply path over the real fleet — 13 seconds of it. That was harmless
+/// only because every plan there is currently a no-op. A test must never be one
+/// clean fleet away from mutating the machine it runs on.
 #[test]
-fn apply_is_rejected_until_it_exists() {
+fn apply_removes_the_stale_file_and_is_idempotent() {
+    let f = Fleet::new("apply");
+    f.with_stale_ours("stale").healthy("clean");
+    let stale = f.root.join("stale/.git/hooks/pre-commit-ruff");
+    assert!(stale.exists(), "guard");
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_githooks-fleet"))
+            .args(args)
+            .arg("--root")
+            .arg(&f.root)
+            .arg("--binary")
+            .arg(&f.binary)
+            .output()
+            .expect("run")
+    };
+
+    let first = run(&["fix", "--apply", "--json"]);
+    assert!(first.status.success());
+    assert!(!stale.exists(), "the stale file must be gone");
+
+    let v: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    let applied: Vec<_> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["outcome"]["outcome"] == "applied")
+        .collect();
+    assert_eq!(applied.len(), 1, "only the stale repo changed: {v}");
+
+    // Second run: nothing left to do.
+    let second = run(&["fix", "--apply", "--json"]);
+    let v2: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert!(
+        v2.as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["outcome"]["outcome"] != "applied"),
+        "applying twice must change nothing the second time: {v2}"
+    );
+}
+
+/// An unmanaged repo survives `--apply` untouched. This is the rule that keeps
+/// the tool away from an application's data repository.
+#[test]
+fn apply_leaves_an_unmanaged_repo_alone() {
+    let f = Fleet::new("applyskip");
+    f.healthy("ok").unmanaged("legacy");
+    let legacy = f.root.join("legacy/.git/hooks/pre-commit");
+    let before = std::fs::read_to_string(&legacy).unwrap();
+
     let out = Command::new(env!("CARGO_BIN_EXE_githooks-fleet"))
-        .args(["fix", "--apply"])
+        .args(["fix", "--apply", "--json", "--root"])
+        .arg(&f.root)
+        .arg("--binary")
+        .arg(&f.binary)
         .output()
         .expect("run");
-    assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("not implemented"));
+    assert!(out.status.success());
+    assert_eq!(
+        std::fs::read_to_string(&legacy).unwrap(),
+        before,
+        "an unmanaged repo must be byte-identical afterwards"
+    );
+    assert!(
+        f.root
+            .join("legacy/.git/hooks/pre-commit-ban-terms.js")
+            .exists(),
+        "including its legacy sub-hooks"
+    );
 }
