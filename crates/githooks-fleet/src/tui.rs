@@ -35,6 +35,8 @@ pub enum Mode {
     HookView,
     /// Typing into the filter. The row list narrows as you type.
     Filter,
+    /// Typing a check name to confirm a skip that reaches more than one check.
+    Confirm,
 }
 
 /// A keystroke, named. The previous signature was
@@ -93,6 +95,14 @@ pub struct App {
     /// Where Esc returns to when a prompt is dismissed.
     prev_mode: Mode,
     pub filter: LineEdit,
+    /// Which check the detail view has highlighted.
+    pub check_selected: usize,
+    /// The pending toggle, awaiting a typed confirmation.
+    pub pending: Option<crate::skips::SkipPlan>,
+    pub confirm: LineEdit,
+    /// What just happened, and how to take it back.
+    pub notice: Option<String>,
+    pub undo: Option<crate::skips::SkipPlan>,
     pub scanning: bool,
     pub visited: usize,
     pub elapsed: f64,
@@ -107,6 +117,11 @@ impl App {
             mode: Mode::Browse,
             prev_mode: Mode::Browse,
             filter: LineEdit::default(),
+            check_selected: 0,
+            pending: None,
+            confirm: LineEdit::default(),
+            notice: None,
+            undo: None,
             scanning: false,
             visited: 0,
             elapsed: 0.0,
@@ -131,6 +146,8 @@ impl App {
     pub fn on_key(&mut self, key: Key) {
         match self.mode {
             Mode::Filter => self.filter_key(key),
+            Mode::Confirm => self.confirm_key(key),
+            Mode::Detail => self.detail_key(key),
             _ => self.browse_key(key),
         }
     }
@@ -150,6 +167,128 @@ impl App {
         self.selected = 0;
     }
 
+    /// Detail adds a selectable check list and the `s` toggle.
+    fn detail_key(&mut self, key: Key) {
+        let n = crate::checks::all_checks().len();
+        match key {
+            Key::Char('j') | Key::Down => {
+                self.check_selected = (self.check_selected + 1).min(n - 1)
+            }
+            Key::Char('k') | Key::Up => self.check_selected = self.check_selected.saturating_sub(1),
+            Key::Char('s') => self.begin_toggle(),
+            Key::Char('u') => self.take_back(),
+            _ => self.browse_key(key),
+        }
+    }
+
+    /// Typing the check name is what confirms a skip reaching more than one
+    /// check. A keypress can be muscle memory; a name cannot.
+    fn confirm_key(&mut self, key: Key) {
+        match key {
+            Key::Esc => {
+                self.pending = None;
+                self.confirm.clear();
+                self.mode = Mode::Detail;
+            }
+            Key::Enter => {
+                let matches = self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|p| p.check == self.confirm.as_str());
+                if matches {
+                    let plan = self.pending.take().expect("checked");
+                    self.commit_toggle(plan);
+                }
+                self.confirm.clear();
+                if self.pending.is_none() {
+                    self.mode = Mode::Detail;
+                }
+            }
+            Key::Backspace => self.confirm.backspace(),
+            Key::Char(c) => self.confirm.insert(c),
+            _ => {}
+        }
+    }
+
+    fn selected_repo_path(&self) -> Option<std::path::PathBuf> {
+        let rows = self.rows();
+        let r = rows.get(self.selected)?;
+        Some(self.scan.root.join(&r.path))
+    }
+
+    fn begin_toggle(&mut self) {
+        let Some(repo) = self.selected_repo_path() else {
+            return;
+        };
+        let Some(check) = crate::checks::all_checks()
+            .get(self.check_selected)
+            .copied()
+        else {
+            return;
+        };
+        let plan = crate::skips::plan(&repo, check);
+        if let Some(r) = &plan.refuse {
+            self.notice = Some(format!("refused: {r}"));
+            return;
+        }
+        if plan.is_over_broad() {
+            // Deliberate friction, and only here.
+            self.pending = Some(plan);
+            self.confirm.clear();
+            self.mode = Mode::Confirm;
+        } else {
+            self.commit_toggle(plan);
+        }
+    }
+
+    /// Write, then record how to reverse it. An undo helps when the user was
+    /// wrong; a confirmation only interrupts when they were right.
+    fn commit_toggle(&mut self, plan: crate::skips::SkipPlan) {
+        let Some(repo) = self.selected_repo_path() else {
+            return;
+        };
+        match crate::skips::apply(&repo, &plan) {
+            Ok(()) => {
+                let verb = match plan.action {
+                    crate::skips::Action::Add => "skipped",
+                    crate::skips::Action::Remove => "un-skipped",
+                };
+                self.notice = Some(format!("{verb} {} · u to undo", plan.check));
+                self.undo = Some(crate::skips::plan(&repo, plan.check));
+                self.refresh_selected_repo();
+            }
+            Err(e) => self.notice = Some(format!("failed: {e}")),
+        }
+    }
+
+    fn take_back(&mut self) {
+        let (Some(repo), Some(plan)) = (self.selected_repo_path(), self.undo.take()) else {
+            return;
+        };
+        match crate::skips::apply(&repo, &plan) {
+            Ok(()) => {
+                self.notice = Some(format!("undone: {}", plan.check));
+                self.refresh_selected_repo();
+            }
+            Err(e) => self.notice = Some(format!("undo failed: {e}")),
+        }
+    }
+
+    /// Re-read this repo's skips so the screen shows what is now true rather
+    /// than what was intended.
+    fn refresh_selected_repo(&mut self) {
+        let Some(path) = self.selected_repo_path() else {
+            return;
+        };
+        let fresh = crate::skips::read(&path);
+        let rows = self.rows();
+        let Some(target) = rows.get(self.selected).map(|r| r.path.clone()) else {
+            return;
+        };
+        if let Some(r) = self.scan.repos.iter_mut().find(|r| r.path == target) {
+            r.skips = fresh;
+        }
+    }
     fn browse_key(&mut self, key: Key) {
         let len = self.rows().len();
         match key {
@@ -397,6 +536,16 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// Would this check ever fire in this repo? Display only — the hooks scope on
+/// staged files and the nearest manifest, so this answers "ever", not "now".
+fn applies_here(r: &Repo, check: &str) -> bool {
+    crate::checks::rollup(std::slice::from_ref(r))
+        .into_iter()
+        .find(|c| c.name == check)
+        .map(|c| c.applicable > 0)
+        .unwrap_or(false)
+}
+
 fn detail(f: &mut Frame, area: Rect, app: &App) {
     let rows = app.rows();
     let Some(r) = rows.get(app.selected) else {
@@ -480,6 +629,43 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
             }
         }
     }
+    lines.push(Line::from(""));
+    lines.push(Line::from(format!(
+        "CHECKS ({})",
+        crate::checks::all_checks().len()
+    )));
+    // Windowed around the cursor. The full list is twenty lines plus a legend,
+    // which on a short terminal pushed the hook.skip diagnostic off screen —
+    // the section a reader most needs was the one that disappeared.
+    let all = crate::checks::all_checks();
+    let room = (area.height as usize)
+        .saturating_sub(lines.len() + 3)
+        .max(3);
+    let first = app
+        .check_selected
+        .saturating_sub(room / 2)
+        .min(all.len().saturating_sub(room));
+    for (i, c) in all.iter().copied().enumerate().skip(first).take(room) {
+        let skipped = r
+            .skips
+            .iter()
+            .any(|e| githooks_runtime::skip_suppresses(c, &e.value));
+        // Three states, three glyphs, three words. A check that is correctly
+        // silent must never look like a broken one.
+        let (glyph, word) = if skipped {
+            ('⊘', "skipped")
+        } else if applies_here(r, c) {
+            ('●', "runs")
+        } else {
+            ('○', "inert")
+        };
+        let cursor = if i == app.check_selected { '>' } else { ' ' };
+        lines.push(Line::from(format!("{cursor} {glyph} {c:<28} {word}")));
+    }
+    lines.push(Line::from(
+        "  ● runs here   ○ inert (no matching manifest)   ⊘ skipped via hook.skip",
+    ));
+
     f.render_widget(Paragraph::new(lines), area);
 }
 
@@ -541,10 +727,31 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         // is legible as "the filter excluded everything", not as "nothing here".
         format!("{rows} of {total} rows match {:?}", app.filter.as_str())
     };
+    if app.mode == Mode::Confirm {
+        if let Some(p) = &app.pending {
+            let line = format!(
+                "skipping {} also suppresses {} — type the name to confirm: {}",
+                p.check,
+                p.suppresses
+                    .iter()
+                    .filter(|c| **c != p.check)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                app.confirm.as_str()
+            );
+            f.render_widget(Paragraph::new(Line::from(line)), area);
+            return;
+        }
+    }
+    if let Some(n) = &app.notice {
+        f.render_widget(Paragraph::new(Line::from(n.clone())), area);
+        return;
+    }
     let keys = if app.mode == Mode::HookView {
         "h fleet  q quit"
     } else if app.mode == Mode::Detail {
-        "esc back  q quit"
+        "j/k check  s skip  u undo  esc back  q quit"
     } else {
         "j/k move  enter detail  / filter  h hooks  esc clear  q quit"
     };
@@ -858,6 +1065,132 @@ mod tests {
             out.contains("did you mean pre-push-run-tests-js"),
             "expected the correction: {out}"
         );
+    }
+
+    /// A real repo on disk, because the toggle writes git config and a mocked
+    /// one would only prove the mock agrees with itself.
+    fn repo_on_disk(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("tui-toggle-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("r")).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q", "--template=", "."])
+            .current_dir(d.join("r"))
+            .output()
+            .expect("git");
+        d
+    }
+
+    fn app_on(root: &std::path::Path) -> App {
+        let mut sc = scan_with_repos(vec![repo("r", true)]);
+        sc.root = root.to_path_buf();
+        let mut app = App::new(sc);
+        app.mode = Mode::Detail;
+        app
+    }
+
+    fn index_of(check: &str) -> usize {
+        crate::checks::all_checks()
+            .iter()
+            .position(|c| *c == check)
+            .expect("check")
+    }
+
+    /// One check → write immediately and offer undo. A confirmation for the
+    /// common case only interrupts when the user was right.
+    #[test]
+    fn s_skips_a_single_check_and_u_takes_it_back() {
+        let root = repo_on_disk("single");
+        let mut app = app_on(&root);
+        app.check_selected = index_of("pre-commit-clippy");
+
+        app.on_key(Key::Char('s'));
+        assert_eq!(app.mode, Mode::Detail, "no prompt for the common case");
+        assert_eq!(
+            crate::skips::read(&root.join("r"))
+                .into_iter()
+                .map(|e| e.value)
+                .collect::<Vec<_>>(),
+            vec!["pre-commit-clippy"]
+        );
+        assert!(app.notice.as_deref().unwrap_or("").contains("u to undo"));
+
+        app.on_key(Key::Char('u'));
+        assert!(
+            crate::skips::read(&root.join("r")).is_empty(),
+            "undo restores"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// More than one check → typing the name is required. `pre-commit-lint-js`
+    /// is a PREFIX of `pre-commit-lint-json-yaml`, so even a full check name
+    /// can reach two, and substring matching cannot express "this one only".
+    #[test]
+    fn an_over_broad_skip_demands_the_name_typed() {
+        let root = repo_on_disk("broad");
+        let mut app = app_on(&root);
+        app.check_selected = index_of("pre-commit-lint-js");
+
+        app.on_key(Key::Char('s'));
+        assert_eq!(app.mode, Mode::Confirm, "must not write on one keypress");
+        assert!(
+            crate::skips::read(&root.join("r")).is_empty(),
+            "nothing yet"
+        );
+
+        // A wrong name is rejected.
+        for c in "clippy".chars() {
+            app.on_key(Key::Char(c));
+        }
+        app.on_key(Key::Enter);
+        assert!(
+            crate::skips::read(&root.join("r")).is_empty(),
+            "still nothing"
+        );
+
+        for c in "pre-commit-lint-js".chars() {
+            app.on_key(Key::Char(c));
+        }
+        app.on_key(Key::Enter);
+        assert_eq!(
+            crate::skips::read(&root.join("r"))
+                .into_iter()
+                .map(|e| e.value)
+                .collect::<Vec<_>>(),
+            vec!["pre-commit-lint-js"]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn esc_abandons_a_pending_confirmation() {
+        let root = repo_on_disk("abandon");
+        let mut app = app_on(&root);
+        app.check_selected = index_of("pre-commit-lint-js");
+        app.on_key(Key::Char('s'));
+        app.on_key(Key::Esc);
+        assert_eq!(app.mode, Mode::Detail);
+        assert!(app.pending.is_none());
+        assert!(crate::skips::read(&root.join("r")).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The confirm prompt names what ELSE would be suppressed — the fact that
+    /// makes the friction worth accepting.
+    #[test]
+    fn the_confirm_prompt_names_the_collateral() {
+        let root = repo_on_disk("prompt");
+        let mut app = app_on(&root);
+        app.check_selected = index_of("pre-commit-lint-js");
+        app.on_key(Key::Char('s'));
+        let out = render(&app, 120, 40);
+        assert!(
+            out.contains("pre-commit-lint-json-yaml"),
+            "must name the collateral: {out}"
+        );
+        assert!(out.contains("type the name"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
