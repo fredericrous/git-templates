@@ -57,6 +57,36 @@ pub fn parse<R: BufRead>(r: R) -> Vec<PushRef> {
         .collect()
 }
 
+/// Every path touched by the refs being pushed.
+///
+/// Shared because two callers need exactly this list and would otherwise write
+/// the zero-oid and range handling twice: `cargo-test` decides whether a suite
+/// is worth running, and a declared pre-push check decides whether its `scope`
+/// applies. A copy that got the delete case wrong would run a test suite on a
+/// branch deletion.
+pub fn changed_files(refs: &[PushRef]) -> Vec<String> {
+    let zero = crate::git::stdout(&["hash-object", "--stdin"])
+        .map(|h| "0".repeat(h.len()))
+        .unwrap_or_else(|| "0".repeat(40));
+    let mut changed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for r in refs {
+        if r.local_oid == zero {
+            continue; // deleting a ref pushes no code
+        }
+        let range = if r.remote_oid == zero {
+            r.local_oid.clone()
+        } else {
+            format!("{}..{}", r.remote_oid, r.local_oid)
+        };
+        if let Some(out) =
+            crate::git::stdout(&["diff-tree", "--no-commit-id", "--name-only", "-r", &range])
+        {
+            changed.extend(out.lines().map(str::trim).map(str::to_owned));
+        }
+    }
+    changed.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

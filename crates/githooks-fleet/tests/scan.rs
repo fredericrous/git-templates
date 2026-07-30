@@ -43,6 +43,11 @@ impl Tree {
         std::fs::create_dir_all(self.0.join(rel)).expect("mkdir");
         self
     }
+    /// A committed `.githooks.conf` at a repo root.
+    fn manifest(&self, rel: &str, body: &str) -> &Self {
+        std::fs::write(self.0.join(rel).join(".githooks.conf"), body).expect("write");
+        self
+    }
     fn path(&self) -> &Path {
         &self.0
     }
@@ -278,5 +283,54 @@ fn a_baked_shim_is_ok_and_a_hand_edited_one_is_not() {
     assert!(
         states.contains(&"drifted"),
         "real drift must show: {states:?}"
+    );
+}
+
+/// Declared checks were invisible to the fleet view: a repository could run a
+/// command on every commit that no column mentioned. The scanner reads the same
+/// file the dispatcher does, with the same parser.
+#[test]
+fn a_declared_check_reaches_the_scan() {
+    let t = Tree::new("declared");
+    t.managed_repo("a").manifest(
+        "a",
+        "pre-commit  shellcheck  *.sh  block  scripts/lint-shell.sh\n",
+    );
+    let v = json(&["--root", t.path().to_str().unwrap()]);
+    let d = &v["repos"][0]["declared"][0];
+    assert_eq!(d["name"], "shellcheck");
+    assert_eq!(d["stage"], "pre-commit");
+    assert_eq!(d["severity"], "block");
+    assert_eq!(d["command"], "scripts/lint-shell.sh");
+    assert_eq!(d["exts"][0], ".sh");
+    assert!(d["broken"].is_null(), "a good line is not broken: {d}");
+}
+
+/// The case worth scanning ninety-six repositories for: a line committed
+/// months ago that has never once run.
+#[test]
+fn an_unusable_declaration_is_reported_as_such() {
+    let t = Tree::new("declared-broken");
+    t.managed_repo("a")
+        .manifest("a", "pre-commit  shellcheck  *.sh  LOUD  make lint\n");
+    let v = json(&["--root", t.path().to_str().unwrap()]);
+    let d = &v["repos"][0]["declared"][0];
+    let why = d["broken"].as_str().expect("must be flagged broken");
+    assert!(why.contains("severity"), "{why}");
+    assert!(why.contains("line 1"), "{why}");
+}
+
+/// Ninety-six repositories have no manifest, and that must cost nothing and
+/// produce no rows.
+#[test]
+fn a_repo_without_a_manifest_declares_nothing() {
+    let t = Tree::new("declared-none");
+    t.managed_repo("a");
+    let v = json(&["--root", t.path().to_str().unwrap()]);
+    assert_eq!(
+        v["repos"][0]["declared"].as_array().map(Vec::len),
+        Some(0),
+        "{}",
+        v["repos"][0]
     );
 }

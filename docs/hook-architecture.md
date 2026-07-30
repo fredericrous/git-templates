@@ -210,7 +210,21 @@ pre-commit        shellcheck  *.sh      block     scripts/lint-shell.sh
 pre-push          smoke       *         warn      make smoke
 ```
 
-Whitespace-delimited, order of file, ~20 lines of std parsing.
+Whitespace-delimited, order of file, ~20 lines of std parsing. Full reference in
+[custom-checks.md](custom-checks.md).
+
+Three rules the sketch left open, all decided the same way — by asking what a
+committed text file should be able to do to a hook chain:
+
+- **A built-in's name is refused.** An external calling itself
+  `pre-push-branch-protect` would either shadow the built-in or silently lose to
+  it.
+- **A duplicate name is refused.** It could be addressed by neither `hook.skip`
+  nor a severity override, so it would run anonymously.
+- **A line that cannot be parsed is not skipped.** It becomes a check that runs
+  to `Unavailable` and says which line and why, appearing in the same "could not
+  run" roll-up as a missing binary. Dropping it silently would mean a check
+  somebody committed months ago has never run and nothing ever said so.
 
 **On the format**: this is a judgement, not a constraint. The dependency guard
 (`scripts/check-no-deps.sh`) is a strong default about the commit path's supply
@@ -224,7 +238,9 @@ third-party command should not be able to delay `branch-protect`.
 ## Developer experience
 
 - `githooks list` — every check, stage, scope, severity, and whether it would
-  run *here*.
+  run *here*. Externals are listed too, marked `(declared)`, and a line that
+  could not be parsed gets its own glyph: correctly-inert, disabled, and
+  unusable are three different things and none may look like another.
 - `githooks explain <check>` — why it did or did not fire, in this repo, now.
   The answer to "why didn't prettier run" is currently a code-reading exercise.
 - Adding a built-in: one module plus one descriptor; the compiler names what is
@@ -245,7 +261,21 @@ classified one at a time: 12 `Unavailable`, 2 `Warned` (a waived-past lockfile, 
 first-time author identity), 1 left `Passed` (unpinned ruff, which ran). Config
 override shipped. Dashboard shows downgrades apart from enforcement.
 
-**PR 3 — external checks.** Manifest, parser, `External`, and the fleet views.
+**PR 3 — external checks.** DONE. Manifest, parser, `External`, `githooks list`,
+and the fleet views. Two things the sketch did not anticipate:
+
+*`Scope` had to gate externals at RUN time.* For a built-in it is a declaration
+the dashboard reads, because the check enforces its own scope in its first three
+lines. A declared command cannot — it has no idea what was staged — so without a
+gate here `*.sh` would have run on every commit and the column would have been
+decoration. Which files it is judged against depends on the stage: what is staged
+for a commit, what is in the range being pushed for a push.
+
+*Parsing had to be split in two.* `External` holds a `Scope`, whose `&'static`
+slices are leaked; that is fine in a hook process which reads one manifest and
+exits, and wrong in a dashboard that reads ninety-six and may re-read them on
+every refresh. `parse_lines` returns owned `Line`s and only `External::from`
+leaks, with a test pinning the two to the same answers.
 
 ## Open decisions
 
@@ -257,6 +287,8 @@ override shipped. Dashboard shows downgrades apart from enforcement.
 2. **Can an external check be `Block` at all?** Decided: yes, severity is on the
    trait and the author chooses. Worth revisiting if a repo ever ships a hostile
    or flaky one.
+2b. ~~**Can an external run before a built-in?**~~ RESOLVED: no, and not
+   configurably. Externals are appended to each stage.
 3. **Does `githooks list` belong in the hook binary or the fleet tool?** The
    fleet tool has the nicer output; the hook binary is what is installed
    everywhere.

@@ -14,7 +14,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use crate::check::{Builtin, Outcome, Scope, Severity, Stage};
+use crate::check::{Builtin, Check, Outcome, Scope, Severity, Stage};
 use crate::pushrefs::PushRefs;
 use crate::{dispatch, hooks};
 
@@ -238,18 +238,35 @@ pub const CHECKS: &[Builtin] = &[
 /// `git config githooks.severity.<check> warn` downgrades a blocking check to a
 /// warning. Unlike `hook.skip` it keeps the signal: the check still runs and
 /// still reports, it just stops failing the commit.
-pub fn severity_of(check: &Builtin) -> Severity {
-    let key = format!("githooks.severity.{}", check.name);
+pub fn severity_of(check: &dyn Check) -> Severity {
+    let key = format!("githooks.severity.{}", check.name());
     match crate::git::stdout(&["config", "--get", &key]).as_deref() {
         Some("warn") => Severity::Warn,
         Some("block") => Severity::Block,
-        _ => check.severity,
+        _ => check.severity(),
     }
 }
 
-/// Checks for one stage, in declared order.
+/// Built-in checks for one stage, in declared order.
 pub fn stage_checks(stage: Stage) -> impl Iterator<Item = &'static Builtin> {
     CHECKS.iter().filter(move |c| c.stage == stage)
+}
+
+/// Every check for one stage — built-ins first, then whatever this repository
+/// declares in `.githooks.conf`.
+///
+/// The order is not negotiable and not configurable. A third-party command must
+/// not be able to delay `pre-push-branch-protect`, and appending is the only
+/// arrangement in which it cannot.
+pub fn all_stage_checks(stage: Stage) -> Vec<&'static dyn Check> {
+    let mut out: Vec<&'static dyn Check> = stage_checks(stage).map(|c| c as &dyn Check).collect();
+    out.extend(
+        crate::manifest::externals()
+            .iter()
+            .filter(|e| e.stage == stage)
+            .map(|e| e as &dyn Check),
+    );
+    out
 }
 
 pub fn lookup(name: &str) -> Option<HookFn> {
@@ -260,19 +277,31 @@ pub fn lookup(name: &str) -> Option<HookFn> {
     // and how `githooks <check>` works from a shell. Its Outcome collapses to an
     // exit code here, honouring severity, so a `warn` check invoked directly
     // reports without failing exactly as it does inside a dispatcher.
-    if CHECKS.iter().any(|c| c.name == name) {
+    if CHECKS.iter().any(|c| c.name == name)
+        || crate::manifest::externals().iter().any(|e| e.name == name)
+    {
         return Some(|c: &Ctx| {
-            let check = CHECKS
-                .iter()
-                .find(|k| k.name == c.name)
-                .expect("checked above");
-            match (check.run)(c) {
+            let check = one_named(c.name).expect("checked above");
+            match check.run(c) {
                 Outcome::Failed if severity_of(check) == Severity::Block => 1,
                 _ => 0,
             }
         });
     }
     None
+}
+
+/// One check by name, whichever kind it is. Built-ins are searched first, which
+/// costs nothing because `manifest::parse` refuses a name a built-in already
+/// holds — the two guards together mean neither kind can shadow the other.
+pub fn one_named(name: &str) -> Option<&'static dyn Check> {
+    if let Some(b) = CHECKS.iter().find(|c| c.name == name) {
+        return Some(b);
+    }
+    crate::manifest::externals()
+        .iter()
+        .find(|e| e.name == name)
+        .map(|e| e as &dyn Check)
 }
 
 #[cfg(test)]

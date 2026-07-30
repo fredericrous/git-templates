@@ -177,6 +177,10 @@ drifted merely because `__GITHOOKS_BIN__` was replaced.
   on its name.
 - `STATE` is a redundant text summary of the same information, so the screen
   survives `NO_COLOR` and CVD.
+- `DECL` counts the checks a repository declares in `.githooks.conf`, and reads
+  `2!1` when one of those lines cannot be parsed — a check somebody committed
+  that has never once run. `2` and `2!1` describing the same repository is the
+  distinction the column exists for.
 - `SKIPS` and `WARN` are deliberately two columns, not one total. A skipped check
   does not run; a downgraded one runs, prints its failure, and lets the commit
   through. Summing them would hide the second — which is the one that looks like
@@ -294,8 +298,8 @@ refuses any path git reports as tracked.
 - **`NO_COLOR`** (and `TERM=dumb`) → glyph-and-text rendering, fully usable.
 - **CVD-safe**: state never encoded by colour alone; every colour is paired with
   a distinct glyph and a word in the legend.
-- **Narrow terminals**: below 100 columns drop `LANG`, `SKIPS` and `WARN`
-  together; below 60, fall back to a single-column list. Never horizontal
+- **Narrow terminals**: below 100 columns drop `LANG`, `SKIPS`, `WARN` and
+  `DECL` together; below 60, fall back to a single-column list. Never horizontal
   scrolling.
 - **Screen readers do not meaningfully work with TUIs.** The accessible path is
   therefore `githooks fleet --json`, emitting the full data model for scripting

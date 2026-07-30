@@ -22,6 +22,7 @@ pub mod check;
 pub mod dispatch;
 pub mod git;
 pub mod hooks;
+pub mod manifest;
 pub mod pushrefs;
 pub mod registry;
 pub mod ui;
@@ -69,25 +70,49 @@ pub fn list_checks() {
         .unwrap_or_default();
     let skips = configured_skips();
 
+    let broken: std::collections::BTreeMap<&str, &str> = manifest::externals()
+        .iter()
+        .filter_map(|e| e.broken.as_deref().map(|w| (e.name.as_str(), w)))
+        .collect();
+
     for stage in [Stage::PreCommit, Stage::PrePush] {
         println!("{}", ui::highlight(stage.as_str()));
-        for c in registry::stage_checks(stage) {
-            let skipped = skips.iter().any(|s| skip_suppresses(c.name, s));
-            let applies = c.scope.matches(&paths);
-            // Three states, three glyphs: a check that is correctly silent must
-            // never look like one that is broken or disabled.
-            let (glyph, why) = if skipped {
+        // Externals are listed here too, and marked, because the question this
+        // command answers — "would this run here?" — is asked most often about
+        // the check somebody just added to `.githooks.conf`.
+        for c in registry::all_stage_checks(stage) {
+            let name = c.name();
+            let skipped = skips.iter().any(|s| skip_suppresses(name, s));
+            let applies = c.scope().matches(&paths);
+            // Four states, four glyphs: a check that is correctly silent must
+            // never look like one that is disabled, and neither must look like
+            // one whose declaration could not be read.
+            let (glyph, why) = if let Some(w) = broken.get(name) {
+                ('✗', format!("{} {w}", manifest::MANIFEST))
+            } else if skipped {
                 ('⊘', "skipped via hook.skip".to_string())
             } else if applies {
                 ('●', String::new())
             } else {
-                ('○', format!("inert here — needs {}", describe(c.scope)))
+                ('○', format!("inert here — needs {}", describe(c.scope())))
             };
-            println!("  {glyph} {:<28} {why}", c.name);
+            // Where a check CAME FROM belongs next to its name, not appended
+            // after a reason that is often empty. A reader scanning this list
+            // wants to know which of these their repository added.
+            let label = if is_external(name) {
+                format!("{name} (declared)")
+            } else {
+                name.to_string()
+            };
+            println!("  {glyph} {label:<39} {why}");
         }
     }
     println!();
-    println!("  ● runs here   ○ inert   ⊘ skipped via hook.skip");
+    println!("  ● runs here   ○ inert   ⊘ skipped via hook.skip   ✗ declaration unusable");
+}
+
+fn is_external(name: &str) -> bool {
+    manifest::externals().iter().any(|e| e.name == name)
 }
 
 fn describe(s: crate::check::Scope) -> String {
