@@ -113,19 +113,54 @@ common case.
 
 ## Scope, declared rather than reimplemented
 
+Scoping is a **conjunction**, not a choice between alternatives:
+
+```
+ruff       .py/.pyi     AND  ruff.toml | .ruff.toml | pyproject [tool.ruff]
+yamllint   .yaml/.yml   AND  .yamllint.yaml | .yamllint.yml | .yamllint
+prettier   js-ish       AND  .prettierrc | .prettierrc.json | …
+clippy     .rs          AND  Cargo.toml
+```
+
+So it is a struct, not an enum:
+
 ```rust
-pub enum Scope {
-    Always,                       // ban-terms, merge-conflict, branch-pattern
-    StagedFiles(&'static [&'static str]),  // extensions
-    Manifest(&'static str),       // Cargo.toml, package.json, pyproject.toml
-    Custom,                       // the check decides; opaque to the dashboard
+pub struct Scope {
+    /// Extensions that trigger it. Empty = any change.
+    files: &'static [&'static str],
+    /// Config paths that opt the repo in. Empty = always on.
+    opt_in: &'static [&'static str],
 }
 ```
 
-`Custom` exists because some scoping genuinely cannot be declared — `k8s`
-walks up to the nearest kustomization root. Such a check reports `Unavailable`
-when it does not apply, so the dashboard still learns the outcome without
-having to model the rule.
+An earlier draft made these alternatives — `StagedFiles(..)` **or**
+`Manifest(..)` — plus a `Custom` escape hatch for anything that fitted neither.
+That was wrong twice over. Neither variant expresses "both", so every check with
+an opt-in config would have fallen into `Custom`; an escape hatch that absorbs
+most of the set leaves the dashboard knowing nothing, which is precisely the
+guessing this trait exists to remove.
+
+All twenty checks fit the struct. `merge-conflict` is `files: [], opt_in: []`.
+`package-lock` is `files: [], opt_in: ["package.json"]`. `kube-linter` — one of
+the cases `Custom` was invented for — reads repo-root `.kube-linter*.yaml`,
+which is just an `opt_in` entry.
+
+### Coarse declaration, precise execution
+
+`rust_tools` resolves the NEAREST ancestor `Cargo.toml`, which no static
+declaration captures. Its `Scope` therefore says `opt_in: ["Cargo.toml"]`,
+meaning "somewhere in this repo" — coarser than what the check enforces when it
+runs, and deliberately so.
+
+That is safe because the two readers ask different questions. The dispatcher
+asks "does this apply to the staged files of this commit" and the check answers
+precisely, as it does today. The dashboard asks "would this ever fire here", for
+which the coarse answer is correct. One declaration, evaluated against staged
+files in one case and tracked files in the other.
+
+Over-approximating is also the safe direction: showing a check as applicable
+when it happens not to fire for a given commit is a small inaccuracy, while
+`Custom` meant the dashboard could not answer at all.
 
 ## External checks
 
@@ -182,9 +217,11 @@ actually is. Add the config override. Dashboard shows *never ran* apart from
 
 ## Open decisions
 
-1. **Does `Custom` scope survive?** It is an escape hatch, and escape hatches
-   get used until nothing is declarative. Possibly force everything into the
-   declared forms and accept a little inaccuracy.
+1. ~~**Does `Custom` scope survive?**~~ RESOLVED: no, and the question was
+   better than it looked. Checking what the checks actually key on showed the
+   `Scope` enum modelled alternatives where the truth is a conjunction, so
+   `Custom` would have swallowed most of the set rather than the one case it was
+   written for. `Scope` is a struct now and every check fits it.
 2. **Can an external check be `Block` at all?** Decided: yes, severity is on the
    trait and the author chooses. Worth revisiting if a repo ever ships a hostile
    or flaky one.
