@@ -158,6 +158,29 @@ pub fn configured_skips() -> Vec<String> {
 
 /// True during a cherry-pick, where the zsh `pre-commit` exited 0 immediately.
 /// The marker sits next to the hooks directory, i.e. in `.git/`.
+/// Which git operations are part-way through, from the markers in `$GIT_DIR`.
+///
+/// `hooks_dir.parent()` is the git dir. `parent()` is LEXICAL; `join("..")` is
+/// not — the latter makes the kernel resolve `hooks/..`, which fails outright
+/// when the hooks directory does not exist, and `git init --template=` creates
+/// none. The check then reports "no operation in progress" for a reason that
+/// has nothing to do with git operations. That was learned once, for
+/// cherry-picks; it applies to all five.
+pub fn git_states_in_progress(hooks_dir: &Path) -> Vec<crate::check::GitState> {
+    let Some(git_dir) = hooks_dir.parent() else {
+        return Vec::new();
+    };
+    crate::check::GitState::ALL
+        .into_iter()
+        .filter(|state| {
+            state
+                .markers()
+                .iter()
+                .any(|marker| git_dir.join(marker).exists())
+        })
+        .collect()
+}
+
 pub fn cherry_pick_in_progress(hooks_dir: &Path) -> bool {
     // `parent()` is LEXICAL; `join("..")` is not. The latter makes the kernel
     // resolve `hooks/..`, which fails outright when the hooks directory does

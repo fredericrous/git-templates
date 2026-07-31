@@ -14,7 +14,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use crate::check::{Builtin, Check, Outcome, Scope, Severity, Stage, Verdict};
+use crate::check::{Builtin, Check, GitState, Outcome, Scope, Severity, Stage, Verdict};
 use crate::pushrefs::PushRefs;
 use crate::{dispatch, hooks};
 
@@ -56,6 +56,22 @@ pub const ENTRYPOINTS: &[(&str, HookFn)] = &[
 ///
 /// pre-push order is the cost order: refuse a forbidden push before validating
 /// a name, and validate everything structural before paying for a test suite.
+/// Operations during which a content check cannot say anything useful: half the
+/// tree is somebody else's work, and you cannot fix it from inside the
+/// operation anyway.
+///
+/// NOT applied to `merge-conflict` or `ban-terms`. Those are exactly the checks
+/// you want during a resolution commit — leaving a conflict marker in the
+/// commit that RESOLVES a merge is the bug, and importing a banned term from
+/// the other branch is the other one. The old behaviour skipped the whole
+/// pre-commit stage during a cherry-pick, which silenced both.
+const MID_OPERATION: &[GitState] = &[
+    GitState::Merge,
+    GitState::Rebase,
+    GitState::CherryPick,
+    GitState::Revert,
+];
+
 pub const CHECKS: &[Builtin] = &[
     // ---- pre-commit ----
     Builtin {
@@ -64,7 +80,8 @@ pub const CHECKS: &[Builtin] = &[
         scope: Scope::new(
             &[".yaml", ".yml"],
             &["kustomization.yaml", "kustomization.yml"],
-        ),
+        )
+        .not_during(MID_OPERATION),
         severity: Severity::Block,
         run: |ctx| hooks::k8s::argo_lint(ctx.args),
     },
@@ -78,14 +95,14 @@ pub const CHECKS: &[Builtin] = &[
     Builtin {
         name: "pre-commit-cargo-fmt",
         stage: Stage::PreCommit,
-        scope: Scope::new(&[".rs"], &["Cargo.toml"]),
+        scope: Scope::new(&[".rs"], &["Cargo.toml"]).not_during(MID_OPERATION),
         severity: Severity::Block,
         run: |ctx| hooks::rust_tools::fmt(ctx.args),
     },
     Builtin {
         name: "pre-commit-clippy",
         stage: Stage::PreCommit,
-        scope: Scope::new(&[".rs"], &["Cargo.toml"]),
+        scope: Scope::new(&[".rs"], &["Cargo.toml"]).not_during(MID_OPERATION),
         severity: Severity::Block,
         run: |ctx| hooks::rust_tools::clippy(ctx.args),
     },
@@ -95,7 +112,8 @@ pub const CHECKS: &[Builtin] = &[
         scope: Scope::new(
             &[".yaml", ".yml"],
             &[".kube-linter*.yaml", ".kube-linter*.yml"],
-        ),
+        )
+        .not_during(MID_OPERATION),
         severity: Severity::Block,
         run: |ctx| hooks::k8s::kube_linter(ctx.args),
     },
@@ -105,21 +123,23 @@ pub const CHECKS: &[Builtin] = &[
         scope: Scope::new(
             &[".yaml", ".yml"],
             &["kustomization.yaml", "kustomization.yml"],
-        ),
+        )
+        .not_during(MID_OPERATION),
         severity: Severity::Block,
         run: |ctx| hooks::k8s::kubeconform(ctx.args),
     },
     Builtin {
         name: "pre-commit-lint-js",
         stage: Stage::PreCommit,
-        scope: Scope::new(&[".js", ".jsx", ".ts", ".tsx", ".vue"], &["package.json"]),
+        scope: Scope::new(&[".js", ".jsx", ".ts", ".tsx", ".vue"], &["package.json"])
+            .not_during(MID_OPERATION),
         severity: Severity::Block,
         run: |ctx| hooks::lint_js::run(ctx.args),
     },
     Builtin {
         name: "pre-commit-lint-json-yaml",
         stage: Stage::PreCommit,
-        scope: Scope::files(&[".json", ".yaml", ".yml"]),
+        scope: Scope::files(&[".json", ".yaml", ".yml"]).not_during(MID_OPERATION),
         severity: Severity::Block,
         run: |ctx| hooks::lint_json_yaml::run(ctx.args),
     },
@@ -150,7 +170,8 @@ pub const CHECKS: &[Builtin] = &[
                 ".prettierrc.js",
                 "prettier.config.js",
             ],
-        ),
+        )
+        .not_during(MID_OPERATION),
         severity: Severity::Block,
         run: |ctx| hooks::prettier::run(ctx.args),
     },
@@ -164,7 +185,8 @@ pub const CHECKS: &[Builtin] = &[
                 "pyrightconfig.jsonc",
                 "pyproject.toml",
             ],
-        ),
+        )
+        .not_during(MID_OPERATION),
         severity: Severity::Block,
         run: |ctx| hooks::python_tools::pyright(ctx.args),
     },
@@ -174,7 +196,8 @@ pub const CHECKS: &[Builtin] = &[
         scope: Scope::new(
             &[".py", ".pyi"],
             &["ruff.toml", ".ruff.toml", "pyproject.toml"],
-        ),
+        )
+        .not_during(MID_OPERATION),
         severity: Severity::Block,
         run: |ctx| hooks::python_tools::ruff(ctx.args),
     },
@@ -191,7 +214,8 @@ pub const CHECKS: &[Builtin] = &[
         scope: Scope::new(
             &[".yaml", ".yml"],
             &[".yamllint.yaml", ".yamllint.yml", ".yamllint"],
-        ),
+        )
+        .not_during(MID_OPERATION),
         severity: Severity::Block,
         run: |ctx| hooks::yamllint::run(ctx.args),
     },
@@ -213,21 +237,23 @@ pub const CHECKS: &[Builtin] = &[
     Builtin {
         name: "pre-push-pull-rebase",
         stage: Stage::PrePush,
-        scope: Scope::ALWAYS,
+        scope: Scope::ALWAYS.not_during(&[GitState::Rebase, GitState::Merge]),
         severity: Severity::Block,
         run: |ctx| hooks::pull_rebase::run(ctx.args),
     },
     Builtin {
         name: "pre-push-run-tests-js",
         stage: Stage::PrePush,
-        scope: Scope::new(&[".js", ".jsx", ".ts", ".tsx", ".vue"], &["package.json"]),
+        scope: Scope::new(&[".js", ".jsx", ".ts", ".tsx", ".vue"], &["package.json"])
+            .not_during(&[GitState::Bisect, GitState::Rebase]),
         severity: Severity::Block,
         run: |ctx| hooks::run_tests::run(ctx.push.get()),
     },
     Builtin {
         name: "pre-push-cargo-test",
         stage: Stage::PrePush,
-        scope: Scope::new(&[".rs"], &["Cargo.toml"]),
+        scope: Scope::new(&[".rs"], &["Cargo.toml"])
+            .not_during(&[GitState::Bisect, GitState::Rebase]),
         severity: Severity::Block,
         run: |ctx| hooks::rust_tools::test(ctx.push.get()),
     },

@@ -86,17 +86,32 @@ fn pre_commit_reports_every_failure_not_just_the_first() {
     );
 }
 
-/// A cherry-pick replays commits that already passed these checks; re-running
-/// them turns a conflict resolution into a second review.
+/// A cherry-pick replays commits that already passed these checks, so
+/// re-running the CONTENT checks turns a conflict resolution into a second
+/// review. That was the reason for the original guard and it still holds.
+///
+/// What changed: the guard skipped the whole stage, which also silenced
+/// `merge-conflict` — the one check a resolution commit most needs, because
+/// leaving a marker in the commit that resolves the pick is the bug. Each check
+/// now declares for itself, and this one keeps running. See
+/// `tests/git_state.rs`.
 #[test]
-fn pre_commit_skips_everything_during_a_cherry_pick() {
+fn a_cherry_pick_pauses_the_content_checks_but_not_merge_conflict() {
     let r = Repo::new();
-    r.stage("bad.txt", &conflicted());
+    r.stage("x.json", "{ BROKEN\n");
     assert!(!r.hook("pre-commit", &[]).passed(), "guard: fails normally");
     std::fs::write(r.path(".git/CHERRY_PICK_HEAD"), "deadbeef\n").expect("write");
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "content checks must pause:\n{}", run.output());
+    assert!(run.says("paused during a cherry-pick"), "{}", run.output());
+
+    // …and the marker check is not among them.
+    let r = Repo::new();
+    r.stage("bad.txt", &conflicted());
+    std::fs::write(r.path(".git/CHERRY_PICK_HEAD"), "deadbeef\n").expect("write");
     assert!(
-        r.hook("pre-commit", &[]).passed(),
-        "must skip mid-cherry-pick"
+        !r.hook("pre-commit", &[]).passed(),
+        "a conflict marker must still block the resolution commit"
     );
 }
 

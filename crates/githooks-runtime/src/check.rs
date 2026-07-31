@@ -35,26 +35,97 @@ impl Stage {
 /// is `.rs` AND `Cargo.toml`. An earlier design offered these as alternatives
 /// plus a `Custom` escape hatch, which would have swallowed nearly every check
 /// and left the dashboard knowing nothing.
+/// A git operation that is part-way through.
+///
+/// Detected from the marker files git writes into `$GIT_DIR`, which is how git
+/// itself and every prompt-writer answers the question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitState {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+    Bisect,
+}
+
+impl GitState {
+    /// The marker git writes. `rebase-merge` and `rebase-apply` are
+    /// DIRECTORIES; the rest are files, and `Path::exists` covers both.
+    pub fn markers(self) -> &'static [&'static str] {
+        match self {
+            GitState::Merge => &["MERGE_HEAD"],
+            GitState::Rebase => &["REBASE_HEAD", "rebase-merge", "rebase-apply"],
+            GitState::CherryPick => &["CHERRY_PICK_HEAD"],
+            GitState::Revert => &["REVERT_HEAD"],
+            GitState::Bisect => &["BISECT_LOG"],
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GitState::Merge => "a merge",
+            GitState::Rebase => "a rebase",
+            GitState::CherryPick => "a cherry-pick",
+            GitState::Revert => "a revert",
+            GitState::Bisect => "a bisect",
+        }
+    }
+
+    pub const ALL: [GitState; 5] = [
+        GitState::Merge,
+        GitState::Rebase,
+        GitState::CherryPick,
+        GitState::Revert,
+        GitState::Bisect,
+    ];
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Scope {
     /// Extensions that trigger it. Empty means any change.
     pub files: &'static [&'static str],
     /// Config paths that opt a repository in. Empty means always on.
     pub opt_in: &'static [&'static str],
+    /// Git operations during which this check does not run.
+    ///
+    /// The other half of "when does this apply". `files` and `opt_in` say which
+    /// REPOSITORIES and which CHANGES; this says which repository STATES — a
+    /// question that used to be answered by one hard-coded `CHERRY_PICK_HEAD`
+    /// test in one dispatcher, with the other carrying a comment admitting it
+    /// had none because the shell version had none.
+    pub not_during: &'static [GitState],
 }
 
 impl Scope {
     pub const ALWAYS: Scope = Scope {
         files: &[],
         opt_in: &[],
+        not_during: &[],
     };
 
     pub const fn files(files: &'static [&'static str]) -> Scope {
-        Scope { files, opt_in: &[] }
+        Scope {
+            files,
+            opt_in: &[],
+            not_during: &[],
+        }
     }
 
     pub const fn new(files: &'static [&'static str], opt_in: &'static [&'static str]) -> Scope {
-        Scope { files, opt_in }
+        Scope {
+            files,
+            opt_in,
+            not_during: &[],
+        }
+    }
+
+    /// The same scope, silent during these operations.
+    pub const fn not_during(self, states: &'static [GitState]) -> Scope {
+        Scope {
+            files: self.files,
+            opt_in: self.opt_in,
+            not_during: states,
+        }
     }
 
     /// Would this check ever fire, given the paths a repository contains?
