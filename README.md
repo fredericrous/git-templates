@@ -77,6 +77,16 @@ Full reference: [docs/custom-checks.md](docs/custom-checks.md).
 
 Everything works, with one setup difference: there is no symlink.
 
+Install with the binary itself — Git for Windows ships `bash` and coreutils but
+not `make`:
+
+```sh
+cargo build --release
+./target/release/githooks install
+```
+
+That is the same command `make install` runs on every platform.
+
 On macOS/Linux `~/.config/git/git-templates` is usually a symlink to the
 checkout, so `init.templateDir` can point at a stable XDG path. Windows does not
 create symlinks without Developer Mode or elevation, so point git straight at
@@ -88,8 +98,8 @@ git config --global init.templateDir 'C:/path/to/git-templates/templates'
 
 Nothing else changes. The shims never need the symlink: they resolve the binary
 at runtime, trying `$GIT_HOOKS_BIN`, the baked path, `~/.local/bin/githooks` and
-`~/.local/bin/githooks.exe`, then `PATH`. `make install` runs under Git Bash and
-detects the `.exe` suffix on its own.
+`~/.local/bin/githooks.exe`, then `PATH`. The installer detects the `.exe`
+suffix on its own.
 
 ## Requirements
 
@@ -117,6 +127,8 @@ There's a makefile, open it, see the different tasks, basically:
 
 - `make test` runs the tests
 - `make` is an alias to `make test`
-- `make install` copies the hooks from this repo to both .git/ and ~/.config/git/
+- `make install` builds and runs `githooks install`, which puts the binary in
+  `~/.local/bin` and writes the shims into this repo and the template dir. It
+  refuses to touch a template dir that is a checkout — see `crates/githooks-runtime/src/install.rs`
 
 To run only one test, use `make test RUN=<part of the name of the test>`

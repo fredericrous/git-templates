@@ -43,6 +43,14 @@ fn main() {
         std::process::exit(0);
     }
 
+    // `githooks install` — was a Makefile recipe. It lives here so the guard
+    // that decides whether a directory may be emptied has ONE implementation,
+    // tested on every platform, rather than one in `make` and another in
+    // PowerShell for the Windows users who have no `make` at all.
+    if rest.first().is_some_and(|a| a == "install") || hook.as_deref() == Some("install") {
+        std::process::exit(githooks_runtime::install::run());
+    }
+
     let (Some(hooks_dir), Some(hook)) = (hooks_dir, hook) else {
         eprintln!("usage: githooks --hooks-dir <dir> <hook-name> [args…]");
         std::process::exit(2);
