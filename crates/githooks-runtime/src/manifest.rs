@@ -263,6 +263,15 @@ impl Check for External {
         // Which files to test against depends on the stage: what is staged for
         // a commit, what is being pushed for a push. `*` short-circuits before
         // either is computed, which is the common case.
+        // A check whose whole job is to rewrite has nothing to say when nobody
+        // asked for rewriting — so it does not RUN, rather than running and
+        // having its result discarded. Gating only the re-staging let the
+        // command edit files with `githooks.fix` off, which is precisely the
+        // surprise the gate exists to prevent.
+        if fix == Fix::Rewrite && !crate::hooks::common::fixing_enabled() {
+            return Outcome::Passed;
+        }
+
         let in_scope = match self.stage {
             Stage::PreCommit => crate::hooks::common::staged_files(&[]),
             Stage::PrePush => crate::pushrefs::changed_files(ctx.push.get()),
