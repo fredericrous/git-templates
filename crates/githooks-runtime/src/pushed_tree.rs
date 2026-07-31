@@ -43,16 +43,22 @@ pub fn enabled() -> bool {
 /// A checkout of the pushed commit, removed when it goes out of scope.
 pub struct PushedTree {
     path: PathBuf,
+    repo: PathBuf,
 }
 
 impl PushedTree {
     /// Materialise `tip`, or `None` when that is not possible — in which case
     /// the caller falls back to the working tree and says so.
-    pub fn create(tip: &str) -> Option<PushedTree> {
+    /// Takes the repository explicitly rather than relying on the working
+    /// directory: `set_current_dir` is process-global, so a test that changed
+    /// it would race every other test in the binary.
+    pub fn create(repo: &Path, tip: &str) -> Option<PushedTree> {
         let base = std::env::temp_dir().join(format!("githooks-push-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let path = base.clone();
         let ok = crate::git::succeeds(&[
+            "-C",
+            repo.to_str()?,
             "worktree",
             "add",
             "--detach",
@@ -60,7 +66,10 @@ impl PushedTree {
             path.to_str()?,
             tip,
         ]);
-        ok.then_some(PushedTree { path })
+        ok.then_some(PushedTree {
+            path,
+            repo: repo.to_path_buf(),
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -73,6 +82,8 @@ impl Drop for PushedTree {
         // `--force`: the suite may have written into it, and a build artefact
         // must not be a reason to leave a worktree registered forever.
         let _ = crate::git::succeeds(&[
+            "-C",
+            self.repo.to_str().unwrap_or_default(),
             "worktree",
             "remove",
             "--force",
@@ -112,7 +123,7 @@ pub fn where_to_run(
     let Some(tip) = tip(refs) else {
         return (PathBuf::from(fallback), None);
     };
-    match PushedTree::create(&tip) {
+    match PushedTree::create(Path::new(fallback), &tip) {
         Some(tree) => {
             let path = tree.path().to_path_buf();
             (path, Some(tree))
@@ -139,6 +150,9 @@ mod tests {
             vec!["init", "-q", "--template=", "."],
             vec!["config", "user.email", "t@t.test"],
             vec!["config", "user.name", "t"],
+            // Git for Windows rewrites line endings on checkout; a byte
+            // comparison would otherwise assert git's newline policy.
+            vec!["config", "core.autocrlf", "false"],
         ] {
             std::process::Command::new("git")
                 .args(&args)
@@ -170,13 +184,10 @@ mod tests {
         // Uncommitted, and it must not travel.
         std::fs::write(d.join("a.txt"), "dirty, not pushed\n").unwrap();
 
-        let previous = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&d).unwrap();
-        let tree = PushedTree::create(&head).expect("worktree");
+        let tree = PushedTree::create(&d, &head).expect("worktree");
         let seen = std::fs::read_to_string(tree.path().join("a.txt")).unwrap();
         let at = tree.path().to_path_buf();
         drop(tree);
-        std::env::set_current_dir(previous).unwrap();
 
         assert_eq!(seen, "committed\n", "the worktree saw the dirty tree");
         assert!(!at.exists(), "the worktree outlived its guard");
