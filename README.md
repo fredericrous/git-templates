@@ -73,6 +73,24 @@ They run alongside the built-ins and obey the same `hook.skip` and
 `githooks.severity.<name>` controls. `githooks list` shows what would run here.
 Full reference: [docs/custom-checks.md](docs/custom-checks.md).
 
+## Windows
+
+Everything works, with one setup difference: there is no symlink.
+
+On macOS/Linux `~/.config/git/git-templates` is usually a symlink to the
+checkout, so `init.templateDir` can point at a stable XDG path. Windows does not
+create symlinks without Developer Mode or elevation, so point git straight at
+the checkout instead:
+
+```sh
+git config --global init.templateDir 'C:/path/to/git-templates/templates'
+```
+
+Nothing else changes. The shims never need the symlink: they resolve the binary
+at runtime, trying `$GIT_HOOKS_BIN`, the baked path, `~/.local/bin/githooks` and
+`~/.local/bin/githooks.exe`, then `PATH`. `make install` runs under Git Bash and
+detects the `.exe` suffix on its own.
+
 ## Requirements
 
 - Git 2.22+

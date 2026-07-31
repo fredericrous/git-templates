@@ -7,10 +7,17 @@ HOME_PATH_HOOKS	   := $(XDG_CONFIG_HOME)/git/git-templates/templates/hooks/
 SRC_CTRL_HOOKS     := $(MAKEFILE_DIR)templates/hooks/*
 GIT_REPO_HOOK_PATH := $(shell git rev-parse --git-dir)/hooks/
 
-DEBUG_BIN          := $(MAKEFILE_DIR)target/debug/githooks
-RELEASE_BIN        := $(MAKEFILE_DIR)target/release/githooks
+# Windows produces githooks.exe; everywhere else, githooks. Detected from the
+# ARTIFACT rather than by sniffing the OS: Git Bash, MSYS2 and Cygwin report
+# three different `uname` strings and all build the same .exe. Recursive `=`,
+# not `:=`, so it is evaluated when a recipe line runs — i.e. after the
+# `cargo build` above it, when the file exists to be detected.
+EXE                 = $(shell [ -f "$(MAKEFILE_DIR)target/release/githooks.exe" ] \
+                        || [ -f "$(MAKEFILE_DIR)target/debug/githooks.exe" ] && echo .exe)
+DEBUG_BIN           = $(MAKEFILE_DIR)target/debug/githooks$(EXE)
+RELEASE_BIN         = $(MAKEFILE_DIR)target/release/githooks$(EXE)
 INSTALL_BIN_DIR    ?= $(HOME)/.local/bin
-INSTALLED_BIN      := $(INSTALL_BIN_DIR)/githooks
+INSTALLED_BIN       = $(INSTALL_BIN_DIR)/githooks$(EXE)
 
 all: test
 
@@ -20,6 +27,7 @@ all: test
 # package.json (no shebang) is left untouched. POSIX sh — no zsh needed.
 chmodx:
 	@for f in $(MAKEFILE_DIR)crates/githooks/tests/* $(SRC_CTRL_HOOKS); do \
+		[ -f "$$f" ] || continue; \
 		if head -1 "$$f" | grep -q '^#!'; then chmod +x "$$f"; fi; \
 	done
 
@@ -72,7 +80,9 @@ install: chmodx
 	elif ! command -v git > /dev/null 2>&1; then \
 		echo "git not on PATH — refusing to delete anything"; \
 	elif git -C "$$HOME_REAL" ls-files --error-unmatch . > /dev/null 2>&1; then \
-		echo "$$HOME_REAL holds TRACKED files — leaving it alone"; \
+		echo "template dir IS the checkout ($$HOME_REAL) — nothing to install."; \
+		echo "  shims there keep the __GITHOOKS_BIN__ placeholder and resolve"; \
+		echo "  $(INSTALLED_BIN) at runtime. This is the intended setup."; \
 	elif git -C "$$HOME_REAL" rev-parse --git-dir > /dev/null 2>&1; then \
 		echo "$$HOME_REAL is inside a git checkout — leaving it alone"; \
 	else \

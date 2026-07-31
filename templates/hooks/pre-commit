@@ -22,6 +22,12 @@
 #                         the git checkout itself (the usual setup here — the
 #                         XDG path symlinks to the repo) never gets that token
 #                         substituted and would depend on PATH after all.
+#                         Both names are tried: Windows builds githooks.exe, and
+#                         `[ -x .../githooks ]` is false for it — which left
+#                         Windows with PATH as its ONLY fallback, in exactly the
+#                         GUI-client case this list exists to survive. Windows
+#                         needs no symlink for any of this: point
+#                         init.templateDir straight at the checkout.
 #   4. PATH             — last resort
 # and if none resolve, FAIL LOUDLY. Never skip a check silently: a hook that
 # quietly does nothing is worse than one that is missing.
@@ -35,6 +41,8 @@ elif [ -x "__GITHOOKS_BIN__" ]; then
     BIN="__GITHOOKS_BIN__"
 elif [ -x "$HOME/.local/bin/githooks" ]; then
     BIN="$HOME/.local/bin/githooks"
+elif [ -x "$HOME/.local/bin/githooks.exe" ]; then
+    BIN="$HOME/.local/bin/githooks.exe"
 elif command -v githooks > /dev/null 2>&1; then
     BIN=githooks
 else
