@@ -48,6 +48,17 @@ impl Level {
     }
 }
 
+/// A configured line, before anyone has asked which one git applies.
+///
+/// Carries only what the config file says, so there is no state in which a
+/// field is meaningless.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawEntry {
+    check: String,
+    value: String,
+    scope: Scope,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SeverityOverride {
     /// The key's last component, exactly as configured.
@@ -112,39 +123,50 @@ pub fn read(repo: &Path) -> Vec<SeverityOverride> {
     else {
         return Vec::new();
     };
-    let mut entries = parse(&String::from_utf8_lossy(&out.stdout));
-    mark_effective(repo, &mut entries);
-    entries
+    resolve(repo, parse(&String::from_utf8_lossy(&out.stdout)))
 }
 
-/// Ask git, once per distinct check, which value it would actually apply, and
-/// flag the entries that match it.
+/// Turn raw entries into resolved ones by asking which value git applies.
+///
+/// A MAP, not a mutation. `parse` used to return `SeverityOverride`s whose
+/// `effective` field was `true` for everything until this corrected it — a
+/// value that was simply wrong for as long as it existed, and observably so:
+/// tests calling `parse` directly got entries claiming to be effective without
+/// anyone having asked.
 ///
 /// The question is answered by the RUNTIME — the same call the dispatcher makes
 /// — rather than by re-deriving precedence here. Config precedence is git's
 /// (system, then global, then local, then includes), and a reimplementation
 /// would be a second opinion about the one thing this column must not get
 /// wrong.
-fn mark_effective(repo: &Path, entries: &mut [SeverityOverride]) {
-    let mut asked: BTreeMap<String, Option<String>> = BTreeMap::new();
-    for e in entries.iter() {
-        asked.entry(e.check.clone()).or_insert_with(|| {
-            githooks_runtime::git::stdout_in(
+fn resolve(repo: &Path, raws: Vec<RawEntry>) -> Vec<SeverityOverride> {
+    let mut applied: BTreeMap<&str, Option<String>> = BTreeMap::new();
+    for r in &raws {
+        if !applied.contains_key(r.check.as_str()) {
+            let v = githooks_runtime::git::stdout_in(
                 repo,
                 &[
                     "config",
                     "--get",
-                    &githooks_runtime::registry::severity_key(&e.check),
+                    &githooks_runtime::registry::severity_key(&r.check),
                 ],
-            )
-        });
+            );
+            applied.insert(r.check.as_str(), v);
+        }
     }
-    for e in entries.iter_mut() {
-        // A duplicate of the winning VALUE is indistinguishable from the winner
-        // and is treated as effective too. That errs toward showing a downgrade
-        // rather than hiding one, which is the safe direction for this column.
-        e.effective = asked.get(&e.check).and_then(|v| v.as_deref()) == Some(e.value.as_str());
-    }
+    raws.iter()
+        .map(|r| SeverityOverride {
+            // A duplicate of the winning VALUE is indistinguishable from the
+            // winner and is treated as effective too. That errs toward showing
+            // a downgrade rather than hiding one, the safe direction here.
+            effective: applied.get(r.check.as_str()).and_then(|v| v.as_deref())
+                == Some(r.value.as_str()),
+            check: r.check.clone(),
+            level: Level::of(&r.value),
+            value: r.value.clone(),
+            scope: r.scope.clone(),
+        })
+        .collect()
 }
 
 /// Split out from `read` so the origins can be exercised without arranging for
@@ -152,7 +174,7 @@ fn mark_effective(repo: &Path, entries: &mut [SeverityOverride]) {
 /// global one only by touching the developer's real `~/.gitconfig`, so a test
 /// driving `read` alone can assert `Local` and nothing else — which a `scope`
 /// field hard-coded to `Local` would satisfy just as well.
-fn parse(stdout: &str) -> Vec<SeverityOverride> {
+fn parse(stdout: &str) -> Vec<RawEntry> {
     stdout
         .lines()
         .filter_map(|line| {
@@ -164,13 +186,10 @@ fn parse(stdout: &str) -> Vec<SeverityOverride> {
             if check.is_empty() {
                 return None;
             }
-            Some(SeverityOverride {
+            Some(RawEntry {
                 check: check.to_string(),
                 value: value.to_string(),
-                level: Level::of(value),
                 scope: scope_of(origin),
-                // Resolved by `mark_effective`, which needs the repository.
-                effective: true,
             })
         })
         .collect()

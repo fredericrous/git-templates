@@ -98,13 +98,15 @@ impl Scope {
 /// announced, and it took three PRs to notice there.
 ///
 /// The check still prints its own message; this only classifies the result.
-/// `Default` is `Failed` on purpose: it fills the slot of a check whose thread
-/// died, and a check that vanished must never read as one that passed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// Deliberately NO `Default`. It used to be `Failed`, to fill the slot of a
+/// check whose thread died — a real rule, but `Default` means "the neutral
+/// value" to every reader and to every `#[derive(Default)]` that might later
+/// contain one. The rule is now written where it applies, in the runner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Passed,
     /// Ran, found a problem. Whether that blocks is `Severity`, not this.
-    #[default]
     Failed,
     /// Ran, found something worth saying, which does not block.
     Warned,

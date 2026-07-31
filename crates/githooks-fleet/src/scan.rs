@@ -21,34 +21,62 @@ use crate::severities::{self, SeverityOverride};
 use crate::shim::{self, BakeState, ShimState, DISPATCHERS};
 use crate::skips::{self, SkipEntry};
 
-/// One `.githooks.conf` line, flattened for display and for `--json`.
+/// One `.githooks.conf` line, for display and for `--json`.
 ///
-/// A projection rather than a re-parse: `manifest::read_lines` is the same
-/// parser the dispatcher uses, so the dashboard cannot form its own opinion
-/// about what a manifest means.
+/// A SUM, like the `Line` it projects. Flattening it into `severity` +
+/// `command` + `Option<broken>` would rebuild here exactly the shape the
+/// runtime just stopped using: fields that mean nothing when the line is
+/// unusable, and a renderer that has to remember which.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DeclaredCheck {
     pub name: String,
     pub stage: String,
-    pub severity: String,
-    /// Extensions that gate it. Empty means every change.
-    pub exts: Vec<String>,
-    pub command: String,
-    /// Why the line is unusable, if it is. The check does not run, and saying
-    /// so is the whole reason the dashboard reads these files.
-    pub broken: Option<String>,
+    #[serde(flatten)]
+    pub state: DeclaredState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum DeclaredState {
+    Usable {
+        severity: String,
+        /// Extensions that gate it. Empty means every change.
+        exts: Vec<String>,
+        command: String,
+    },
+    /// The check does not run, and saying so is the whole reason the dashboard
+    /// reads these files.
+    Unusable { why: String },
+}
+
+impl DeclaredCheck {
+    pub fn is_unusable(&self) -> bool {
+        matches!(self.state, DeclaredState::Unusable { .. })
+    }
+}
+
+/// A projection rather than a re-parse: `manifest::read_lines` is the same
+/// parser the dispatcher uses, so the dashboard cannot form its own opinion
+/// about what a manifest means.
 fn declared_checks(repo: &Path) -> Vec<DeclaredCheck> {
+    use githooks_runtime::manifest::Line;
     githooks_runtime::manifest::read_lines(repo)
         .into_iter()
-        .map(|l| DeclaredCheck {
-            name: l.name,
-            stage: l.stage.as_str().to_string(),
-            severity: l.severity.as_str().to_string(),
-            exts: l.exts,
-            command: l.argv.join(" "),
-            broken: l.broken,
+        .map(|l| {
+            let (name, stage) = (l.name().to_string(), l.stage().as_str().to_string());
+            let why = l.broken();
+            let state = match (l, why) {
+                (Line::Usable(d), _) => DeclaredState::Usable {
+                    severity: d.severity.as_str().to_string(),
+                    command: d.command(),
+                    exts: d.exts,
+                },
+                (Line::Broken { .. }, Some(why)) => DeclaredState::Unusable { why },
+                (Line::Broken { why, lineno, .. }, None) => DeclaredState::Unusable {
+                    why: format!("line {lineno}: {why}"),
+                },
+            };
+            DeclaredCheck { name, stage, state }
         })
         .collect()
 }

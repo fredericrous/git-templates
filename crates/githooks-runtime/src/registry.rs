@@ -247,6 +247,62 @@ pub fn severity_key(check: &str) -> String {
     format!("githooks.severity.{check}")
 }
 
+/// Every severity override visible here, resolved the way `--get` resolves it.
+///
+/// ONE subprocess for the whole stage, and — more importantly — a VALUE. The
+/// dispatcher used to call `severity_of` inside the loop that classifies
+/// outcomes, which put a `git` spawn in the middle of a fold and made the fold
+/// impossible to test without a repository.
+///
+/// `--get-regexp` emits entries in precedence order, so folding with overwrite
+/// lands on the same answer `--get` gives. That equivalence is not assumed:
+/// `the_batch_agrees_with_the_authority` pins it against `effective_override`.
+#[derive(Debug, Default, Clone)]
+pub struct Overrides(std::collections::BTreeMap<String, Severity>);
+
+impl Overrides {
+    pub fn read() -> Overrides {
+        Overrides::from_config(crate::git::stdout(&[
+            "config",
+            "--get-regexp",
+            r"^githooks\.severity\.",
+        ]))
+    }
+
+    fn from_config(out: Option<String>) -> Overrides {
+        let mut map = std::collections::BTreeMap::new();
+        for line in out.as_deref().unwrap_or_default().lines() {
+            let Some((key, value)) = line.split_once(' ') else {
+                continue;
+            };
+            let Some(check) = key.strip_prefix("githooks.severity.") else {
+                continue;
+            };
+            // Later entries overwrite earlier ones — git's own precedence,
+            // observed rather than reimplemented.
+            match Severity::parse(value.trim()) {
+                Some(s) => {
+                    map.insert(check.to_string(), s);
+                }
+                // An unrecognised value is not an override at all, and must not
+                // shadow a valid earlier one either.
+                None => {
+                    map.remove(check);
+                }
+            }
+        }
+        Overrides(map)
+    }
+
+    /// The severity to apply to `check`, override or declared.
+    pub fn of(&self, check: &dyn Check) -> Severity {
+        self.0
+            .get(check.name())
+            .copied()
+            .unwrap_or_else(|| check.severity())
+    }
+}
+
 /// The override git would actually apply for `check`, or `None` if there is
 /// none (or the value is not one this understands).
 ///
@@ -324,8 +380,68 @@ pub fn one_named(name: &str) -> Option<&'static dyn Check> {
 
 #[cfg(test)]
 mod tests {
-    use super::{lookup, Stage, CHECKS, ENTRYPOINTS};
+    use super::{lookup, Overrides, Severity, Stage, CHECKS, ENTRYPOINTS};
     use std::collections::BTreeSet;
+
+    /// The batch reader must land on the same answer as the authority.
+    ///
+    /// `Overrides` folds `--get-regexp` output with overwrite; `effective_override`
+    /// asks `--get`. They agree only because git emits entries in precedence
+    /// order — an assumption, so it is asserted against real git rather than
+    /// trusted.
+    #[test]
+    fn the_batch_agrees_with_the_authority() {
+        let d = std::env::temp_dir().join(format!("ov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&d)
+                .output()
+                .expect("git");
+        };
+        git(&["init", "-q", "--template=", "."]);
+        let key = "githooks.severity.pre-commit-merge-conflict";
+        git(&["config", "--add", key, "warn"]);
+        git(&["config", "--add", key, "block"]);
+
+        let raw = std::process::Command::new("git")
+            .args(["config", "--get-regexp", r"^githooks\.severity\."])
+            .current_dir(&d)
+            .output()
+            .expect("git");
+        let batch = Overrides::from_config(Some(
+            String::from_utf8_lossy(&raw.stdout).trim().to_string(),
+        ));
+        let authority =
+            crate::git::stdout_in(&d, &["config", "--get", key]).and_then(|v| Severity::parse(&v));
+        let _ = std::fs::remove_dir_all(&d);
+
+        assert_eq!(
+            authority,
+            Some(Severity::Block),
+            "git applies the last entry"
+        );
+        assert_eq!(
+            batch.0.get("pre-commit-merge-conflict").copied(),
+            authority,
+            "the batch reader disagreed with `--get`"
+        );
+    }
+
+    /// An unrecognised value is not an override, and must not shadow a valid
+    /// earlier one either — a typo would otherwise silently restore the
+    /// declared severity in a way nobody could see.
+    #[test]
+    fn an_unrecognised_value_clears_rather_than_overrides() {
+        let o = Overrides::from_config(Some(
+            "githooks.severity.a warn\ngithooks.severity.a advisory\ngithooks.severity.b warn"
+                .to_string(),
+        ));
+        assert_eq!(o.0.get("a"), None, "a typo must not leave `warn` standing");
+        assert_eq!(o.0.get("b").copied(), Some(Severity::Warn));
+    }
 
     #[test]
     fn names_are_unique_across_entrypoints_and_checks() {

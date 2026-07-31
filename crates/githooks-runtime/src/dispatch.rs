@@ -29,8 +29,7 @@
 use std::sync::Mutex;
 
 use crate::check::{Check, Outcome, Severity, Stage};
-use crate::registry::severity_of;
-use crate::registry::{all_stage_checks, Ctx};
+use crate::registry::{all_stage_checks, Ctx, Overrides};
 use crate::ui::{highlight, warning_sign};
 use crate::{cherry_pick_in_progress, configured_skips};
 
@@ -91,25 +90,36 @@ fn announce_skips(dropped: &[&str]) {
 /// Extracted so the concurrency itself can be tested with a rendezvous instead
 /// of a stopwatch — an earlier wall-clock test was flaky the moment the machine
 /// was busy, and a threshold that trips under load teaches you to ignore it.
-fn run_concurrently<T, R, F>(items: &[T], run: F) -> Vec<R>
+fn run_concurrently<T, R, F>(items: &[T], run: F, if_thread_died: R) -> Vec<R>
 where
     T: Sync,
-    R: Send + Default,
+    R: Send + Sync + Clone,
     F: Fn(&T) -> R + Sync,
 {
     let slots: Vec<Mutex<Option<R>>> = items.iter().map(|_| Mutex::new(None)).collect();
     std::thread::scope(|scope| {
         for (item, slot) in items.iter().zip(&slots) {
             let run = &run;
+            let died = &if_thread_died;
             scope.spawn(move || {
-                let code = run(item);
-                *slot.lock().expect("poisoned") = Some(code);
+                // CAUGHT, not propagated. `thread::scope` re-raises a child
+                // panic in the parent, which would abort the whole hook with a
+                // backtrace and throw away the other nineteen checks' results —
+                // and would make `if_thread_died` unreachable, which is what it
+                // was until this test existed to notice.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(item)))
+                    .unwrap_or_else(|_| died.clone());
+                *slot.lock().expect("poisoned") = Some(outcome);
             });
         }
     });
     slots
         .into_iter()
-        .map(|s| s.into_inner().expect("poisoned").unwrap_or_default())
+        .map(|s| {
+            s.into_inner()
+                .expect("poisoned")
+                .unwrap_or_else(|| if_thread_died.clone())
+        })
         .collect()
 }
 
@@ -117,22 +127,36 @@ pub fn pre_commit(ctx: &Ctx) -> i32 {
     if cherry_pick_in_progress(ctx.hooks_dir) {
         return 0;
     }
-    let checks = selected(Stage::PreCommit);
+    run_stage(&selected(Stage::PreCommit), ctx, &Overrides::read())
+}
+
+/// The pre-commit body, over the checks it is GIVEN.
+///
+/// A seam, so a test can hand it a check that panics. Without it the value
+/// standing in for a dead check was a literal at one call site that no test
+/// could reach — the rule was asserted on the runner and merely hoped for here.
+fn run_stage(checks: &[&'static dyn Check], ctx: &Ctx, sev: &Overrides) -> i32 {
     if checks.is_empty() {
         return 0;
     }
+    let outcomes = run_concurrently(
+        checks,
+        |check| {
+            let sub = Ctx {
+                name: check.name(),
+                args: ctx.args,
+                hooks_dir: ctx.hooks_dir,
+                push: ctx.push,
+            };
+            check.run(&sub)
+        },
+        // A check whose thread died has not passed. Stated here, where the slot
+        // is filled, rather than hidden in a `Default` impl that every future
+        // `#[derive(Default)]` would silently inherit.
+        Outcome::Failed,
+    );
 
-    let outcomes = run_concurrently(&checks, |check| {
-        let sub = Ctx {
-            name: check.name(),
-            args: ctx.args,
-            hooks_dir: ctx.hooks_dir,
-            push: ctx.push,
-        };
-        check.run(&sub)
-    });
-
-    report(&checks, &outcomes)
+    report(checks, &outcomes, sev)
 }
 
 /// Turn outcomes into an exit code, and say what did not run.
@@ -140,7 +164,7 @@ pub fn pre_commit(ctx: &Ctx) -> i32 {
 /// A `Warn` check that fails is reported and does not block — that is the whole
 /// of the severity feature. `Unavailable` never blocks either, but it is
 /// announced, because a check that could not run is not a check that passed.
-fn report(checks: &[&'static dyn Check], outcomes: &[Outcome]) -> i32 {
+fn report(checks: &[&'static dyn Check], outcomes: &[Outcome], sev: &Overrides) -> i32 {
     let mut blocked = Vec::new();
     let mut downgraded = Vec::new();
     let mut unavailable = Vec::new();
@@ -154,7 +178,7 @@ fn report(checks: &[&'static dyn Check], outcomes: &[Outcome]) -> i32 {
             // blocking has to be said by someone.
             Outcome::Passed | Outcome::Warned => {}
             Outcome::Unavailable => unavailable.push(check.name()),
-            Outcome::Failed => match severity_of(*check) {
+            Outcome::Failed => match sev.of(*check) {
                 Severity::Block => blocked.push(check.name()),
                 Severity::Warn => downgraded.push(check.name()),
             },
@@ -192,6 +216,7 @@ fn report(checks: &[&'static dyn Check], outcomes: &[Outcome]) -> i32 {
 
 pub fn pre_push(ctx: &Ctx) -> i32 {
     // NB: no CHERRY_PICK_HEAD check here — the zsh pre-push had none either.
+    let sev = Overrides::read();
     for check in selected(Stage::PrePush) {
         let sub = Ctx {
             name: check.name(),
@@ -211,7 +236,7 @@ pub fn pre_push(ctx: &Ctx) -> i32 {
                 )
             }
             Outcome::Warned => {}
-            Outcome::Failed => match severity_of(check) {
+            Outcome::Failed => match sev.of(check) {
                 Severity::Warn => println!(
                     "{} {} reported a problem (severity warn)",
                     warning_sign(),
@@ -250,6 +275,12 @@ mod tests {
         }
     }
 
+    /// No overrides configured. `report` takes them as a VALUE now, so its
+    /// tests need no repository and no git at all.
+    fn none() -> Overrides {
+        Overrides::default()
+    }
+
     static BLOCKER: Builtin = stub("stub-blocker", Severity::Block);
     static WARNER: Builtin = stub("stub-warner", Severity::Warn);
 
@@ -263,13 +294,13 @@ mod tests {
     fn a_blocking_failure_is_the_only_thing_that_fails_the_commit() {
         let b: &dyn Check = &BLOCKER;
         let w: &dyn Check = &WARNER;
-        assert_eq!(report(&[b], &[Outcome::Failed]), 1);
-        assert_eq!(report(&[b], &[Outcome::Passed]), 0);
+        assert_eq!(report(&[b], &[Outcome::Failed], &none()), 1);
+        assert_eq!(report(&[b], &[Outcome::Passed], &none()), 0);
         // Every non-blocking shape, one at a time, so a regression cannot hide
         // behind a passing sibling.
-        assert_eq!(report(&[b], &[Outcome::Warned]), 0);
-        assert_eq!(report(&[b], &[Outcome::Unavailable]), 0);
-        assert_eq!(report(&[w], &[Outcome::Failed]), 0);
+        assert_eq!(report(&[b], &[Outcome::Warned], &none()), 0);
+        assert_eq!(report(&[b], &[Outcome::Unavailable], &none()), 0);
+        assert_eq!(report(&[w], &[Outcome::Failed], &none()), 0);
     }
 
     #[test]
@@ -278,7 +309,8 @@ mod tests {
         assert_eq!(
             report(
                 &checks,
-                &[Outcome::Unavailable, Outcome::Failed, Outcome::Failed]
+                &[Outcome::Unavailable, Outcome::Failed, Outcome::Failed],
+                &none()
             ),
             1
         );
@@ -286,19 +318,72 @@ mod tests {
         assert_eq!(
             report(
                 &checks,
-                &[Outcome::Unavailable, Outcome::Failed, Outcome::Passed]
+                &[Outcome::Unavailable, Outcome::Failed, Outcome::Passed],
+                &none()
             ),
             0
         );
     }
 
     /// The slot of a check whose thread died. Reading that as a pass is how a
-    /// crash becomes a green commit, so the default is pinned here rather than
-    /// left to whatever `derive(Default)` picks up if the variants are
-    /// reordered.
+    /// crash becomes a green commit.
+    ///
+    /// Asserted through the RUNNER, not through a `Default` impl: the rule
+    /// belongs to this call site, and a test on `Outcome::default()` proved
+    /// only that a trait impl existed, not that the runner used it.
+    /// A check that PANICS must fail the commit, not pass it — and must not
+    /// take the other checks down with it.
+    ///
+    /// Driven through the stage body rather than the runner, because the value
+    /// that stands in for a dead check is chosen at the call site and the
+    /// runner's own test cannot see that choice.
     #[test]
-    fn a_missing_outcome_defaults_to_failure() {
-        assert_eq!(Outcome::default(), Outcome::Failed);
+    fn a_panicking_check_blocks_the_commit() {
+        static DIES: Builtin = Builtin {
+            name: "stub-dies",
+            stage: Stage::PreCommit,
+            scope: Scope::ALWAYS,
+            severity: Severity::Block,
+            run: |_| panic!("this check died"),
+        };
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let push = crate::pushrefs::PushRefs::default();
+        let ctx = Ctx {
+            name: "pre-commit",
+            args: &[],
+            hooks_dir: std::path::Path::new("."),
+            push: &push,
+        };
+        let code = run_stage(&[&DIES], &ctx, &none());
+        std::panic::set_hook(hook);
+        assert_eq!(code, 1, "a check that died must not let the commit through");
+    }
+
+    #[test]
+    fn a_thread_that_dies_leaves_a_failure_behind() {
+        // The default hook would print a backtrace for the deliberate panic and
+        // make a passing run look broken.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let items = ["a", "b", "c"];
+        let out = run_concurrently(
+            &items,
+            |n: &&str| {
+                if *n == "b" {
+                    panic!("this check died");
+                }
+                Outcome::Passed
+            },
+            Outcome::Failed,
+        );
+        std::panic::set_hook(hook);
+        assert_eq!(
+            out,
+            vec![Outcome::Passed, Outcome::Failed, Outcome::Passed],
+            "a dead check must not read as one that passed, \
+             and must not take the other checks down with it"
+        );
     }
     use std::time::{Duration, Instant};
 
@@ -312,17 +397,21 @@ mod tests {
         let names: Vec<&'static str> = vec!["a", "b", "c", "d"];
         let n = names.len();
 
-        let out = run_concurrently(&names, move |_: &&str| {
-            ARRIVED.fetch_add(1, Ordering::SeqCst);
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while ARRIVED.load(Ordering::SeqCst) < n {
-                if Instant::now() > deadline {
-                    return 1; // never met the others — execution was serial
+        let out = run_concurrently(
+            &names,
+            move |_: &&str| {
+                ARRIVED.fetch_add(1, Ordering::SeqCst);
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while ARRIVED.load(Ordering::SeqCst) < n {
+                    if Instant::now() > deadline {
+                        return 1; // never met the others — execution was serial
+                    }
+                    std::thread::yield_now();
                 }
-                std::thread::yield_now();
-            }
-            0
-        });
+                0
+            },
+            1,
+        );
         assert!(
             out.iter().all(|c| *c == 0),
             "tasks did not overlap: {out:?}"
@@ -332,7 +421,7 @@ mod tests {
     #[test]
     fn results_come_back_in_input_order() {
         let names: Vec<&'static str> = vec!["first", "second", "third"];
-        let out = run_concurrently(&names, |n| if *n == "second" { 7 } else { 0 });
+        let out = run_concurrently(&names, |n| if *n == "second" { 7 } else { 0 }, -1);
         assert_eq!(out, vec![0, 7, 0], "results keep the input order");
     }
 

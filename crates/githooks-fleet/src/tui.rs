@@ -356,6 +356,18 @@ const ACCENT: Color = Color::Cyan;
 /// Named once so the pane and its tests cannot drift apart.
 const DECLARED_FILE: &str = githooks_runtime::manifest::MANIFEST;
 
+/// `*` or `*.sh,*.bash`, as the manifest writes it.
+fn scope_of(exts: &[String]) -> String {
+    if exts.is_empty() {
+        "*".to_string()
+    } else {
+        exts.iter()
+            .map(|e| format!("*{e}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
 /// How the highlighted row is marked.
 ///
 /// Reverse video, NOT an accent foreground. A row style with `fg` overrides the
@@ -585,7 +597,7 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
                 // Declared checks, with unusable lines called out. A count
                 // alone would let "3 custom checks" and "3 custom checks, two
                 // of which have never run" render identically.
-                let broken = r.declared.iter().filter(|d| d.broken.is_some()).count();
+                let broken = r.declared.iter().filter(|d| d.is_unusable()).count();
                 let text = match (r.declared.len(), broken) {
                     (0, _) => "-".to_string(),
                     (n, 0) => n.to_string(),
@@ -779,26 +791,22 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
             Line::from(format!("{DECLARED_FILE} (declared here)")).style(tint(app.color, ACCENT)),
         );
         for d in &r.declared {
-            let scope = if d.exts.is_empty() {
-                "*".to_string()
-            } else {
-                d.exts
-                    .iter()
-                    .map(|e| format!("*{e}"))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            };
-            match &d.broken {
+            match &d.state {
                 // The verdict first, as in the hook.skip block: a long command
                 // must not push the reason it never runs off the right edge.
-                Some(why) => lines.push(
+                crate::scan::DeclaredState::Unusable { why } => lines.push(
                     Line::from(format!("  {:<18} ! {why}", d.name))
                         .style(tint(app.color, Color::Red)),
                 ),
-                None => lines.push(Line::from(format!(
-                    "  {:<18} {:<6} {:<10} {}",
-                    d.name, d.stage, scope, d.command
-                ))),
+                crate::scan::DeclaredState::Usable { exts, command, .. } => {
+                    lines.push(Line::from(format!(
+                        "  {:<18} {:<6} {:<10} {}",
+                        d.name,
+                        d.stage,
+                        scope_of(exts),
+                        command
+                    )))
+                }
             }
         }
     }
@@ -1415,13 +1423,20 @@ mod tests {
     }
 
     fn declared(name: &str, broken: Option<&str>) -> crate::scan::DeclaredCheck {
-        crate::scan::DeclaredCheck {
+        use crate::scan::{DeclaredCheck, DeclaredState};
+        DeclaredCheck {
             name: name.to_string(),
             stage: "pre-commit".to_string(),
-            severity: "block".to_string(),
-            exts: vec![".sh".to_string()],
-            command: "make lint".to_string(),
-            broken: broken.map(str::to_owned),
+            state: match broken {
+                Some(why) => DeclaredState::Unusable {
+                    why: why.to_string(),
+                },
+                None => DeclaredState::Usable {
+                    severity: "block".to_string(),
+                    exts: vec![".sh".to_string()],
+                    command: "make lint".to_string(),
+                },
+            },
         }
     }
 
