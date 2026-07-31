@@ -136,7 +136,7 @@ fn nothing_is_stashed_mid_merge() {
 /// `githooks restore` is the recovery path for when even the signal handler was
 /// interrupted.
 #[test]
-fn restore_puts_back_a_parked_patch() {
+fn restore_puts_back_held_files() {
     let r = Repo::new();
     seed(&r);
     r.stage("x.json", VALID);
