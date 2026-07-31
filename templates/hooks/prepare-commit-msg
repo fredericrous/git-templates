@@ -14,8 +14,12 @@
 # with an environment that often lacks ~/.local/bin or ~/.cargo/bin. A shim that
 # only did `exec githooks` would work in the terminal and fail in the GUI. So:
 #   1. $GIT_HOOKS_BIN   — escape hatch; also how `make test` points at target/debug
-#   2. __GITHOOKS_BIN__ — absolute path written in by `make install`, when
-#                         installing to a custom INSTALL_BIN_DIR
+#   2. the baked path   — an absolute path written into this shim by
+#                         `githooks install`. The placeholder token is NOT
+#                         spelled out in this comment: substitution is a plain
+#                         global replace, so a comment containing the token gets
+#                         rewritten too, and the explanation turns into a machine
+#                         path. It did, for as long as this said otherwise.
 #   3. $HOME/.local/bin — the default install location, resolved at RUNTIME so
 #                         this template stays machine-agnostic. Without it, a
 #                         repo created by `git init` from a template dir that is

@@ -21,15 +21,16 @@ use std::path::Path;
 
 use serde::Serialize;
 
-/// The shim, embedded at build time so the tool reports correctly from any
-/// directory rather than only inside a checkout. All four dispatcher templates
-/// are one blob; `templates_are_still_one_blob` fails if that stops being true.
-pub const TEMPLATE: &str = include_str!("../../../templates/hooks/pre-commit");
-
-pub const PLACEHOLDER: &str = "__GITHOOKS_BIN__";
-
-/// The four hook names git actually invokes, in the order the UI shows them.
-pub const DISPATCHERS: [&str; 4] = ["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"];
+/// The shim, the placeholder and the hook names come from the RUNTIME, which is
+/// what installs them.
+///
+/// They used to be a second `include_str!` and a second copy of the constants
+/// here. That was survivable while nothing else baked shims, and stopped being
+/// so the moment `githooks install` existed: drift detection compares a repo's
+/// shim against `render(path)`, so if the installer and the dashboard disagreed
+/// by one byte, every correctly installed repo in the fleet would report as
+/// drifted. Re-exported rather than re-declared so they cannot.
+pub use githooks_runtime::install::{DISPATCHERS, PLACEHOLDER, SHIM as TEMPLATE};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -60,7 +61,7 @@ pub enum BakeState {
 }
 
 pub fn render(binary: &str) -> String {
-    TEMPLATE.replace(PLACEHOLDER, binary)
+    githooks_runtime::install::bake(TEMPLATE, binary)
 }
 
 /// Recover the substituted path, or `None` if this file is not the template
@@ -142,15 +143,28 @@ mod tests {
         }
     }
 
-    /// The placeholder appears three times, one inside a comment. A renderer
-    /// that substituted only the executable occurrences would produce a file
-    /// that never matches anything `make install` writes.
+    /// EVERY occurrence, whatever the count. It used to assert exactly three,
+    /// which is a fact about today's shim text rather than about the renderer —
+    /// rewording a comment that mentioned the token broke it while nothing was
+    /// wrong. What matters is that the installer and this agree, which the
+    /// shared constants now make structural, and that none survives.
     #[test]
     fn every_occurrence_is_substituted() {
-        assert_eq!(TEMPLATE.matches(PLACEHOLDER).count(), 3);
+        let expected = TEMPLATE.matches(PLACEHOLDER).count();
+        assert!(expected > 0, "the template lost its placeholder entirely");
         let out = render("/opt/githooks");
-        assert!(!out.contains(PLACEHOLDER));
-        assert_eq!(out.matches("/opt/githooks").count(), 3);
+        assert!(!out.contains(PLACEHOLDER), "a placeholder survived");
+        assert_eq!(out.matches("/opt/githooks").count(), expected);
+    }
+
+    /// The dashboard and the installer must produce the same bytes, or a
+    /// correctly installed repo reads as drifted.
+    #[test]
+    fn the_dashboard_renders_what_the_installer_writes() {
+        assert_eq!(
+            render("/opt/githooks"),
+            githooks_runtime::install::bake(githooks_runtime::install::SHIM, "/opt/githooks")
+        );
     }
 
     #[test]
