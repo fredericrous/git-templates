@@ -7,6 +7,7 @@
 //! ```text
 //! githooks --hooks-dir <dir> <hook-name> [args…]
 //! githooks list | install | uninstall [--binary] | trust [--show|--revoke]
+//! githooks run [<check>] [--all-files]
 //! ```
 
 use std::ffi::OsString;
@@ -48,6 +49,52 @@ fn main() {
     // that decides whether a directory may be emptied has ONE implementation,
     // tested on every platform, rather than one in `make` and another in
     // PowerShell for the Windows users who have no `make` at all.
+    if rest.first().is_some_and(|a| a == "run") || hook.as_deref() == Some("run") {
+        let all_files = rest.iter().any(|a| a == "--all-files");
+        // A named check runs alone; otherwise the whole pre-commit stage.
+        let named = rest
+            .iter()
+            .filter_map(|a| a.to_str())
+            .find(|a| !a.starts_with("--") && *a != "run")
+            .map(str::to_owned);
+        let push = pushrefs::PushRefs::default();
+        let hooks_dir = hooks_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(".git/hooks"));
+        let name = named.clone().unwrap_or_else(|| "pre-commit".to_string());
+        let ctx = registry::Ctx {
+            name: &name,
+            args: &[],
+            hooks_dir: &hooks_dir,
+            push: &push,
+        };
+        if all_files {
+            let files = std::process::Command::new("git")
+                .args(["ls-files"])
+                .output()
+                .ok()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            githooks_runtime::hooks::common::override_file_set(files);
+        }
+        let verdict = match named {
+            Some(check) => match registry::lookup(&check) {
+                Some(run_check) => run_check(&ctx),
+                None => {
+                    eprintln!("githooks: unknown check {check:?} — try `githooks list`");
+                    std::process::exit(2);
+                }
+            },
+            None => githooks_runtime::dispatch::run_all(&ctx, all_files),
+        };
+        std::process::exit(verdict.exit_code());
+    }
+
     if rest.first().is_some_and(|a| a == "trust") || hook.as_deref() == Some("trust") {
         std::process::exit(match githooks_runtime::trust::command(&rest) {
             Ok(()) => 0,
