@@ -136,6 +136,35 @@ pub enum Severity {
     Warn,
 }
 
+impl Severity {
+    /// The ONE mapping from configured text to severity.
+    ///
+    /// There were four: this key's reader, the manifest's severity column, the
+    /// dashboard's copy, and the dashboard's reverse mapping for `--json`. They
+    /// agreed, but nothing made them — and the dashboard's copy is its
+    /// prediction of what the dispatcher will do, which is the one thing it must
+    /// never get wrong.
+    ///
+    /// `None` for anything else, deliberately: git validates nothing here, so an
+    /// unrecognised value must fall back to the declared severity rather than
+    /// silently disable a check.
+    pub fn parse(value: &str) -> Option<Severity> {
+        match value {
+            "warn" => Some(Severity::Warn),
+            "block" => Some(Severity::Block),
+            _ => None,
+        }
+    }
+
+    /// How it is written in config and in `--json`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Severity::Block => "block",
+            Severity::Warn => "warn",
+        }
+    }
+}
+
 /// One check, whether compiled in or declared by the repository.
 ///
 /// `Sync` because `pre-commit` hands every check to its own thread. Both
@@ -179,6 +208,18 @@ impl Check for Builtin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Round-trips, and refuses everything else. A `Some` for an unknown value
+    /// would turn a typo into a silent disable.
+    #[test]
+    fn severity_parses_exactly_the_two_words_it_documents() {
+        for s in [Severity::Block, Severity::Warn] {
+            assert_eq!(Severity::parse(s.as_str()), Some(s));
+        }
+        for bad in ["", "Warn", "WARN", "advisory", "true", "1", " warn"] {
+            assert_eq!(Severity::parse(bad), None, "{bad:?} must not parse");
+        }
+    }
 
     #[test]
     fn always_matches_anything() {

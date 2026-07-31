@@ -98,11 +98,9 @@ mod tests {
     /// thing the refactor removed.
     fn repo_with_files(files: &[&str], skips: &[&str], managed: bool) -> Repo {
         let paths: Vec<String> = files.iter().map(|s| s.to_string()).collect();
-        let applicable = githooks_runtime::registry::CHECKS
-            .iter()
-            .filter(|c| c.scope.matches(&paths))
-            .map(|c| c.name.to_string())
-            .collect();
+        // The PRODUCTION filter, not a copy of it: a fixture that recomputes
+        // the thing under test keeps passing when the thing under test breaks.
+        let applicable = crate::scan::applicable_from_paths(&paths);
         Repo {
             path: PathBuf::from("r"),
             managed,

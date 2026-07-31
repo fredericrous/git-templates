@@ -14,6 +14,7 @@
 //! Read-only, like `skips` was at first. Toggling severity from the UI is a
 //! later change; being able to SEE it does not have to wait for that.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
@@ -33,6 +34,20 @@ pub enum Level {
     Unrecognised,
 }
 
+impl Level {
+    /// Read through the RUNTIME's parser, never a copy of it. This type exists
+    /// only because the dashboard needs a third state — `Unrecognised` — that
+    /// the dispatcher does not: to the hook an unknown value is simply absent,
+    /// while here it is a line somebody wrote that does nothing.
+    fn of(value: &str) -> Level {
+        match githooks_runtime::check::Severity::parse(value) {
+            Some(githooks_runtime::check::Severity::Warn) => Level::Warn,
+            Some(githooks_runtime::check::Severity::Block) => Level::Block,
+            None => Level::Unrecognised,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SeverityOverride {
     /// The key's last component, exactly as configured.
@@ -41,6 +56,17 @@ pub struct SeverityOverride {
     pub value: String,
     pub level: Level,
     pub scope: Scope,
+    /// Whether this is the entry git would actually apply.
+    ///
+    /// `--get-regexp` lists EVERY entry; the dispatcher asks `--get`, which
+    /// returns the last one, so a local `block` beats a global `warn`. Listing
+    /// both and treating each as authoritative made the dashboard report a
+    /// downgrade the dispatcher does not apply — measured, with global `warn`
+    /// and local `block` on one check.
+    ///
+    /// Shadowed entries are still SHOWN. Somebody wrote them, and knowing a
+    /// global downgrade is being overridden here is worth more than a tidy list.
+    pub effective: bool,
 }
 
 impl SeverityOverride {
@@ -54,16 +80,17 @@ impl SeverityOverride {
     }
 
     /// The downgrade itself — a check that runs, reports, and does not block.
+    ///
+    /// Only when this entry is the one git applies: a shadowed `warn` weakens
+    /// nothing.
     pub fn weakens(&self) -> bool {
-        self.level == Level::Warn && all_checks().contains(&self.check.as_str())
+        self.effective && self.level == Level::Warn && all_checks().contains(&self.check.as_str())
     }
-}
 
-fn level_of(value: &str) -> Level {
-    match value {
-        "warn" => Level::Warn,
-        "block" => Level::Block,
-        _ => Level::Unrecognised,
+    /// Configured, but overridden by a later entry. Not damage — but not
+    /// nothing either, which is why it is shown rather than filtered out.
+    pub fn shadowed(&self) -> bool {
+        !self.effective
     }
 }
 
@@ -85,7 +112,39 @@ pub fn read(repo: &Path) -> Vec<SeverityOverride> {
     else {
         return Vec::new();
     };
-    parse(&String::from_utf8_lossy(&out.stdout))
+    let mut entries = parse(&String::from_utf8_lossy(&out.stdout));
+    mark_effective(repo, &mut entries);
+    entries
+}
+
+/// Ask git, once per distinct check, which value it would actually apply, and
+/// flag the entries that match it.
+///
+/// The question is answered by the RUNTIME — the same call the dispatcher makes
+/// — rather than by re-deriving precedence here. Config precedence is git's
+/// (system, then global, then local, then includes), and a reimplementation
+/// would be a second opinion about the one thing this column must not get
+/// wrong.
+fn mark_effective(repo: &Path, entries: &mut [SeverityOverride]) {
+    let mut asked: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for e in entries.iter() {
+        asked.entry(e.check.clone()).or_insert_with(|| {
+            githooks_runtime::git::stdout_in(
+                repo,
+                &[
+                    "config",
+                    "--get",
+                    &githooks_runtime::registry::severity_key(&e.check),
+                ],
+            )
+        });
+    }
+    for e in entries.iter_mut() {
+        // A duplicate of the winning VALUE is indistinguishable from the winner
+        // and is treated as effective too. That errs toward showing a downgrade
+        // rather than hiding one, which is the safe direction for this column.
+        e.effective = asked.get(&e.check).and_then(|v| v.as_deref()) == Some(e.value.as_str());
+    }
 }
 
 /// Split out from `read` so the origins can be exercised without arranging for
@@ -108,8 +167,10 @@ fn parse(stdout: &str) -> Vec<SeverityOverride> {
             Some(SeverityOverride {
                 check: check.to_string(),
                 value: value.to_string(),
-                level: level_of(value),
+                level: Level::of(value),
                 scope: scope_of(origin),
+                // Resolved by `mark_effective`, which needs the repository.
+                effective: true,
             })
         })
         .collect()
@@ -121,8 +182,18 @@ pub fn for_test(check: &str, value: &str) -> SeverityOverride {
     SeverityOverride {
         check: check.to_string(),
         value: value.to_string(),
-        level: level_of(value),
+        level: Level::of(value),
         scope: Scope::Local,
+        effective: true,
+    }
+}
+
+/// A configured entry that git overrides with a later one.
+#[cfg(test)]
+pub fn shadowed_for_test(check: &str, value: &str) -> SeverityOverride {
+    SeverityOverride {
+        effective: false,
+        ..for_test(check, value)
     }
 }
 
@@ -223,6 +294,42 @@ mod tests {
             matches!(got[2].scope, Scope::Other { .. }),
             "system config is neither of the two the UI can edit: {:?}",
             got[2].scope
+        );
+    }
+
+    /// End to end against real git, with the precedence that caused the bug.
+    ///
+    /// Two entries on one key rather than a global/local pair: `--get` returns
+    /// the LAST either way, and this needs no `GIT_CONFIG_GLOBAL` — an env var
+    /// a test cannot set without racing every other test in the process.
+    #[test]
+    fn the_entry_git_applies_is_the_one_marked_effective() {
+        let d = std::env::temp_dir().join(format!("sev-eff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&d)
+                .output()
+                .expect("git");
+        };
+        git(&["init", "-q", "--template=", "."]);
+        let key = "githooks.severity.pre-commit-merge-conflict";
+        git(&["config", "--add", key, "warn"]);
+        git(&["config", "--add", key, "block"]);
+
+        let got = read(&d);
+        let _ = std::fs::remove_dir_all(&d);
+
+        assert_eq!(got.len(), 2, "both entries must still be SHOWN: {got:?}");
+        let warn = got.iter().find(|e| e.value == "warn").expect("the warn");
+        let block = got.iter().find(|e| e.value == "block").expect("the block");
+        assert!(!warn.effective, "git applies block, not warn");
+        assert!(block.effective);
+        assert!(
+            !warn.weakens(),
+            "the WARN column would report a downgrade the dispatcher does not apply"
         );
     }
 

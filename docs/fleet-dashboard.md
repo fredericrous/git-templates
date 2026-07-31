@@ -181,6 +181,11 @@ drifted merely because `__GITHOOKS_BIN__` was replaced.
   `2!1` when one of those lines cannot be parsed — a check somebody committed
   that has never once run. `2` and `2!1` describing the same repository is the
   distinction the column exists for.
+- `WARN` counts only the override git would actually APPLY. `--get-regexp`
+  lists every configured entry, but the dispatcher asks `--get`, which returns
+  the last — so a local `block` beats a global `warn`. Counting every entry made
+  the column report a downgrade that never happens; the shadowed entry is still
+  shown in the detail pane, marked `overridden`, because somebody wrote it.
 - `SKIPS` and `WARN` are deliberately two columns, not one total. A skipped check
   does not run; a downgraded one runs, prints its failure, and lets the commit
   through. Summing them would hide the second — which is the one that looks like
