@@ -199,8 +199,8 @@ pub fn install_signal_handler() {
         }
     }
     unsafe {
-        libc_signal(2, on_signal as usize); // SIGINT
-        libc_signal(15, on_signal as usize); // SIGTERM
+        libc_signal(2, on_signal as *const () as usize); // SIGINT
+        libc_signal(15, on_signal as *const () as usize); // SIGTERM
     }
 }
 

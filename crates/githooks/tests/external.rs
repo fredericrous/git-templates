@@ -22,6 +22,11 @@ fn probe(r: &Repo, name: &str, exit: i32) {
     let p = r.path(name);
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // Re-stage AFTER the chmod: the mode is part of what is staged, and the
+    // pre-commit stage now resets the tree to the index — so a probe chmod'd
+    // but not re-added is correctly restored to 644 and cannot execute. Which
+    // is the right behaviour: a commit would not carry the bit either.
+    r.git(&["add", name]);
 }
 
 #[cfg(not(unix))]
