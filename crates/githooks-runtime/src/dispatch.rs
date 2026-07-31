@@ -235,6 +235,28 @@ fn announce(report: &Report) {
     }
 }
 
+/// `githooks run` — every applicable check, on demand.
+///
+/// Two questions, and the mode says which it answers:
+///
+/// - **staged** (default) is "would my commit pass" — the same set a commit
+///   would check, so it is a rehearsal of the hook.
+/// - **`--all-files`** is "does my working tree pass". Deliberately NOT the same
+///   question: on a dirty tree it reports on content that is not committed and
+///   may never be. That is right for adopting a check into an existing
+///   repository, where `git add .` is not an acceptable way to measure the mess,
+///   and it is why `--all-files` takes no stash — there is no staged/unstaged
+///   distinction to protect when the answer is "all of it".
+pub fn run_all(ctx: &Ctx, all_files: bool) -> Verdict {
+    if all_files {
+        let files = crate::git::stdout(&["ls-files"])
+            .map(|out| out.lines().map(str::to_owned).collect())
+            .unwrap_or_default();
+        crate::hooks::common::override_file_set(files);
+    }
+    run_stage(&selected(Stage::PreCommit), ctx, &Overrides::read())
+}
+
 pub fn pre_push(ctx: &Ctx) -> Verdict {
     // NB: no CHERRY_PICK_HEAD check here — the zsh pre-push had none either.
     let severities = Overrides::read();

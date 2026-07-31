@@ -115,6 +115,20 @@ They run alongside the built-ins and obey the same `hook.skip` and
 `githooks.severity.<name>` controls. `githooks list` shows what would run here.
 Full reference: [docs/custom-checks.md](docs/custom-checks.md).
 
+## Running the checks yourself
+
+```sh
+githooks run                    # would my commit pass? (the staged set)
+githooks run --all-files        # does my working tree pass? (git ls-files)
+githooks run pre-commit-prettier
+githooks list                   # what would run here, and why not
+```
+
+The two questions are different on purpose. `--all-files` on a dirty tree
+reports on content that is not committed and may never be — which is what you
+want when adopting a check into an existing repository, where `git add .` is not
+an acceptable way to measure the mess.
+
 Design notes live in `docs/`:
 [hook-architecture.md](docs/hook-architecture.md) (the `Check` trait, shipped),
 [index-fidelity-and-run-modes.md](docs/index-fidelity-and-run-modes.md) (what

@@ -9,10 +9,35 @@ use crate::git;
 use crate::ui::{error_sign, valid_sign, warning_sign};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 /// Staged files, deletions excluded, whose name ends with one of `exts`.
+/// The file set every check asks about, when it is not the staged one.
+///
+/// Set at most once, before any check runs, by `githooks run --all-files`. A
+/// process-level override rather than a parameter because a check's signature
+/// is `(&[OsString])` — it never sees a `Ctx` — and threading a file set
+/// through twenty of them to serve one mode would be a worse trade than a
+/// value that is written once and read many times.
+///
+/// Same shape as `PushRefs`: read once, lent to every check that asks.
+static OVERRIDE: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Make every subsequent `staged_files` answer from `files` instead of the
+/// index. Only the first call counts.
+pub fn override_file_set(files: Vec<String>) {
+    let _ = OVERRIDE.set(files);
+}
+
 /// An empty `exts` returns them all.
 pub fn staged_files(exts: &[&str]) -> Vec<String> {
+    if let Some(all) = OVERRIDE.get() {
+        return all
+            .iter()
+            .filter(|f| exts.is_empty() || exts.iter().any(|e| f.ends_with(e)))
+            .cloned()
+            .collect();
+    }
     let Some(out) = git::stdout(&["diff", "--diff-filter=d", "--cached", "--name-only"]) else {
         return Vec::new();
     };
