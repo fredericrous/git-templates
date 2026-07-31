@@ -17,8 +17,14 @@ impl Sandbox {
         std::fs::create_dir_all(&d).expect("mkdir");
         Sandbox(d)
     }
+    /// Joined component by component, NOT `join("a/b")`.
+    ///
+    /// On Windows `join` keeps a forward slash it was handed, so the one-string
+    /// form yields `C:\tmp\sandbox\.local/bin\githooks.exe` — the same file
+    /// as the installer's path, spelled differently. Comparing the two as
+    /// strings then fails for a reason that has nothing to do with the product.
     fn path(&self, rel: &str) -> PathBuf {
-        self.0.join(rel)
+        rel.split('/').fold(self.0.clone(), |p, c| p.join(c))
     }
     /// Run the installer with HOME and XDG pointed inside the sandbox, so a bug
     /// cannot reach the developer's real configuration.
@@ -101,7 +107,9 @@ fn install_places_the_binary_the_templates_and_the_repo_hooks() {
     assert!(!hook.contains("__GITHOOKS_BIN__"), "shim was not baked");
     assert!(
         hook.contains(bin.to_str().expect("utf8")),
-        "shim does not name the installed binary"
+        "shim names {:?}, not the installed {}",
+        hook.lines().find(|l| l.contains("githooks")),
+        bin.display()
     );
 }
 
