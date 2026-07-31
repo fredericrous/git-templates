@@ -44,6 +44,15 @@ cd <your-repo> && githooks install
 githooks-fleet install --root ~/Developer   # or in bulk
 ```
 
+And off again — which removes our shims and nothing else. A hook you wrote
+yourself is left alone and named; `hook.skip` and `githooks.severity` are never
+touched, because those are your statements about your repository:
+
+```sh
+githooks uninstall              # add --binary to take ~/.local/bin/githooks too
+githooks-fleet uninstall --root ~/Developer
+```
+
 **Everywhere, forever** — an opt-in, and a real one:
 
 ```sh

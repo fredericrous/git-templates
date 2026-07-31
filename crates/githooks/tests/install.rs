@@ -230,6 +230,119 @@ unsafe fn libc_geteuid() -> u32 {
     unsafe { geteuid() }
 }
 
+fn run_verb(s: &Sandbox, cwd: &Path, args: &[&str]) -> (i32, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .args(args)
+        .current_dir(cwd)
+        .env("HOME", &s.0)
+        .env("USERPROFILE", &s.0)
+        .env("XDG_CONFIG_HOME", s.path(".config"))
+        .output()
+        .expect("run githooks");
+    (
+        out.status.code().unwrap_or(-1),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+/// The failure this guard was written for: `install` wrote all four dispatchers
+/// unconditionally, so a `commit-msg` somebody had written themselves was
+/// silently replaced. Same class as the two incidents that overwrote tracked
+/// files, one directory along.
+#[test]
+fn install_refuses_to_overwrite_a_hook_it_did_not_write() {
+    let s = Sandbox::new("foreign");
+    let repo = s.path("repo");
+    init_repo(&repo);
+    let mine = repo.join(".git/hooks/commit-msg");
+    std::fs::create_dir_all(repo.join(".git/hooks")).expect("mkdir");
+    std::fs::write(&mine, "#!/bin/sh\necho MY OWN HOOK\n").expect("write");
+
+    let (code, out) = s.install(&repo);
+    assert_ne!(code, 0, "a silent overwrite reported success:\n{out}");
+    assert!(out.contains("commit-msg"), "must name the file:\n{out}");
+    assert_eq!(
+        std::fs::read_to_string(&mine).expect("read"),
+        "#!/bin/sh\necho MY OWN HOOK\n",
+        "THEIR HOOK WAS OVERWRITTEN"
+    );
+
+    // …and `--force` is how you say you looked at it.
+    let (code, out) = run_verb(&s, &repo, &["install", "--force"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(std::fs::read_to_string(&mine)
+        .expect("read")
+        .contains("githooks"));
+}
+
+#[test]
+fn uninstall_removes_our_shims_and_nothing_else() {
+    let s = Sandbox::new("uninstall");
+    let repo = s.path("repo");
+    init_repo(&repo);
+    assert_eq!(s.install(&repo).0, 0);
+    // A hook of their own, added after we installed.
+    let theirs = repo.join(".git/hooks/post-commit");
+    std::fs::write(&theirs, "#!/bin/sh\necho theirs\n").expect("write");
+    // And policy they set, which is a statement about their repo, not ours.
+    git(&repo, &["config", "hook.skip", "pre-commit-clippy"]);
+
+    let (code, out) = run_verb(&s, &repo, &["uninstall"]);
+    assert_eq!(code, 0, "{out}");
+
+    for name in ["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"] {
+        assert!(
+            !repo.join(".git/hooks").join(name).exists(),
+            "{name} survived uninstall:\n{out}"
+        );
+    }
+    assert!(theirs.exists(), "a hook we did not write was deleted");
+    let skips = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["config", "--get-all", "hook.skip"])
+        .output()
+        .expect("git");
+    assert!(
+        String::from_utf8_lossy(&skips.stdout).contains("pre-commit-clippy"),
+        "uninstall discarded the user's own policy"
+    );
+    // The binary is shared with every other repository.
+    installed_bin(&s);
+}
+
+/// Running it twice must not be an error — it is how somebody makes sure.
+#[test]
+fn uninstalling_twice_is_idempotent() {
+    let s = Sandbox::new("uninstall-twice");
+    let repo = s.path("repo");
+    init_repo(&repo);
+    assert_eq!(s.install(&repo).0, 0);
+    assert_eq!(run_verb(&s, &repo, &["uninstall"]).0, 0);
+    let (code, out) = run_verb(&s, &repo, &["uninstall"]);
+    assert_eq!(code, 0, "second uninstall failed:\n{out}");
+}
+
+/// `--binary` is opt-in because other repositories are using it.
+#[test]
+fn uninstall_keeps_the_binary_unless_asked() {
+    let s = Sandbox::new("uninstall-bin");
+    let repo = s.path("repo");
+    init_repo(&repo);
+    assert_eq!(s.install(&repo).0, 0);
+    let bin = installed_bin(&s);
+
+    assert_eq!(run_verb(&s, &repo, &["uninstall"]).0, 0);
+    assert!(bin.exists(), "uninstall took the shared binary unasked");
+
+    assert_eq!(run_verb(&s, &repo, &["uninstall", "--binary"]).0, 0);
+    assert!(!bin.exists(), "--binary did not remove it");
+}
+
 /// The installed shim has to actually work — a hook that is written but cannot
 /// run is the failure this whole shim design is arranged against.
 #[test]
