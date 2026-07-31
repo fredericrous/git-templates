@@ -112,6 +112,7 @@ fn write_executable(path: &Path, body: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fix::Intent;
     use crate::fix::{plan, Refusal};
     use crate::scan;
     use std::path::PathBuf;
@@ -151,7 +152,7 @@ mod tests {
         std::fs::write(hooks.join("package.json"), "{\"//\":\"Forces Node\"}").unwrap();
 
         let (repo, abs) = scan_one(&root, "/bin/gh");
-        let p = plan(&repo, &abs, "/bin/gh");
+        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair);
         let out = apply(&p);
 
         assert!(
@@ -180,13 +181,13 @@ mod tests {
 
         let (repo, abs) = scan_one(&root, "/bin/gh");
         assert!(matches!(
-            apply(&plan(&repo, &abs, "/bin/gh")),
+            apply(&plan(&repo, &abs, "/bin/gh", Intent::Repair)),
             Outcome::Applied { .. }
         ));
 
         // Re-scan: the world changed, so the plan must be recomputed.
         let (repo2, abs2) = scan_one(&root, "/bin/gh");
-        let p2 = plan(&repo2, &abs2, "/bin/gh");
+        let p2 = plan(&repo2, &abs2, "/bin/gh", Intent::Repair);
         assert!(p2.is_noop(), "second plan should be empty: {p2:?}");
         assert_eq!(apply(&p2), Outcome::Unchanged);
         let _ = std::fs::remove_dir_all(&root);
@@ -201,7 +202,7 @@ mod tests {
         std::fs::remove_file(hooks.join("pre-push")).unwrap();
 
         let (repo, abs) = scan_one(&root, "/bin/gh");
-        let out = apply(&plan(&repo, &abs, "/bin/gh"));
+        let out = apply(&plan(&repo, &abs, "/bin/gh", Intent::Repair));
         assert!(
             matches!(out, Outcome::Applied { written: 1, .. }),
             "{out:?}"
@@ -221,7 +222,7 @@ mod tests {
         let before = std::fs::read_to_string(hooks.join("pre-commit")).unwrap();
 
         let (repo, abs) = scan_one(&root, "/bin/gh");
-        let p = plan(&repo, &abs, "/bin/gh");
+        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair);
         assert_eq!(p.refuse, vec![Refusal::Unmanaged]);
         assert_eq!(apply(&p), Outcome::Refused);
         assert_eq!(
@@ -244,7 +245,7 @@ mod tests {
         )
         .unwrap();
         let (repo, abs) = scan_one(&root, "/bin/gh");
-        let p = plan(&repo, &abs, "/bin/gh");
+        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair);
         let removals: Vec<_> = p.remove.iter().map(|r| r.path.clone()).collect();
         assert!(!removals.is_empty());
         apply(&p);
@@ -262,7 +263,7 @@ mod tests {
         healthy_shims(&hooks, "/bin/gh");
         std::fs::remove_file(hooks.join("commit-msg")).unwrap();
         let (repo, abs) = scan_one(&root, "/bin/gh");
-        apply(&plan(&repo, &abs, "/bin/gh"));
+        apply(&plan(&repo, &abs, "/bin/gh", Intent::Repair));
         let mode = std::fs::metadata(hooks.join("commit-msg"))
             .unwrap()
             .permissions()

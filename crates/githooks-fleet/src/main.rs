@@ -22,10 +22,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-usage: githooks-fleet [scan|tui|fix] [--root <dir>] [--depth <n>] [--json]
+usage: githooks-fleet [scan|tui|fix|install|uninstall] [--root <dir>] [--depth <n>] [--json]
 
   scan           report the fleet (default)
   tui            the interactive dashboard
+  install        turn hooks on across the root
+  uninstall      take OUR shims back out — never a hook somebody else wrote,
+                 and never hook.skip or githooks.severity
   fix            show what would be changed — DRY RUN unless --apply
   fix --apply    carry out the plan
 
@@ -40,6 +43,12 @@ enum Mode {
     Scan,
     Fix,
     Tui,
+    /// Turn hooks ON across a root. Named after intent, unlike `fix --apply`,
+    /// which does the same writing but reads as repair — which is why nobody
+    /// reached for it when they meant "set this up".
+    Install,
+    /// And off again.
+    Uninstall,
 }
 
 struct Args {
@@ -76,6 +85,18 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             }
             "tui" => {
                 a.mode = Mode::Tui;
+                it.next();
+            }
+            "install" => {
+                a.mode = Mode::Install;
+                // Installing IS applying; requiring `--apply` as well would be
+                // asking twice for one decision.
+                a.apply = true;
+                it.next();
+            }
+            "uninstall" => {
+                a.mode = Mode::Uninstall;
+                a.apply = true;
                 it.next();
             }
             _ => {}
@@ -157,11 +178,46 @@ fn main() -> ExitCode {
     let scan = scan::scan(&args.root, args.depth, &installed);
     let elapsed = started.elapsed();
 
-    if args.mode == Mode::Fix {
+    if args.mode == Mode::Uninstall {
+        let mut removed = 0usize;
+        let mut repos = 0usize;
+        for repo in scan.repos.iter().filter(|r| r.managed) {
+            let hooks = args.root.join(&repo.path).join(".git/hooks");
+            let mut here = 0usize;
+            for name in githooks_runtime::install::DISPATCHERS {
+                let path = hooks.join(name);
+                // Only ours. A hook somebody wrote is not ours to take, and
+                // this is the guard whose absence let `install` clobber one.
+                let ours = std::fs::read_to_string(&path)
+                    .map(|t| githooks_runtime::install::is_our_shim(&t))
+                    .unwrap_or(false);
+                if ours && std::fs::remove_file(&path).is_ok() {
+                    here += 1;
+                }
+            }
+            if here > 0 {
+                repos += 1;
+                removed += here;
+                println!("  {} {here} shims", repo.path.display());
+            }
+        }
+        println!("{removed} shims removed from {repos} repositories");
+        println!("hook.skip and githooks.severity were left alone.");
+        return ExitCode::SUCCESS;
+    }
+
+    if args.mode == Mode::Fix || args.mode == Mode::Install {
         let plans: Vec<fix::FixPlan> = scan
             .repos
             .iter()
-            .map(|r| fix::plan(r, &args.root.join(&r.path), &installed))
+            .map(|r| {
+                let intent = if args.mode == Mode::Install {
+                    fix::Intent::Activate
+                } else {
+                    fix::Intent::Repair
+                };
+                fix::plan(r, &args.root.join(&r.path), &installed, intent)
+            })
             .collect();
         if args.apply {
             let reports: Vec<apply::ApplyReport> = plans

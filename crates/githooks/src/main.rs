@@ -6,6 +6,7 @@
 //!
 //! ```text
 //! githooks --hooks-dir <dir> <hook-name> [args…]
+//! githooks list | install | uninstall [--binary]
 //! ```
 
 use std::ffi::OsString;
@@ -47,14 +48,27 @@ fn main() {
     // that decides whether a directory may be emptied has ONE implementation,
     // tested on every platform, rather than one in `make` and another in
     // PowerShell for the Windows users who have no `make` at all.
-    if rest.first().is_some_and(|a| a == "install") || hook.as_deref() == Some("install") {
-        std::process::exit(match githooks_runtime::install::run() {
+    if rest.first().is_some_and(|a| a == "uninstall") || hook.as_deref() == Some("uninstall") {
+        let also_binary = rest.iter().any(|a| a == "--binary");
+        std::process::exit(match githooks_runtime::install::uninstall(also_binary) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("{e}");
                 1
             }
         });
+    }
+
+    if rest.first().is_some_and(|a| a == "install") || hook.as_deref() == Some("install") {
+        std::process::exit(
+            match githooks_runtime::install::run(rest.iter().any(|a| a == "--force")) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            },
+        );
     }
 
     let (Some(hooks_dir), Some(hook)) = (hooks_dir, hook) else {

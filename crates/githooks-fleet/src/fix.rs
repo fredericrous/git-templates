@@ -33,6 +33,14 @@ pub enum Refusal {
     /// git tracks this path. An install step must never delete tracked source,
     /// whatever the path resolution says.
     Tracked { path: PathBuf },
+    /// A dispatcher file exists here and is not one of ours — somebody wrote
+    /// their own `pre-commit`. Activating would overwrite it.
+    ///
+    /// The planner already refused to touch `pre-commit-*` SUB-hooks it did not
+    /// recognise; the four dispatchers themselves had no such guard, and
+    /// activation is the first mode that writes them into a repository nobody
+    /// had installed into. Same failure, one filename along.
+    ForeignHook { names: Vec<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -103,7 +111,18 @@ pub fn is_tracked(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-pub fn plan(repo: &Repo, repo_abs: &Path, binary: &str) -> FixPlan {
+/// Why we are planning: repairing an installation, or making one.
+///
+/// The difference is exactly one refusal. `fix` declines an unmanaged
+/// repository because there is nothing there to repair and writing into one
+/// would be a decision it was not asked to make. `install` IS that decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Intent {
+    Repair,
+    Activate,
+}
+
+pub fn plan(repo: &Repo, repo_abs: &Path, binary: &str, intent: Intent) -> FixPlan {
     let hooks = repo_abs.join(".git/hooks");
     let mut p = FixPlan {
         repo: repo.path.clone(),
@@ -112,9 +131,15 @@ pub fn plan(repo: &Repo, repo_abs: &Path, binary: &str) -> FixPlan {
         write: Vec::new(),
     };
 
-    if !repo.managed {
+    if !repo.managed && intent == Intent::Repair {
         p.refuse.push(Refusal::Unmanaged);
         return p;
+    }
+    // Activating creates the directory; repairing does not, because a missing
+    // `.git/hooks` in a repo we thought was managed is a fact worth reporting
+    // rather than papering over.
+    if intent == Intent::Activate && !hooks.is_dir() {
+        let _ = std::fs::create_dir_all(&hooks);
     }
     if !hooks.is_dir() {
         p.refuse.push(Refusal::UnreadableHooks);
@@ -140,6 +165,24 @@ pub fn plan(repo: &Repo, repo_abs: &Path, binary: &str) -> FixPlan {
         });
     }
     p.remove.sort_by(|a, b| a.path.cmp(&b.path));
+
+    // Only when activating: repairing a managed repo means its dispatchers are
+    // already ours, and a drifted one is a repair rather than a stranger.
+    if intent == Intent::Activate {
+        let foreign: Vec<String> = DISPATCHERS
+            .into_iter()
+            .filter(|name| {
+                std::fs::read_to_string(hooks.join(name))
+                    .map(|text| !githooks_runtime::install::is_our_shim(&text))
+                    .unwrap_or(false)
+            })
+            .map(str::to_owned)
+            .collect();
+        if !foreign.is_empty() {
+            p.refuse.push(Refusal::ForeignHook { names: foreign });
+            return p;
+        }
+    }
 
     let rendered = shim::render(binary);
     for name in DISPATCHERS {
@@ -196,7 +239,12 @@ mod tests {
 
     #[test]
     fn an_unmanaged_repo_is_refused_not_fixed() {
-        let p = plan(&repo(false), Path::new("/nowhere"), "/bin/gh");
+        let p = plan(
+            &repo(false),
+            Path::new("/nowhere"),
+            "/bin/gh",
+            Intent::Repair,
+        );
         assert_eq!(p.refuse, vec![Refusal::Unmanaged]);
         assert!(
             p.remove.is_empty() && p.write.is_empty(),
@@ -206,7 +254,12 @@ mod tests {
 
     #[test]
     fn a_missing_hooks_dir_is_refused() {
-        let p = plan(&repo(true), Path::new("/definitely/not/here"), "/bin/gh");
+        let p = plan(
+            &repo(true),
+            Path::new("/definitely/not/here"),
+            "/bin/gh",
+            Intent::Repair,
+        );
         assert_eq!(p.refuse, vec![Refusal::UnreadableHooks]);
     }
 
@@ -222,7 +275,7 @@ mod tests {
         r.foreign_subs = vec!["pre-push-mine.sh".into()];
         r.hook_pkgjson = true;
 
-        let p = plan(&r, &dir, "/bin/gh");
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair);
         assert_eq!(p.remove.len(), 3);
         let reasons: Vec<_> = p.remove.iter().map(|r| r.reason).collect();
         assert!(reasons.contains(&RemovalReason::StaleOurs));
@@ -248,7 +301,7 @@ mod tests {
         for n in DISPATCHERS {
             std::fs::write(hooks.join(n), shim::render("/bin/gh")).unwrap();
         }
-        let p = plan(&repo(true), &dir, "/bin/gh");
+        let p = plan(&repo(true), &dir, "/bin/gh", Intent::Repair);
         assert!(p.is_noop(), "{p:?}");
         assert_eq!(p.write.len(), 4);
         let _ = std::fs::remove_dir_all(&dir);

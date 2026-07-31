@@ -32,6 +32,21 @@ pub const PLACEHOLDER: &str = "__GITHOOKS_BIN__";
 /// copy honest against `templates/hooks/`.
 pub const SHIM: &str = include_str!("../../../templates/hooks/pre-commit");
 
+/// A line every shim carries and nothing else does.
+///
+/// `uninstall` needs to answer "is this file ours to delete?" and the answer
+/// must not be "it is named pre-commit". A colleague's own `pre-commit` lives at
+/// the same path and deleting it would be the third time this project destroyed
+/// somebody's file. Marker-based on purpose rather than byte-comparing against
+/// `bake(SHIM, path)`: a shim somebody hand-edited is still ours, and uninstall
+/// should still take it.
+pub const SHIM_MARKER: &str = "git-templates hook shim";
+
+/// Whether a file in `.git/hooks` is one of ours.
+pub fn is_our_shim(text: &str) -> bool {
+    text.contains(SHIM_MARKER)
+}
+
 /// The hook names git actually invokes, and so the only files we install.
 pub const DISPATCHERS: [&str; 4] = ["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"];
 
@@ -149,6 +164,23 @@ fn name_for(exe: &Path) -> String {
     }
 }
 
+/// Hook files in `dir` that exist and are NOT ours.
+///
+/// `install` used to write all four unconditionally, which silently destroyed a
+/// `commit-msg` somebody had written themselves. That is the same failure as the
+/// two that overwrote tracked files, one directory along, and it had no guard at
+/// all — the fleet's `fix` planner has one and the per-repo installer never did.
+fn foreign_hooks(dir: &Path) -> Vec<&'static str> {
+    DISPATCHERS
+        .into_iter()
+        .filter(|name| {
+            std::fs::read_to_string(dir.join(name))
+                .map(|text| !is_our_shim(&text))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 fn write_shims(dir: &Path, bin: &str) -> std::io::Result<usize> {
     let baked = bake(SHIM, bin);
     let mut n = 0;
@@ -178,10 +210,10 @@ fn make_executable(_p: &Path) -> std::io::Result<()> {
 /// Three steps, three functions. This was one 88-line body whose own comments
 /// numbered its sections — which is the tell that the sections wanted to be
 /// functions.
-pub fn run() -> Result<(), String> {
+pub fn run(force: bool) -> Result<(), String> {
     let binary = install_binary()?;
     populate_template_dir(&binary)?;
-    bake_repo_hooks(&binary)
+    bake_repo_hooks(&binary, force)
 }
 
 /// Copy the running binary to a stable location, and return where it now lives.
@@ -251,7 +283,7 @@ fn populate_template_dir(binary: &str) -> Result<(), String> {
 }
 
 /// Bake the shims into the repository we are standing in, if we are in one.
-fn bake_repo_hooks(binary: &str) -> Result<(), String> {
+fn bake_repo_hooks(binary: &str, force: bool) -> Result<(), String> {
     let Some(git_dir) = crate::git::stdout(&["rev-parse", "--git-dir"]) else {
         println!(
             "{} not inside a git repository — no repo hooks written.",
@@ -261,6 +293,18 @@ fn bake_repo_hooks(binary: &str) -> Result<(), String> {
     };
     let hooks = PathBuf::from(git_dir).join("hooks");
     let _ = std::fs::create_dir_all(&hooks);
+
+    // Fail closed, and for the whole repository rather than per file: a partial
+    // install is how a repo ends up with two of four hooks and no way to tell.
+    let foreign = foreign_hooks(&hooks);
+    if !foreign.is_empty() && !force {
+        return Err(format!(
+            "{} {} already has hooks that are not ours: {}\n    Look at them first, then `githooks install --force`.",
+            crate::ui::error_sign(),
+            hooks.display(),
+            foreign.join(", ")
+        ));
+    }
     let written = write_shims(&hooks, binary)
         .map_err(|e| format!("cannot write shims to {}: {e}", hooks.display()))?;
     println!(
@@ -268,6 +312,68 @@ fn bake_repo_hooks(binary: &str) -> Result<(), String> {
         valid_sign(),
         hooks.display()
     );
+    Ok(())
+}
+
+/// Take the shims out of the repository we are standing in.
+///
+/// Deliberately narrow. It removes files that are OURS and nothing else:
+///
+/// - a hook we did not write is left alone and named, because somebody wrote it
+///   on purpose;
+/// - `hook.skip` and `githooks.severity` are never touched — those are the
+///   user's statements about their own repository, not our artefacts, and a
+///   reinstall should not silently forget that they disabled a check;
+/// - the binary goes only when asked, because other repositories are using it.
+pub fn uninstall(remove_binary: bool) -> Result<(), String> {
+    let Some(git_dir) = crate::git::stdout(&["rev-parse", "--git-dir"]) else {
+        return Err("not inside a git repository".to_string());
+    };
+    let hooks = PathBuf::from(git_dir).join("hooks");
+
+    let mut removed = 0usize;
+    let mut foreign: Vec<&str> = Vec::new();
+    for name in DISPATCHERS {
+        let path = hooks.join(name);
+        match std::fs::read_to_string(&path) {
+            Err(_) => {}
+            Ok(text) if is_our_shim(&text) => {
+                std::fs::remove_file(&path)
+                    .map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
+                removed += 1;
+            }
+            Ok(_) => foreign.push(name),
+        }
+    }
+    println!(
+        "{} removed {removed} shims from {}",
+        valid_sign(),
+        hooks.display()
+    );
+    if !foreign.is_empty() {
+        println!(
+            "{} left alone (not ours): {}",
+            warning_sign(),
+            foreign.join(", ")
+        );
+    }
+
+    if remove_binary {
+        let target = bin_dir().join(installed_name());
+        match std::fs::remove_file(&target) {
+            Ok(()) => println!(
+                "{} removed {}",
+                valid_sign(),
+                highlight(&target.to_string_lossy())
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("cannot remove {}: {e}", target.display())),
+        }
+    }
+
+    // Said out loud, because a user who uninstalls and reinstalls should not be
+    // surprised that a check they disabled is still disabled.
+    println!("    hook.skip and githooks.severity were not touched.");
     Ok(())
 }
 
