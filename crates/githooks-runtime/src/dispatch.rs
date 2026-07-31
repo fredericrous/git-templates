@@ -156,62 +156,83 @@ fn run_stage(checks: &[&'static dyn Check], ctx: &Ctx, sev: &Overrides) -> i32 {
         Outcome::Failed,
     );
 
-    report(checks, &outcomes, sev)
+    let report = classify(checks, &outcomes, sev);
+    announce(&report);
+    report.exit_code()
 }
 
-/// Turn outcomes into an exit code, and say what did not run.
+/// What a stage concluded, before anything is printed or exited.
 ///
-/// A `Warn` check that fails is reported and does not block — that is the whole
-/// of the severity feature. `Unavailable` never blocks either, but it is
-/// announced, because a check that could not run is not a check that passed.
-fn report(checks: &[&'static dyn Check], outcomes: &[Outcome], sev: &Overrides) -> i32 {
-    let mut blocked = Vec::new();
-    let mut downgraded = Vec::new();
-    let mut unavailable = Vec::new();
+/// A VALUE, so the classification can be asserted directly. While this was one
+/// function that classified, printed and returned an exit code, its tests could
+/// only check the code — whether the right thing was SAID went untested.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Report<'a> {
+    /// Failed, and the severity that applies blocks.
+    blocked: Vec<&'a str>,
+    /// Failed, but configured to warn. The check printed an error and meant it,
+    /// so somebody has to say it did not block.
+    downgraded: Vec<&'a str>,
+    /// Could not run. Distinct from "passed", which is the whole point.
+    unavailable: Vec<&'a str>,
+}
 
+impl Report<'_> {
+    fn exit_code(&self) -> i32 {
+        if self.blocked.is_empty() {
+            0
+        } else {
+            1
+        }
+    }
+}
+
+/// Pure: outcomes and severities in, a verdict out. No IO.
+fn classify<'a>(checks: &[&'a dyn Check], outcomes: &[Outcome], sev: &Overrides) -> Report<'a> {
+    let mut report = Report::default();
     for (check, outcome) in checks.iter().zip(outcomes) {
         match outcome {
-            // `Warned` needs nothing here: a check that chose to warn has
-            // already said what it wanted to, and a roll-up would only repeat
-            // it. `Failed` under `Severity::Warn` is different — that check
-            // printed an error and means it, so the fact that it is not
-            // blocking has to be said by someone.
+            // `Warned` needs nothing: a check that chose to warn has already
+            // said what it wanted to, and a roll-up would only repeat it.
             Outcome::Passed | Outcome::Warned => {}
-            Outcome::Unavailable => unavailable.push(check.name()),
+            Outcome::Unavailable => report.unavailable.push(check.name()),
             Outcome::Failed => match sev.of(*check) {
-                Severity::Block => blocked.push(check.name()),
-                Severity::Warn => downgraded.push(check.name()),
+                Severity::Block => report.blocked.push(check.name()),
+                Severity::Warn => report.downgraded.push(check.name()),
             },
         }
     }
+    report
+}
 
-    if !unavailable.is_empty() {
+/// Says what happened. Prints; decides nothing.
+fn announce(report: &Report) {
+    if !report.unavailable.is_empty() {
         // Distinct from "passed". Silence here is how a repo looks verified
         // when nothing actually ran — and with twenty checks interleaving
         // their output, a trailing count is the only place you can see it.
         println!(
             "{} {} check(s) could not run: {}",
             warning_sign(),
-            unavailable.len(),
-            unavailable.join(", ")
+            report.unavailable.len(),
+            report.unavailable.join(", ")
         );
     }
-    if !downgraded.is_empty() {
+    if !report.downgraded.is_empty() {
         println!(
             "{} {} check(s) reported a problem but are set to warn: {}",
             warning_sign(),
-            downgraded.len(),
-            downgraded.join(", ")
+            report.downgraded.len(),
+            report.downgraded.join(", ")
         );
     }
-    if blocked.is_empty() {
-        return 0;
+    if report.blocked.is_empty() {
+        return;
     }
     println!("\n🚨  Error raised by:");
-    for f in &blocked {
-        println!("    - {}", highlight(f));
+    for name in &report.blocked {
+        println!("    - {}", highlight(name));
     }
-    1
 }
 
 pub fn pre_push(ctx: &Ctx) -> i32 {
@@ -290,37 +311,73 @@ mod tests {
         [cs[0], cs[1], cs[2]]
     }
 
+    /// The classification itself, which used to be unreachable: while one
+    /// function classified AND printed AND returned a code, a test could assert
+    /// the code and nothing else.
+    #[test]
+    fn every_outcome_lands_in_the_right_bucket() {
+        let checks: [&dyn Check; 4] = [&BLOCKER, &BLOCKER, &WARNER, &BLOCKER];
+        let got = classify(
+            &checks,
+            &[
+                Outcome::Passed,
+                Outcome::Unavailable,
+                Outcome::Failed,
+                Outcome::Failed,
+            ],
+            &none(),
+        );
+        assert_eq!(got.blocked, ["stub-blocker"], "{got:?}");
+        assert_eq!(got.downgraded, ["stub-warner"], "{got:?}");
+        assert_eq!(got.unavailable, ["stub-blocker"], "{got:?}");
+    }
+
+    /// A clean stage concludes nothing at all — not an empty message, no
+    /// message. Twenty checks that passed should print no roll-ups.
+    #[test]
+    fn a_clean_stage_has_nothing_to_report() {
+        let checks: [&dyn Check; 2] = [&BLOCKER, &WARNER];
+        let got = classify(&checks, &[Outcome::Passed, Outcome::Warned], &none());
+        assert_eq!(got, Report::default());
+        assert_eq!(got.exit_code(), 0);
+    }
+
     #[test]
     fn a_blocking_failure_is_the_only_thing_that_fails_the_commit() {
         let b: &dyn Check = &BLOCKER;
         let w: &dyn Check = &WARNER;
-        assert_eq!(report(&[b], &[Outcome::Failed], &none()), 1);
-        assert_eq!(report(&[b], &[Outcome::Passed], &none()), 0);
+        assert_eq!(classify(&[b], &[Outcome::Failed], &none()).exit_code(), 1);
+        assert_eq!(classify(&[b], &[Outcome::Passed], &none()).exit_code(), 0);
         // Every non-blocking shape, one at a time, so a regression cannot hide
         // behind a passing sibling.
-        assert_eq!(report(&[b], &[Outcome::Warned], &none()), 0);
-        assert_eq!(report(&[b], &[Outcome::Unavailable], &none()), 0);
-        assert_eq!(report(&[w], &[Outcome::Failed], &none()), 0);
+        assert_eq!(classify(&[b], &[Outcome::Warned], &none()).exit_code(), 0);
+        assert_eq!(
+            classify(&[b], &[Outcome::Unavailable], &none()).exit_code(),
+            0
+        );
+        assert_eq!(classify(&[w], &[Outcome::Failed], &none()).exit_code(), 0);
     }
 
     #[test]
     fn one_blocking_failure_among_many_still_fails() {
         let checks = as_checks([&BLOCKER, &WARNER, &BLOCKER]);
         assert_eq!(
-            report(
+            classify(
                 &checks,
                 &[Outcome::Unavailable, Outcome::Failed, Outcome::Failed],
                 &none()
-            ),
+            )
+            .exit_code(),
             1
         );
         // Same shape, with the only *blocking* failure removed.
         assert_eq!(
-            report(
+            classify(
                 &checks,
                 &[Outcome::Unavailable, Outcome::Failed, Outcome::Passed],
                 &none()
-            ),
+            )
+            .exit_code(),
             0
         );
     }

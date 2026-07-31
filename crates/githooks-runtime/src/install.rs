@@ -174,93 +174,111 @@ fn make_executable(_p: &Path) -> std::io::Result<()> {
 
 /// Install: copy this binary somewhere stable, populate the template directory
 /// if that is safe, and bake the current repository's hooks.
+///
+/// Three steps, three functions. This was one 88-line body whose own comments
+/// numbered its sections — which is the tell that the sections wanted to be
+/// functions.
 pub fn run() -> i32 {
-    let Ok(me) = std::env::current_exe() else {
-        eprintln!("cannot locate the running binary");
-        return 1;
-    };
-
-    // 1. The binary.
-    let dir = bin_dir();
-    let target = dir.join(installed_name());
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("cannot create {}: {e}", dir.display());
-        return 1;
+    match install() {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
     }
+}
+
+fn install() -> Result<(), String> {
+    let binary = install_binary()?;
+    populate_template_dir(&binary)?;
+    bake_repo_hooks(&binary)
+}
+
+/// Copy the running binary to a stable location, and return where it now lives.
+fn install_binary() -> Result<String, String> {
+    let me =
+        std::env::current_exe().map_err(|e| format!("cannot locate the running binary: {e}"))?;
+    let dir = bin_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+
+    let target = dir.join(installed_name());
     // Copying a running binary over ITSELF fails on some platforms and is
     // pointless on all of them.
-    let same = me.canonicalize().ok() == target.canonicalize().ok();
-    if !same {
-        if let Err(e) = std::fs::copy(&me, &target) {
-            eprintln!("cannot install to {}: {e}", target.display());
-            return 1;
-        }
-        if let Err(e) = make_executable(&target) {
-            eprintln!("cannot chmod {}: {e}", target.display());
-            return 1;
-        }
+    let already_there = me.canonicalize().ok() == target.canonicalize().ok();
+    if !already_there {
+        std::fs::copy(&me, &target)
+            .map_err(|e| format!("cannot install to {}: {e}", target.display()))?;
+        make_executable(&target).map_err(|e| format!("cannot chmod {}: {e}", target.display()))?;
     }
-    let bin = target.to_string_lossy().into_owned();
-    println!("{} installed {}", valid_sign(), highlight(&bin));
+    let installed = target.to_string_lossy().into_owned();
+    println!("{} installed {}", valid_sign(), highlight(&installed));
+    Ok(installed)
+}
 
-    // 2. The template directory, if touching it is safe.
-    let tpl = template_hooks_dir();
-    let _ = std::fs::create_dir_all(&tpl);
+/// Write the shims into the template directory — unless doing so would delete
+/// somebody's source.
+///
+/// REFUSING is not an error: on a machine where the template dir is the
+/// checkout, there is nothing to install and the install has succeeded. FAILING
+/// to write one it was allowed to write is, though — reporting success after a
+/// step did not happen is the thing this whole codebase is arranged against.
+fn populate_template_dir(binary: &str) -> Result<(), String> {
+    let dir = template_hooks_dir();
+    let _ = std::fs::create_dir_all(&dir);
     // Report the RESOLVED path. "It is the checkout" is only useful with the
     // checkout named, and the configured path is usually the symlink that hides
     // exactly that.
-    let shown = tpl.canonicalize().unwrap_or_else(|_| tpl.clone());
-    let tpl_display = shown.display();
-    match verdict(&tpl) {
+    let shown = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+    let shown = shown.display();
+
+    match verdict(&dir) {
         Verdict::IsCheckout => {
             println!(
-                "{} template dir IS the checkout ({tpl_display}) — nothing to install.",
+                "{} template dir IS the checkout ({shown}) — nothing to install.",
                 warning_sign()
             );
             println!("    Its shims keep the placeholder deliberately and resolve");
-            println!("    {bin} at run time. This is the intended setup.");
+            println!("    {binary} at run time. This is the intended setup.");
         }
         Verdict::InsideCheckout => println!(
-            "{} {tpl_display} is inside a git checkout — leaving it alone.",
+            "{} {shown} is inside a git checkout — leaving it alone.",
             warning_sign()
         ),
         Verdict::NoGit => println!(
             "{} git is not on PATH — refusing to delete anything.",
             warning_sign()
         ),
-        Verdict::Unresolvable => println!(
-            "{} cannot resolve {} — skipping.",
-            warning_sign(),
-            tpl.display()
-        ),
-        Verdict::Safe => match write_shims(&tpl, &bin) {
-            Ok(n) => println!("{} wrote {n} shims to {tpl_display}", valid_sign()),
-            Err(e) => {
-                eprintln!("cannot write shims to {}: {e}", tpl.display());
-                return 1;
-            }
-        },
-    }
-
-    // 3. This repository's own hooks, when run inside one.
-    match crate::git::stdout(&["rev-parse", "--git-dir"]) {
-        Some(gd) => {
-            let hooks = PathBuf::from(gd).join("hooks");
-            let _ = std::fs::create_dir_all(&hooks);
-            match write_shims(&hooks, &bin) {
-                Ok(n) => println!("{} baked {n} shims into {}", valid_sign(), hooks.display()),
-                Err(e) => {
-                    eprintln!("cannot write shims to {}: {e}", hooks.display());
-                    return 1;
-                }
-            }
+        Verdict::Unresolvable => {
+            println!("{} cannot resolve {shown} — skipping.", warning_sign())
         }
-        None => println!(
+        Verdict::Safe => {
+            let written = write_shims(&dir, binary)
+                .map_err(|e| format!("cannot write shims to {shown}: {e}"))?;
+            println!("{} wrote {written} shims to {shown}", valid_sign());
+        }
+    }
+    Ok(())
+}
+
+/// Bake the shims into the repository we are standing in, if we are in one.
+fn bake_repo_hooks(binary: &str) -> Result<(), String> {
+    let Some(git_dir) = crate::git::stdout(&["rev-parse", "--git-dir"]) else {
+        println!(
             "{} not inside a git repository — no repo hooks written.",
             warning_sign()
-        ),
-    }
-    0
+        );
+        return Ok(());
+    };
+    let hooks = PathBuf::from(git_dir).join("hooks");
+    let _ = std::fs::create_dir_all(&hooks);
+    let written = write_shims(&hooks, binary)
+        .map_err(|e| format!("cannot write shims to {}: {e}", hooks.display()))?;
+    println!(
+        "{} baked {written} shims into {}",
+        valid_sign(),
+        hooks.display()
+    );
+    Ok(())
 }
 
 #[cfg(test)]

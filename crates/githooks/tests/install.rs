@@ -191,6 +191,45 @@ fn outside_a_repository_it_installs_what_it_can() {
     );
 }
 
+/// Refusing to touch a checkout is success; FAILING a write it was allowed to
+/// make is not. Reporting success after a step did not happen is the failure
+/// this whole codebase is arranged against.
+#[cfg(unix)]
+#[test]
+fn a_template_dir_it_cannot_write_fails_the_install() {
+    use std::os::unix::fs::PermissionsExt;
+    // root ignores the permission bits and the test would prove nothing.
+    if unsafe { libc_geteuid() } == 0 {
+        return;
+    }
+    let s = Sandbox::new("readonly");
+    let repo = s.path("repo");
+    init_repo(&repo);
+    let tpl = s.path(".config/git/git-templates/templates/hooks");
+    std::fs::create_dir_all(&tpl).expect("mkdir");
+    std::fs::set_permissions(&tpl, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+
+    let (code, out) = s.install(&repo);
+    // Restore before the sandbox is dropped, or cleanup cannot remove it.
+    let _ = std::fs::set_permissions(&tpl, std::fs::Permissions::from_mode(0o755));
+
+    assert_ne!(code, 0, "a failed write reported success:\n{out}");
+    assert!(
+        out.contains("cannot write shims"),
+        "and did not say what failed:\n{out}"
+    );
+}
+
+#[cfg(unix)]
+unsafe fn libc_geteuid() -> u32 {
+    // One extern rather than a dependency: the commit path's crate graph is
+    // guarded, and this is a test-only three-liner.
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    unsafe { geteuid() }
+}
+
 /// The installed shim has to actually work — a hook that is written but cannot
 /// run is the failure this whole shim design is arranged against.
 #[test]

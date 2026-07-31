@@ -157,6 +157,23 @@ impl Line {
             Line::Broken { lineno, why, .. } => Some(format!("line {lineno}: {why}")),
         }
     }
+
+    /// Consume into the identity every line has, and either the declaration or
+    /// the reason there is none.
+    ///
+    /// Both consumers — `External::from` and the fleet's projection — used to
+    /// destructure this by hand, and both carried an arm for a combination the
+    /// type forbids, because they computed the reason BEFORE matching. Written
+    /// once, that arm has nowhere to appear.
+    pub fn into_parts(self) -> (String, Stage, Result<Declared, String>) {
+        let name = self.name().to_string();
+        let stage = self.stage();
+        let parsed = match self {
+            Line::Usable(d) => Ok(d),
+            Line::Broken { lineno, why, .. } => Err(format!("line {lineno}: {why}")),
+        };
+        (name, stage, parsed)
+    }
 }
 
 /// A check a repository declares, rather than one compiled in.
@@ -439,10 +456,9 @@ fn broken_at(lineno: usize, name: String, stage: Option<Stage>, why: ParseError)
 
 impl From<Line> for External {
     fn from(l: Line) -> External {
-        let why = l.broken();
-        let (name, stage) = (l.name().to_string(), l.stage());
-        let kind = match (l, why) {
-            (Line::Usable(d), _) => Kind::Runnable {
+        let (name, stage, parsed) = l.into_parts();
+        let kind = match parsed {
+            Ok(d) => Kind::Runnable {
                 scope: if d.exts.is_empty() {
                     Scope::ALWAYS
                 } else {
@@ -452,11 +468,7 @@ impl From<Line> for External {
                 program: d.program,
                 args: d.args,
             },
-            (Line::Broken { .. }, Some(why)) => Kind::Unusable { why },
-            // `broken()` is `Some` for every `Broken`, by construction.
-            (Line::Broken { why, lineno, .. }, None) => Kind::Unusable {
-                why: format!("line {lineno}: {why}"),
-            },
+            Err(why) => Kind::Unusable { why },
         };
         External { name, stage, kind }
     }
