@@ -48,7 +48,13 @@ fn main() {
     // tested on every platform, rather than one in `make` and another in
     // PowerShell for the Windows users who have no `make` at all.
     if rest.first().is_some_and(|a| a == "install") || hook.as_deref() == Some("install") {
-        std::process::exit(githooks_runtime::install::run());
+        std::process::exit(match githooks_runtime::install::run() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        });
     }
 
     let (Some(hooks_dir), Some(hook)) = (hooks_dir, hook) else {
@@ -63,11 +69,16 @@ fn main() {
         hooks_dir: &hooks_dir,
         push: &push,
     };
+    // THE process boundary: the one place a hook result becomes a number.
+    // Everything above speaks `Verdict`, and 2 is neither of its answers —
+    // it means the binary was invoked wrongly, not that a hook decided
+    // anything, which is why it is written here and nowhere else.
+    const USAGE_ERROR: i32 = 2;
     let code = match registry::lookup(&hook) {
-        Some(f) => f(&ctx),
+        Some(run_hook) => run_hook(&ctx).exit_code(),
         None => {
             eprintln!("githooks: unknown hook {hook:?}");
-            2
+            USAGE_ERROR
         }
     };
     std::process::exit(code);

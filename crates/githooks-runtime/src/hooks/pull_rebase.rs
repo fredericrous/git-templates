@@ -8,6 +8,7 @@
 //! tree, rebase only onto the branch's own upstream, and abort cleanly on
 //! conflict rather than leaving a half-rebased state.
 
+use crate::check::Outcome;
 use crate::git;
 use crate::ui::{error_sign, highlight, valid_sign, warning_sign};
 
@@ -68,7 +69,7 @@ pub fn ahead_count(rev_list: &str) -> Option<u64> {
     rev_list.split_whitespace().next()?.parse().ok()
 }
 
-pub fn run(_args: &[std::ffi::OsString]) -> i32 {
+pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
     // 1. Never auto-rebase a dirty tree: that autostashes real work and can
     //    leave a broken mid-rebase state during a push.
     if !git::stdout(&["status", "--porcelain"])
@@ -79,7 +80,7 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
             "{} Uncommitted changes — skipping pre-push pull-rebase.",
             warning_sign()
         );
-        return 0;
+        return Outcome::Passed;
     }
 
     // 2. Only sync a branch that HAS an upstream, and rebase onto that — never
@@ -87,7 +88,7 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
     let Some(upstream) =
         git::stdout(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
     else {
-        return 0;
+        return Outcome::Passed;
     };
 
     // 2b. The upstream can be configured locally but GONE on the remote — the
@@ -99,7 +100,7 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
         println!(
             "{} Upstream {upstream} no longer exists on the remote (merged + auto-deleted?) — skipping sync.", warning_sign()
         );
-        return 0;
+        return Outcome::Passed;
     }
 
     // 3. Diverged → warn and DO NOT rebase, but carry on to the default-branch
@@ -136,7 +137,7 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
             error_sign()
         );
         println!("    Resolve manually: {}", highlight("git pull --rebase"));
-        return 1;
+        return Outcome::Failed;
     } else {
         println!("{} Branch is in sync with its upstream", valid_sign());
     }
@@ -148,7 +149,7 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
     } else if lists_branch(&branch_list, "master") {
         "master"
     } else {
-        return 0;
+        return Outcome::Passed;
     };
 
     let _ = git::succeeds(&["fetch", "origin", default_branch]);
@@ -171,7 +172,7 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
             );
         }
     }
-    0
+    Outcome::Passed
 }
 
 #[cfg(test)]

@@ -28,7 +28,7 @@
 
 use std::sync::Mutex;
 
-use crate::check::{Check, Outcome, Severity, Stage};
+use crate::check::{Check, Outcome, Severity, Stage, Verdict};
 use crate::registry::{all_stage_checks, Ctx, Overrides};
 use crate::ui::{highlight, warning_sign};
 use crate::{cherry_pick_in_progress, configured_skips};
@@ -123,9 +123,9 @@ where
         .collect()
 }
 
-pub fn pre_commit(ctx: &Ctx) -> i32 {
+pub fn pre_commit(ctx: &Ctx) -> Verdict {
     if cherry_pick_in_progress(ctx.hooks_dir) {
-        return 0;
+        return Verdict::Proceed;
     }
     run_stage(&selected(Stage::PreCommit), ctx, &Overrides::read())
 }
@@ -135,9 +135,9 @@ pub fn pre_commit(ctx: &Ctx) -> i32 {
 /// A seam, so a test can hand it a check that panics. Without it the value
 /// standing in for a dead check was a literal at one call site that no test
 /// could reach — the rule was asserted on the runner and merely hoped for here.
-fn run_stage(checks: &[&'static dyn Check], ctx: &Ctx, severities: &Overrides) -> i32 {
+fn run_stage(checks: &[&'static dyn Check], ctx: &Ctx, severities: &Overrides) -> Verdict {
     if checks.is_empty() {
-        return 0;
+        return Verdict::Proceed;
     }
     let outcomes = run_concurrently(
         checks,
@@ -158,7 +158,7 @@ fn run_stage(checks: &[&'static dyn Check], ctx: &Ctx, severities: &Overrides) -
 
     let report = classify(checks, &outcomes, severities);
     announce(&report);
-    report.exit_code()
+    report.verdict()
 }
 
 /// What a stage concluded, before anything is printed or exited.
@@ -178,12 +178,8 @@ struct Report<'a> {
 }
 
 impl Report<'_> {
-    fn exit_code(&self) -> i32 {
-        if self.blocked.is_empty() {
-            0
-        } else {
-            1
-        }
+    fn verdict(&self) -> Verdict {
+        Verdict::blocking(!self.blocked.is_empty())
     }
 }
 
@@ -239,7 +235,7 @@ fn announce(report: &Report) {
     }
 }
 
-pub fn pre_push(ctx: &Ctx) -> i32 {
+pub fn pre_push(ctx: &Ctx) -> Verdict {
     // NB: no CHERRY_PICK_HEAD check here — the zsh pre-push had none either.
     let severities = Overrides::read();
     for check in selected(Stage::PrePush) {
@@ -271,12 +267,12 @@ pub fn pre_push(ctx: &Ctx) -> i32 {
                 // expensive and their preconditions are gone.
                 Severity::Block => {
                     println!("\n🚨  Error raised by hook {}", highlight(check.name()));
-                    return 1;
+                    return Verdict::Block;
                 }
             },
         }
     }
-    0
+    Verdict::Proceed
 }
 
 #[cfg(test)]
@@ -343,23 +339,35 @@ mod tests {
         let checks: [&dyn Check; 2] = [&BLOCKER, &WARNER];
         let got = classify(&checks, &[Outcome::Passed, Outcome::Warned], &none());
         assert_eq!(got, Report::default());
-        assert_eq!(got.exit_code(), 0);
+        assert_eq!(got.verdict(), Verdict::Proceed);
     }
 
     #[test]
     fn a_blocking_failure_is_the_only_thing_that_fails_the_commit() {
         let b: &dyn Check = &BLOCKER;
         let w: &dyn Check = &WARNER;
-        assert_eq!(classify(&[b], &[Outcome::Failed], &none()).exit_code(), 1);
-        assert_eq!(classify(&[b], &[Outcome::Passed], &none()).exit_code(), 0);
+        assert_eq!(
+            classify(&[b], &[Outcome::Failed], &none()).verdict(),
+            Verdict::Block
+        );
+        assert_eq!(
+            classify(&[b], &[Outcome::Passed], &none()).verdict(),
+            Verdict::Proceed
+        );
         // Every non-blocking shape, one at a time, so a regression cannot hide
         // behind a passing sibling.
-        assert_eq!(classify(&[b], &[Outcome::Warned], &none()).exit_code(), 0);
         assert_eq!(
-            classify(&[b], &[Outcome::Unavailable], &none()).exit_code(),
-            0
+            classify(&[b], &[Outcome::Warned], &none()).verdict(),
+            Verdict::Proceed
         );
-        assert_eq!(classify(&[w], &[Outcome::Failed], &none()).exit_code(), 0);
+        assert_eq!(
+            classify(&[b], &[Outcome::Unavailable], &none()).verdict(),
+            Verdict::Proceed
+        );
+        assert_eq!(
+            classify(&[w], &[Outcome::Failed], &none()).verdict(),
+            Verdict::Proceed
+        );
     }
 
     #[test]
@@ -371,8 +379,8 @@ mod tests {
                 &[Outcome::Unavailable, Outcome::Failed, Outcome::Failed],
                 &none()
             )
-            .exit_code(),
-            1
+            .verdict(),
+            Verdict::Block
         );
         // Same shape, with the only *blocking* failure removed.
         assert_eq!(
@@ -381,8 +389,8 @@ mod tests {
                 &[Outcome::Unavailable, Outcome::Failed, Outcome::Passed],
                 &none()
             )
-            .exit_code(),
-            0
+            .verdict(),
+            Verdict::Proceed
         );
     }
 
@@ -416,9 +424,13 @@ mod tests {
             hooks_dir: std::path::Path::new("."),
             push: &push,
         };
-        let code = run_stage(&[&DIES], &ctx, &none());
+        let verdict = run_stage(&[&DIES], &ctx, &none());
         std::panic::set_hook(hook);
-        assert_eq!(code, 1, "a check that died must not let the commit through");
+        assert_eq!(
+            verdict,
+            Verdict::Block,
+            "a check that died must not let the commit through"
+        );
     }
 
     #[test]

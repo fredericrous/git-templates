@@ -2,6 +2,7 @@
 //! markers.
 
 use super::common::{fail, hl, ok};
+use crate::check::Outcome;
 
 /// The markers, BUILT rather than written.
 ///
@@ -28,7 +29,7 @@ fn is_own_test(file: &str, hook_name: &str) -> bool {
     file.starts_with(&format!("tests/{hook_name}.test."))
 }
 
-pub fn run(hook_name: &str, _args: &[std::ffi::OsString]) -> i32 {
+pub fn run(hook_name: &str, _args: &[std::ffi::OsString]) -> Outcome {
     let m = markers();
     // Scoped to what this commit STAGES, not the whole index.
     //
@@ -58,10 +59,10 @@ pub fn run(hook_name: &str, _args: &[std::ffi::OsString]) -> i32 {
             "Merge conflict detected in {}",
             hl(&flagged.join(", "))
         ));
-        return 1;
+        return Outcome::Failed;
     }
     ok("No merge confict detected");
-    0
+    Outcome::Passed
 }
 
 #[cfg(test)]

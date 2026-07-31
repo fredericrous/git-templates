@@ -8,6 +8,7 @@
 //! is new, so everything it carries is in range.
 
 use super::common::program;
+use crate::check::Outcome;
 use crate::git;
 use std::process::{Command, Stdio};
 
@@ -132,14 +133,15 @@ pub fn packages_to_test(pkg_dirs: &[String], changed_dirs: &[String]) -> Vec<Str
         .collect()
 }
 
-fn run_gate(root: &str, folder: &str) -> i32 {
+/// True when the gate passed (or there was none to run).
+fn run_gate(root: &str, folder: &str) -> bool {
     let dir = if folder.is_empty() {
         root.to_string()
     } else {
         format!("{root}/{folder}")
     };
     let Ok(pkg) = std::fs::read_to_string(format!("{dir}/package.json")) else {
-        return 0;
+        return true;
     };
     for script in GATE.iter().filter(|s| defines_script(&pkg, s)) {
         // Same hazard as cargo test: git exports GIT_DIR to hooks, and a JS
@@ -152,22 +154,24 @@ fn run_gate(root: &str, folder: &str) -> i32 {
         super::common::strip_git_env(&mut cmd);
         let status = cmd.status();
         match status {
-            Ok(s) if s.success() => {}
-            Ok(s) => return s.code().unwrap_or(1),
-            Err(_) => return 1,
+            Ok(status) if status.success() => {}
+            // The gate's own exit code is not propagated: git only
+            // distinguishes zero from non-zero, and npm's codes said nothing
+            // the message above has not already said.
+            Ok(_) | Err(_) => return false,
         }
     }
-    0
+    true
 }
 
-pub fn run(refs: &[crate::pushrefs::PushRef]) -> i32 {
+pub fn run(refs: &[crate::pushrefs::PushRef]) -> Outcome {
     // An all-zero oid, of whatever length this repo's hash is (sha1 or sha256).
     let zero = git::stdout(&["hash-object", "--stdin"])
         .map(|h| "0".repeat(h.len()))
         .unwrap_or_else(|| "0".repeat(40));
 
     let Some(root) = git::stdout(&["rev-parse", "--show-toplevel"]) else {
-        return 0;
+        return Outcome::Passed;
     };
     let pkg_dirs = git::stdout(&["ls-files"])
         .map(|f| package_dirs(&f))
@@ -200,13 +204,12 @@ pub fn run(refs: &[crate::pushrefs::PushRef]) -> i32 {
         }
 
         for folder in packages_to_test(&pkg_dirs, &changed_dirs) {
-            let code = run_gate(&root, &folder);
-            if code != 0 {
-                return code;
+            if !run_gate(&root, &folder) {
+                return Outcome::Failed;
             }
         }
     }
-    0
+    Outcome::Passed
 }
 
 #[cfg(test)]

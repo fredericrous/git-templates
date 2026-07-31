@@ -47,7 +47,7 @@ pub const DISPATCHERS: [&str; 4] = ["commit-msg", "pre-commit", "pre-push", "pre
 /// so a path comparison says "not the source" and clobbers the main checkout.
 /// Asking git is the reliable test whatever route the symlink took.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Verdict {
+pub enum TemplateDir {
     /// The path does not exist and could not be created.
     Unresolvable,
     /// No git to ask. Refuse rather than guess.
@@ -75,23 +75,23 @@ fn git_ok(dir: &Path, args: &[&str]) -> bool {
 }
 
 /// Decide what may be done with `dir`. Never mutates anything.
-pub fn verdict(dir: &Path) -> Verdict {
+pub fn classify_dir(dir: &Path) -> TemplateDir {
     let Ok(real) = dir.canonicalize() else {
-        return Verdict::Unresolvable;
+        return TemplateDir::Unresolvable;
     };
     if Command::new("git").arg("--version").output().is_err() {
-        return Verdict::NoGit;
+        return TemplateDir::NoGit;
     }
     // `ls-files --error-unmatch .` is the question that matters: does git track
     // anything HERE? A directory can be inside a checkout and still be
     // untracked scratch space, which the next test separates.
     if git_ok(&real, &["ls-files", "--error-unmatch", "."]) {
-        return Verdict::IsCheckout;
+        return TemplateDir::IsCheckout;
     }
     if git_ok(&real, &["rev-parse", "--git-dir"]) {
-        return Verdict::InsideCheckout;
+        return TemplateDir::InsideCheckout;
     }
-    Verdict::Safe
+    TemplateDir::Safe
 }
 
 /// Write the absolute binary path into a shim.
@@ -178,17 +178,7 @@ fn make_executable(_p: &Path) -> std::io::Result<()> {
 /// Three steps, three functions. This was one 88-line body whose own comments
 /// numbered its sections — which is the tell that the sections wanted to be
 /// functions.
-pub fn run() -> i32 {
-    match install() {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("{e}");
-            1
-        }
-    }
-}
-
-fn install() -> Result<(), String> {
+pub fn run() -> Result<(), String> {
     let binary = install_binary()?;
     populate_template_dir(&binary)?;
     bake_repo_hooks(&binary)
@@ -231,8 +221,8 @@ fn populate_template_dir(binary: &str) -> Result<(), String> {
     let shown = dir.canonicalize().unwrap_or_else(|_| dir.clone());
     let shown = shown.display();
 
-    match verdict(&dir) {
-        Verdict::IsCheckout => {
+    match classify_dir(&dir) {
+        TemplateDir::IsCheckout => {
             println!(
                 "{} template dir IS the checkout ({shown}) — nothing to install.",
                 warning_sign()
@@ -240,18 +230,18 @@ fn populate_template_dir(binary: &str) -> Result<(), String> {
             println!("    Its shims keep the placeholder deliberately and resolve");
             println!("    {binary} at run time. This is the intended setup.");
         }
-        Verdict::InsideCheckout => println!(
+        TemplateDir::InsideCheckout => println!(
             "{} {shown} is inside a git checkout — leaving it alone.",
             warning_sign()
         ),
-        Verdict::NoGit => println!(
+        TemplateDir::NoGit => println!(
             "{} git is not on PATH — refusing to delete anything.",
             warning_sign()
         ),
-        Verdict::Unresolvable => {
+        TemplateDir::Unresolvable => {
             println!("{} cannot resolve {shown} — skipping.", warning_sign())
         }
-        Verdict::Safe => {
+        TemplateDir::Safe => {
             let written = write_shims(&dir, binary)
                 .map_err(|e| format!("cannot write shims to {shown}: {e}"))?;
             println!("{} wrote {written} shims to {shown}", valid_sign());
@@ -326,7 +316,7 @@ mod tests {
         git(&d, &["add", "-A"]);
         git(&d, &["commit", "-qm", "seed"]);
 
-        assert_eq!(verdict(&d), Verdict::IsCheckout);
+        assert_eq!(classify_dir(&d), TemplateDir::IsCheckout);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -352,8 +342,8 @@ mod tests {
         );
         assert_ne!(d.canonicalize().ok(), wt.canonicalize().ok());
         assert_eq!(
-            verdict(&wt),
-            Verdict::IsCheckout,
+            classify_dir(&wt),
+            TemplateDir::IsCheckout,
             "a worktree must be refused exactly like the main checkout"
         );
         let _ = std::fs::remove_dir_all(&wt);
@@ -367,22 +357,22 @@ mod tests {
         git(&d, &["init", "-q", "--template=", "."]);
         let sub = d.join("scratch");
         std::fs::create_dir_all(&sub).expect("mkdir");
-        assert_eq!(verdict(&sub), Verdict::InsideCheckout);
+        assert_eq!(classify_dir(&sub), TemplateDir::InsideCheckout);
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
     fn an_ordinary_directory_is_safe() {
         let d = tmp("plain");
-        assert_eq!(verdict(&d), Verdict::Safe);
+        assert_eq!(classify_dir(&d), TemplateDir::Safe);
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
     fn a_missing_directory_is_unresolvable_not_safe() {
         assert_eq!(
-            verdict(Path::new("/nonexistent-install-c8f2/hooks")),
-            Verdict::Unresolvable
+            classify_dir(Path::new("/nonexistent-install-c8f2/hooks")),
+            TemplateDir::Unresolvable
         );
     }
 

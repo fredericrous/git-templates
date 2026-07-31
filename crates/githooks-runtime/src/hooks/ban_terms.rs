@@ -10,6 +10,7 @@
 //! Stage 1 stays deliberately loose (POSIX regex, flavour varies by platform);
 //! a loose prefilter costs one extra file read, a strict one misses violations.
 
+use crate::check::Outcome;
 use crate::git;
 use crate::ui::{error_sign, highlight, valid_sign};
 
@@ -360,7 +361,7 @@ fn is_searchable(file: &str) -> bool {
         .any(|e| f.ends_with(e))
 }
 
-pub fn run(hook_name: &str, _args: &[std::ffi::OsString]) -> i32 {
+pub fn run(hook_name: &str, _args: &[std::ffi::OsString]) -> Outcome {
     // This file necessarily NAMES every term it bans, so it must never flag
     // itself. Compare on the file STEM against the hook name we were invoked
     // as: the hook is checked from two layouts — installed at .git/hooks/<name>
@@ -377,7 +378,7 @@ pub fn run(hook_name: &str, _args: &[std::ffi::OsString]) -> i32 {
         stem == hook_name
     };
 
-    let mut status = 0;
+    let mut found_any = false;
     for term in &TERMS {
         let arg = format!("-G{}", term.prefilter);
         let Some(out) = git::stdout(&["diff", "--cached", &arg, "--diff-filter=d", "--name-only"])
@@ -402,10 +403,10 @@ pub fn run(hook_name: &str, _args: &[std::ffi::OsString]) -> i32 {
             .collect();
 
         if !matches.is_empty() {
-            if status == 0 {
+            if !found_any {
                 eprintln!("  {} Unwanted terms found", error_sign().trim());
             }
-            status = 1;
+            found_any = true;
             println!(
                 "    The following files contains '{}' in them:",
                 highlight(term.label)
@@ -415,10 +416,11 @@ pub fn run(hook_name: &str, _args: &[std::ffi::OsString]) -> i32 {
             }
         }
     }
-    if status == 0 {
-        println!("  {} No unwanted terms where found", valid_sign().trim());
+    if found_any {
+        return Outcome::Failed;
     }
-    status
+    println!("  {} No unwanted terms where found", valid_sign().trim());
+    Outcome::Passed
 }
 
 #[cfg(test)]
