@@ -2,7 +2,8 @@
 //! actually opt into prettier.
 
 use super::common::{
-    fail, first_existing, hl, ok, repo_root, resolve_tool, run as run_tool, staged_files, warn,
+    fail, first_existing, fixing_enabled, hl, ok, repo_root, resolve_tool, restage,
+    run as run_tool, staged_files, warn,
 };
 use crate::check::Outcome;
 use std::path::Path;
@@ -81,6 +82,17 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
     let mut check = flags.clone();
     check.push("--check".into());
     check.extend(files.iter().cloned());
+    if !run_quiet(&root, &argv, &check) && fixing_enabled() {
+        // Asked to repair, so repair rather than reporting an instruction the
+        // author would carry out identically by hand.
+        let mut write = flags.clone();
+        write.push("--write".into());
+        write.extend(files.iter().cloned());
+        if run_quiet(&root, &argv, &write) && restage(&files) {
+            ok("Prettier reformatted and re-staged");
+            return Outcome::Fixed;
+        }
+    }
     if !run_quiet(&root, &argv, &check) {
         fail(&format!(
             "Prettier found unformatted files. Run {} on:",

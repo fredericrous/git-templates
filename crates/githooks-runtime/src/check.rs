@@ -181,6 +181,10 @@ pub enum Outcome {
     Failed,
     /// Ran, found something worth saying, which does not block.
     Warned,
+    /// Ran, found a problem, and REPAIRED it. The commit proceeds with the
+    /// repair staged, which is neither `Passed` (something happened, and the
+    /// author should know their files changed) nor `Failed`.
+    Fixed,
     /// COULD NOT RUN — a tool is missing, or the opt-in config is absent.
     Unavailable,
 }
@@ -257,6 +261,22 @@ impl Severity {
     }
 }
 
+/// Whether a check can rewrite the files it inspects.
+///
+/// Off by default and per check, never global: a hook that edits your files
+/// without being asked is a larger surprise than one that complains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fix {
+    /// Reports only. Every check, until somebody declares otherwise.
+    None,
+    /// Runs a command that rewrites files, and stages what it changed.
+    ///
+    /// Only reachable from a `Stage::PreCommit` declaration. A pre-push hook
+    /// must not modify the worktree or index: the pushed commit would then
+    /// differ from the tree the developer is looking at.
+    Rewrite,
+}
+
 /// One check, whether compiled in or declared by the repository.
 ///
 /// `Sync` because `pre-commit` hands every check to its own thread. Both
@@ -267,6 +287,10 @@ pub trait Check: Sync {
     fn stage(&self) -> Stage;
     fn scope(&self) -> Scope;
     fn severity(&self) -> Severity;
+    /// Whether this check can repair what it finds. `None` for almost all.
+    fn fix(&self) -> Fix {
+        Fix::None
+    }
     fn run(&self, ctx: &Ctx) -> Outcome;
 }
 
@@ -277,6 +301,8 @@ pub struct Builtin {
     pub scope: Scope,
     pub severity: Severity,
     pub run: fn(&Ctx) -> Outcome,
+    /// Almost always `Fix::None`; see `CHECKS`.
+    pub fix: Fix,
 }
 
 impl Check for Builtin {
@@ -291,6 +317,9 @@ impl Check for Builtin {
     }
     fn severity(&self) -> Severity {
         self.severity
+    }
+    fn fix(&self) -> Fix {
+        self.fix
     }
     fn run(&self, ctx: &Ctx) -> Outcome {
         (self.run)(ctx)

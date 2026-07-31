@@ -31,7 +31,7 @@ use std::sync::Mutex;
 use crate::check::{Check, Outcome, Severity, Stage, Verdict};
 use crate::configured_skips;
 use crate::registry::{all_stage_checks, Ctx, Overrides};
-use crate::ui::{highlight, warning_sign};
+use crate::ui::{highlight, valid_sign, warning_sign};
 
 /// The checks for a stage, minus anything `hook.skip` filters out. `hook.skip`
 /// yields substrings and matches by CONTAINS, exactly as it did against paths,
@@ -222,6 +222,9 @@ fn run_stage(checks: &[&'static dyn Check], ctx: &Ctx, severities: &Overrides) -
 /// only check the code — whether the right thing was SAID went untested.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Report<'a> {
+    /// Repaired. The commit proceeds, but the author's files changed under
+    /// them and that must be said out loud.
+    fixed: Vec<&'a str>,
     /// Failed, and the severity that applies blocks.
     blocked: Vec<&'a str>,
     /// Failed, but configured to warn. The check printed an error and meant it,
@@ -249,6 +252,7 @@ fn classify<'a>(
             // `Warned` needs nothing: a check that chose to warn has already
             // said what it wanted to, and a roll-up would only repeat it.
             Outcome::Passed | Outcome::Warned => {}
+            Outcome::Fixed => report.fixed.push(check.name()),
             Outcome::Unavailable => report.unavailable.push(check.name()),
             Outcome::Failed => match severities.of(*check) {
                 Severity::Block => report.blocked.push(check.name()),
@@ -261,6 +265,16 @@ fn classify<'a>(
 
 /// Says what happened. Prints; decides nothing.
 fn announce(report: &Report) {
+    if !report.fixed.is_empty() {
+        // Louder than a pass, because files on disk are not what the author
+        // left them: they asked for the repair, but they did not watch it.
+        println!(
+            "{} {} check(s) fixed and re-staged: {}",
+            valid_sign(),
+            report.fixed.len(),
+            report.fixed.join(", ")
+        );
+    }
     if !report.unavailable.is_empty() {
         // Distinct from "passed". Silence here is how a repo looks verified
         // when nothing actually ran — and with twenty checks interleaving
@@ -337,6 +351,9 @@ pub fn pre_push(ctx: &Ctx) -> Verdict {
                 )
             }
             Outcome::Warned => {}
+            // Cannot occur: `Fix::Rewrite` is refused on a pre-push
+            // declaration, so nothing here can repair anything.
+            Outcome::Fixed => {}
             Outcome::Failed => match severities.of(check) {
                 Severity::Warn => println!(
                     "{} {} reported a problem (severity warn)",
@@ -373,6 +390,7 @@ mod tests {
             scope: Scope::ALWAYS,
             severity,
             run: |_| Outcome::Passed,
+            fix: crate::check::Fix::None,
         }
     }
 
@@ -494,6 +512,7 @@ mod tests {
             scope: Scope::ALWAYS,
             severity: Severity::Block,
             run: |_| panic!("this check died"),
+            fix: crate::check::Fix::None,
         };
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));

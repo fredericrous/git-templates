@@ -41,7 +41,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-use crate::check::{Check, Outcome, Scope, Severity, Stage};
+use crate::check::{Check, Fix, Outcome, Scope, Severity, Stage};
 use crate::registry::{Ctx, CHECKS, ENTRYPOINTS};
 
 pub const MANIFEST: &str = ".githooks.conf";
@@ -63,6 +63,14 @@ pub enum ParseError {
     BadStage(String),
     BadScope(String),
     BadSeverity(String),
+    /// A `pre-push` line asked to rewrite files.
+    ///
+    /// Refused HERE, beside `NameTaken` and `Duplicate`, rather than as a
+    /// runtime "contract violation" at push time: same fact, discovered
+    /// earlier, by more people, at the moment it is cheapest to fix. A pre-push
+    /// hook must not modify the worktree or index — the pushed commit would
+    /// then differ from the tree the developer is looking at.
+    FixOnPrePush,
 }
 
 impl std::fmt::Display for ParseError {
@@ -78,6 +86,10 @@ impl std::fmt::Display for ParseError {
                 write!(f, "stage {t:?} must be `pre-commit` or `pre-push`")
             }
             ParseError::BadScope(t) => write!(f, "scope {t:?} must be `*` or `*.<ext>`"),
+            ParseError::FixOnPrePush => write!(
+                f,
+                "`fix` is only for pre-commit — a pre-push hook must not rewrite files"
+            ),
             ParseError::BadSeverity(t) => {
                 write!(f, "severity {t:?} must be `block` or `warn`")
             }
@@ -92,6 +104,8 @@ impl std::fmt::Display for ParseError {
 /// `split_first` guard that can only ever be dead code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Declared {
+    /// `Fix::Rewrite` when the command column began `fix `.
+    pub fix: Fix,
     pub name: String,
     pub stage: Stage,
     pub severity: Severity,
@@ -422,12 +436,22 @@ fn parse_line(lineno: usize, line: &str, earlier: &[Line]) -> Line {
     let Some(severity) = Severity::parse(severity_tok) else {
         return fail(ParseError::BadSeverity(severity_tok.to_string()));
     };
+    // `fix` is a trailing marker on the command column rather than a sixth
+    // field, so every manifest written before this still parses.
+    let (command, wants_fix) = match command.strip_prefix("fix ") {
+        Some(rest) => (rest.trim(), true),
+        None => (command, false),
+    };
+    if wants_fix && stage == Stage::PrePush {
+        return fail(ParseError::FixOnPrePush);
+    }
     // `tokenise` guarantees a non-empty command, so the split cannot fail.
     let mut argv = command.split_whitespace().map(str::to_owned);
     let Some(program) = argv.next() else {
         return fail(ParseError::MissingFields);
     };
     Line::Usable(Declared {
+        fix: if wants_fix { Fix::Rewrite } else { Fix::None },
         name: declared.to_string(),
         stage,
         severity,
@@ -627,6 +651,32 @@ mod tests {
         let said = l.broken().expect("broken");
         assert!(said.contains("line 1"), "{said}");
         assert!(said.contains("severity"), "{said}");
+    }
+
+    /// `fix` on a pre-push line is refused where every other bad declaration is
+    /// refused — on every commit, named and located — rather than as a runtime
+    /// "contract violation" discovered later at push time by fewer people.
+    #[test]
+    fn fix_is_refused_on_a_pre_push_line() {
+        assert_eq!(
+            why(&one("pre-push  smoke  *  block  fix make smoke\n")),
+            ParseError::FixOnPrePush
+        );
+        // …and accepted on pre-commit.
+        let line = one("pre-commit  fmt  *  block  fix make format\n");
+        let declared = usable(&line);
+        assert_eq!(declared.fix, Fix::Rewrite);
+        assert_eq!(declared.program, "make");
+        assert_eq!(declared.args, ["format"]);
+    }
+
+    /// Every manifest written before `fix` existed must still parse the same.
+    #[test]
+    fn a_command_that_merely_starts_with_fix_is_not_a_marker() {
+        let line = one("pre-commit  x  *  block  fixup-tool --check\n");
+        let declared = usable(&line);
+        assert_eq!(declared.fix, Fix::None);
+        assert_eq!(declared.program, "fixup-tool");
     }
 
     /// A gap with no name cannot be reported, and a line this broken has none.

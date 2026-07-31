@@ -14,7 +14,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use crate::check::{Builtin, Check, GitState, Outcome, Scope, Severity, Stage, Verdict};
+use crate::check::{Builtin, Check, Fix, GitState, Outcome, Scope, Severity, Stage, Verdict};
 use crate::pushrefs::PushRefs;
 use crate::{dispatch, hooks};
 
@@ -83,6 +83,7 @@ pub const CHECKS: &[Builtin] = &[
         )
         .not_during(MID_OPERATION),
         severity: Severity::Block,
+        fix: Fix::None,
         run: |ctx| hooks::k8s::argo_lint(ctx.args),
     },
     Builtin {
@@ -90,6 +91,7 @@ pub const CHECKS: &[Builtin] = &[
         stage: Stage::PreCommit,
         scope: Scope::files(&[".js", ".jsx", ".ts", ".tsx", ".vue"]),
         severity: Severity::Block,
+        fix: Fix::None,
         run: |ctx| hooks::ban_terms::run(ctx.name, ctx.args),
     },
     Builtin {
@@ -97,6 +99,7 @@ pub const CHECKS: &[Builtin] = &[
         stage: Stage::PreCommit,
         scope: Scope::new(&[".rs"], &["Cargo.toml"]).not_during(MID_OPERATION),
         severity: Severity::Block,
+        fix: Fix::Rewrite,
         run: |ctx| hooks::rust_tools::fmt(ctx.args),
     },
     Builtin {
@@ -104,6 +107,7 @@ pub const CHECKS: &[Builtin] = &[
         stage: Stage::PreCommit,
         scope: Scope::new(&[".rs"], &["Cargo.toml"]).not_during(MID_OPERATION),
         severity: Severity::Block,
+        fix: Fix::None,
         run: |ctx| hooks::rust_tools::clippy(ctx.args),
     },
     Builtin {
@@ -115,6 +119,7 @@ pub const CHECKS: &[Builtin] = &[
         )
         .not_during(MID_OPERATION),
         severity: Severity::Block,
+        fix: Fix::None,
         run: |ctx| hooks::k8s::kube_linter(ctx.args),
     },
     Builtin {
@@ -126,6 +131,7 @@ pub const CHECKS: &[Builtin] = &[
         )
         .not_during(MID_OPERATION),
         severity: Severity::Block,
+        fix: Fix::None,
         run: |ctx| hooks::k8s::kubeconform(ctx.args),
     },
     Builtin {
@@ -134,6 +140,7 @@ pub const CHECKS: &[Builtin] = &[
         scope: Scope::new(&[".js", ".jsx", ".ts", ".tsx", ".vue"], &["package.json"])
             .not_during(MID_OPERATION),
         severity: Severity::Block,
+        fix: Fix::None,
         run: |ctx| hooks::lint_js::run(ctx.args),
     },
     Builtin {
@@ -141,6 +148,7 @@ pub const CHECKS: &[Builtin] = &[
         stage: Stage::PreCommit,
         scope: Scope::files(&[".json", ".yaml", ".yml"]).not_during(MID_OPERATION),
         severity: Severity::Block,
+        fix: Fix::None,
         run: |ctx| hooks::lint_json_yaml::run(ctx.args),
     },
     Builtin {
@@ -148,6 +156,7 @@ pub const CHECKS: &[Builtin] = &[
         stage: Stage::PreCommit,
         scope: Scope::ALWAYS,
         severity: Severity::Block,
+        fix: Fix::None,
         run: |ctx| hooks::merge_conflict::run(ctx.name, ctx.args),
     },
     Builtin {
@@ -155,6 +164,7 @@ pub const CHECKS: &[Builtin] = &[
         stage: Stage::PreCommit,
         scope: Scope::new(&[], &["package.json"]),
         severity: Severity::Block,
+        fix: Fix::None,
         run: |ctx| hooks::package_lock::run(ctx.args),
     },
     Builtin {
@@ -173,6 +183,7 @@ pub const CHECKS: &[Builtin] = &[
         )
         .not_during(MID_OPERATION),
         severity: Severity::Block,
+        fix: Fix::Rewrite,
         run: |ctx| hooks::prettier::run(ctx.args),
     },
     Builtin {
@@ -188,6 +199,7 @@ pub const CHECKS: &[Builtin] = &[
         )
         .not_during(MID_OPERATION),
         severity: Severity::Block,
+        fix: Fix::None,
         run: |ctx| hooks::python_tools::pyright(ctx.args),
     },
     Builtin {
@@ -199,6 +211,7 @@ pub const CHECKS: &[Builtin] = &[
         )
         .not_during(MID_OPERATION),
         severity: Severity::Block,
+        fix: Fix::Rewrite,
         run: |ctx| hooks::python_tools::ruff(ctx.args),
     },
     Builtin {
@@ -206,6 +219,7 @@ pub const CHECKS: &[Builtin] = &[
         stage: Stage::PreCommit,
         scope: Scope::ALWAYS,
         severity: Severity::Block,
+        fix: Fix::None,
         run: |ctx| hooks::usual_name::run(ctx.args),
     },
     Builtin {
@@ -217,6 +231,7 @@ pub const CHECKS: &[Builtin] = &[
         )
         .not_during(MID_OPERATION),
         severity: Severity::Block,
+        fix: Fix::None,
         run: |ctx| hooks::yamllint::run(ctx.args),
     },
     // ---- pre-push, cheapest and most decisive first ----
@@ -225,6 +240,7 @@ pub const CHECKS: &[Builtin] = &[
         stage: Stage::PrePush,
         scope: Scope::ALWAYS,
         severity: Severity::Block,
+        fix: Fix::None,
         run: |ctx| hooks::branch_protect::run(ctx.push.get()),
     },
     Builtin {
@@ -232,6 +248,7 @@ pub const CHECKS: &[Builtin] = &[
         stage: Stage::PrePush,
         scope: Scope::ALWAYS,
         severity: Severity::Block,
+        fix: Fix::None,
         run: |ctx| hooks::branch_pattern::run(ctx.args),
     },
     Builtin {
@@ -239,6 +256,7 @@ pub const CHECKS: &[Builtin] = &[
         stage: Stage::PrePush,
         scope: Scope::ALWAYS.not_during(&[GitState::Rebase, GitState::Merge]),
         severity: Severity::Block,
+        fix: Fix::None,
         run: |ctx| hooks::pull_rebase::run(ctx.args),
     },
     Builtin {
@@ -247,6 +265,7 @@ pub const CHECKS: &[Builtin] = &[
         scope: Scope::new(&[".js", ".jsx", ".ts", ".tsx", ".vue"], &["package.json"])
             .not_during(&[GitState::Bisect, GitState::Rebase]),
         severity: Severity::Block,
+        fix: Fix::None,
         run: |ctx| hooks::run_tests::run(ctx.push.get()),
     },
     Builtin {
@@ -255,6 +274,7 @@ pub const CHECKS: &[Builtin] = &[
         scope: Scope::new(&[".rs"], &["Cargo.toml"])
             .not_during(&[GitState::Bisect, GitState::Rebase]),
         severity: Severity::Block,
+        fix: Fix::None,
         run: |ctx| hooks::rust_tools::test(ctx.push.get()),
     },
 ];
