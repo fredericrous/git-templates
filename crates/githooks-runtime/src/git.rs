@@ -35,6 +35,17 @@ pub fn stdout_in(dir: &std::path::Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Raw stdout, untrimmed and not lossy — for a patch, where a trailing newline
+/// and any byte in a binary hunk are load-bearing.
+pub fn stdout_raw(args: &[&str]) -> Option<Vec<u8>> {
+    let out = Command::new("git")
+        .args(args)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
 /// True when the command exits 0. Output discarded.
 pub fn succeeds(args: &[&str]) -> bool {
     Command::new("git")

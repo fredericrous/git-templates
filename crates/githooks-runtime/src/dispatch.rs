@@ -163,11 +163,25 @@ where
 
 pub fn pre_commit(ctx: &Ctx) -> Verdict {
     let in_progress = crate::git_states_in_progress(ctx.hooks_dir);
-    run_stage(
-        &selected_during(Stage::PreCommit, &in_progress),
-        ctx,
-        &Overrides::read(),
-    )
+    let checks = selected_during(Stage::PreCommit, &in_progress);
+
+    // Around the WHOLE fan-out, not per check: twenty checks run concurrently
+    // and would fight over one working tree.
+    let held = match crate::staged_only::StagedOnly::enter(ctx.hooks_dir) {
+        Ok(guard) => guard,
+        Err(e) => {
+            // Refusing to check the wrong content is the safe direction; a
+            // check that read the tree would be answering about a commit
+            // nobody is making.
+            eprintln!("{e}");
+            return Verdict::Block;
+        }
+    };
+    crate::staged_only::install_signal_handler();
+
+    let verdict = run_stage(&checks, ctx, &Overrides::read());
+    drop(held);
+    verdict
 }
 
 /// The pre-commit body, over the checks it is GIVEN.

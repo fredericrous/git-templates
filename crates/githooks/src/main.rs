@@ -7,7 +7,7 @@
 //! ```text
 //! githooks --hooks-dir <dir> <hook-name> [args…]
 //! githooks list | install | uninstall [--binary] | trust [--show|--revoke]
-//! githooks run [<check>] [--all-files]
+//! githooks run [<check>] [--all-files] | restore
 //! ```
 
 use std::ffi::OsString;
@@ -49,6 +49,16 @@ fn main() {
     // that decides whether a directory may be emptied has ONE implementation,
     // tested on every platform, rather than one in `make` and another in
     // PowerShell for the Windows users who have no `make` at all.
+    if rest.first().is_some_and(|a| a == "restore") || hook.as_deref() == Some("restore") {
+        std::process::exit(match githooks_runtime::staged_only::restore_command() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        });
+    }
+
     if rest.first().is_some_and(|a| a == "run") || hook.as_deref() == Some("run") {
         let all_files = rest.iter().any(|a| a == "--all-files");
         // A named check runs alone; otherwise the whole pre-commit stage.

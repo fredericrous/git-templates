@@ -47,6 +47,11 @@ impl Repo {
         // Keep the tests independent of the developer's global config.
         r.git(&["config", "commit.gpgsign", "false"]);
         r.git(&["config", "init.defaultBranch", "main"]);
+        // Git for Windows converts line endings on checkout by default. A test
+        // that writes "a\n", stages it and then compares the file byte for byte
+        // would be asserting git's newline policy rather than the behaviour
+        // under test — and would pass on two platforms and fail on the third.
+        r.git(&["config", "core.autocrlf", "false"]);
         r
     }
 
