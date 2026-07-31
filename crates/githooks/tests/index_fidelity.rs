@@ -70,8 +70,8 @@ fn nothing_unstaged_means_nothing_is_moved() {
     assert!(run.passed(), "{}", run.output());
     assert_eq!(tree(&r, "x.json"), VALID);
     assert!(
-        !r.path(".git/githooks-unstaged.patch").exists(),
-        "took a patch with nothing to hold"
+        !r.path(".git/githooks-held").exists(),
+        "held something with nothing to hold"
     );
 }
 
@@ -93,8 +93,8 @@ fn a_blocked_commit_still_restores() {
         "a blocked commit lost the unstaged change"
     );
     assert!(
-        !r.path(".git/githooks-unstaged.patch").exists(),
-        "patch left behind after a block"
+        !r.path(".git/githooks-held").exists(),
+        "held files left behind after a block"
     );
 }
 
@@ -130,7 +130,7 @@ fn nothing_is_stashed_mid_merge() {
     let run = r.hook("pre-commit", &[]);
     assert!(run.passed(), "{}", run.output());
     assert_eq!(tree(&r, "x.json"), BROKEN, "the tree was touched mid-merge");
-    assert!(!r.path(".git/githooks-unstaged.patch").exists());
+    assert!(!r.path(".git/githooks-held").exists());
 }
 
 /// `githooks restore` is the recovery path for when even the signal handler was
@@ -142,14 +142,9 @@ fn restore_puts_back_a_parked_patch() {
     r.stage("x.json", VALID);
     r.write("x.json", BROKEN);
 
-    // Park a patch the way the guard does, then abandon it.
-    let patch = Command::new("git")
-        .arg("-C")
-        .arg(&r.dir)
-        .args(["diff", "--binary", "--no-color"])
-        .output()
-        .expect("git diff");
-    std::fs::write(r.path(".git/githooks-unstaged.patch"), &patch.stdout).expect("write");
+    // Park the file the way the guard does, then abandon it.
+    std::fs::create_dir_all(r.path(".git/githooks-held")).expect("mkdir");
+    std::fs::write(r.path(".git/githooks-held/x.json"), BROKEN).expect("write");
     Command::new("git")
         .arg("-C")
         .arg(&r.dir)
@@ -169,7 +164,7 @@ fn restore_puts_back_a_parked_patch() {
         .expect("githooks restore");
     assert!(out.status.success(), "{:?}", out);
     assert_eq!(tree(&r, "x.json"), BROKEN, "restore did not put it back");
-    assert!(!r.path(".git/githooks-unstaged.patch").exists());
+    assert!(!r.path(".git/githooks-held").exists());
 }
 
 /// Nothing to restore is not an error — it is how somebody checks.
