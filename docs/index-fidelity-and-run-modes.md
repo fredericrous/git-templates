@@ -62,10 +62,12 @@ everything cloned since is managed and "unmanaged" means "cloned before I
 configured this". A category that records the date you ran a `git config`
 command is not a category.
 
-### The design: activation is the boundary
+### The design: activation is the boundary, and `templateDir` opts out of it
 
-**Drop the template directory as the activation mechanism.** Hooks run where
-somebody put them, and nowhere else:
+**Two modes, both supported, and the difference is what you granted.**
+
+*Per repository* is the default. Hooks run where somebody put them and nowhere
+else:
 
 ```
 githooks install              # this repo
@@ -81,6 +83,28 @@ they mean "set this up".
 
 A clone is then inert until asked. The drive-by case is gone, not mitigated:
 there is no hook to run.
+
+*Everywhere* is `init.templateDir`, and it stays supported as a **deliberate
+opt-in** rather than being removed. Git copies the template into `.git/hooks` on
+every `init` and every clone, so hooks are never forgotten and the fleet never
+shows an uncovered repository. That is a real benefit and people who want it
+should be able to say so.
+
+What matters is that setting it is a **standing grant, made once, for every
+repository you will ever clone** — and it therefore opts out of activation being
+the trust boundary. It cannot be otherwise: the whole point of the key is that
+nobody is asked again.
+
+So the honest statement is a conditional, and the README now carries it:
+
+| mode | who decides a repo runs hooks | what closes the drive-by case |
+|---|---|---|
+| per repository | you, per repository | activation itself |
+| `init.templateDir` | you, once, for all future clones | **only manifest trust** |
+
+That is not an argument against the key. It is an argument that §0b is not a
+second layer of defence for the people most likely to set it — it is the only
+one — which raises its priority rather than lowering it.
 
 ### It is necessary and not sufficient
 
@@ -137,20 +161,23 @@ toolchain — the same exposure `npm install` already carries — but it means b
 halves above are a floor, not a ceiling, and the README should say so rather
 than implying the manifest was the only door.
 
-### The cost, and why the fleet absorbs it
+### The cost of the per-repository mode, and why the fleet absorbs it
 
-Dropping `init.templateDir` means a fresh clone has **no checks at all** until
+Not setting `init.templateDir` means a fresh clone has **no checks at all** until
 somebody installs them. For a codebase whose whole argument is *do not look
 protected when you are not*, that deserves stating rather than burying: the
 failure mode moves from "a hostile repo ran code" to "my repo was never
 covered", and the second is quieter.
 
-It is also the failure the fleet dashboard already exists to catch. Today its
-`unmanaged` column is close to noise, because `init.templateDir` manages
-everything automatically. Under this design it becomes the point of the tool:
-the thing that tells you which of your ninety-six repositories are not covered,
-and `githooks-fleet install` is the fix. That is a better shape than the one we
-have — the safety net stops being incidental.
+It is also the failure the fleet dashboard already exists to catch — and this is
+what makes the `unmanaged` column earn its place. With `init.templateDir` set it
+is close to noise, because everything cloned since is managed and "unmanaged"
+records the date you ran a `git config` command. Without it, the column is the
+point of the tool: which of your ninety-six repositories are not covered, with
+`githooks-fleet install` as the fix.
+
+Both modes are legitimate. They trade a quiet failure for a loud grant, and the
+tool should let you pick which one you would rather explain.
 
 ### `uninstall`, which is missing regardless
 
@@ -537,14 +564,18 @@ pipeline rather than from here.
 
 ## Order
 
-**PR 0a — activation and `uninstall` (§0).** Drop `init.templateDir` from the
-README, name bulk activation `githooks-fleet install` rather than hiding it
-behind `fix --apply`, and add `uninstall` at both levels. Closes the drive-by
-case on its own and makes the fleet's `unmanaged` column mean something.
+**PR 0a — activation and `uninstall` (§0).** Add `uninstall` at both levels and
+name bulk activation `githooks-fleet install` rather than hiding it behind
+`fix --apply`. The README presents per-repository activation as the default and
+`init.templateDir` as a stated opt-in with its consequence spelled out. Closes
+the drive-by case for the default mode and makes the fleet's `unmanaged` column
+mean something for anyone in it.
 
 **PR 0b — the trust prompt (§0).** Small once 0a exists, because it hangs off
 the install flow. Must precede `stage_fixed`, which cannot ship into an
-untrusted manifest.
+untrusted manifest — and it is the **only** thing standing between a cloned
+repository and your shell for anyone who set `init.templateDir`, which is the
+convenient mode and therefore the popular one.
 
 **PR 1 — `githooks run [--all-files]`.** Small, useful immediately, no risk, and
 it gives the later work a way to be exercised over a whole repository.
