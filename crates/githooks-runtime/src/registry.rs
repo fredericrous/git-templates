@@ -239,12 +239,30 @@ pub const CHECKS: &[Builtin] = &[
 /// warning. Unlike `hook.skip` it keeps the signal: the check still runs and
 /// still reports, it just stops failing the commit.
 pub fn severity_of(check: &dyn Check) -> Severity {
-    let key = format!("githooks.severity.{}", check.name());
-    match crate::git::stdout(&["config", "--get", &key]).as_deref() {
-        Some("warn") => Severity::Warn,
-        Some("block") => Severity::Block,
-        _ => check.severity(),
-    }
+    effective_override(None, check.name()).unwrap_or_else(|| check.severity())
+}
+
+/// The config key a severity override lives under.
+pub fn severity_key(check: &str) -> String {
+    format!("githooks.severity.{check}")
+}
+
+/// The override git would actually apply for `check`, or `None` if there is
+/// none (or the value is not one this understands).
+///
+/// `--get`, NOT `--get-regexp`: git returns the LAST value, so a local `block`
+/// beats a global `warn`. A reader that listed every entry instead and treated
+/// each as authoritative would report a downgrade that the dispatcher does not
+/// apply — which is exactly what the dashboard used to do.
+///
+/// `repo` is `None` for the current directory, which is where a hook runs.
+pub fn effective_override(repo: Option<&Path>, check: &str) -> Option<Severity> {
+    let key = severity_key(check);
+    let value = match repo {
+        None => crate::git::stdout(&["config", "--get", &key]),
+        Some(dir) => crate::git::stdout_in(dir, &["config", "--get", &key]),
+    }?;
+    Severity::parse(&value)
 }
 
 /// Built-in checks for one stage, in declared order.

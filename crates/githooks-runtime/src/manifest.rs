@@ -202,11 +202,7 @@ fn parse_stage(token: &str) -> Result<Stage, String> {
 }
 
 fn parse_severity(token: &str) -> Result<Severity, String> {
-    match token {
-        "block" => Ok(Severity::Block),
-        "warn" => Ok(Severity::Warn),
-        other => Err(format!("severity {other:?} must be `block` or `warn`")),
-    }
+    Severity::parse(token).ok_or_else(|| format!("severity {token:?} must be `block` or `warn`"))
 }
 
 /// A name already spoken for. An external must not be able to shadow

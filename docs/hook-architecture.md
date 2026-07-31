@@ -131,6 +131,15 @@ and removes only the block, which is what people usually want when they reach
 for `--no-verify`. I would ship this alongside, and expect it to become the
 common case.
 
+`Severity::parse` and `Severity::as_str` are the ONE mapping between the
+configured words and the enum, and `registry::effective_override` is the one
+answer to "what will the dispatcher apply here". There were four of the former
+and two of the latter — the dashboard's copies being its PREDICTION of the
+dispatcher, which is the one thing it must never get wrong. It did: the
+dispatcher asks `--get` (last entry wins), the dashboard listed every entry from
+`--get-regexp` and treated each as authoritative, so a global `warn` overridden
+by a local `block` was reported as a live downgrade.
+
 Shipped, with one property the sketch did not state: an unrecognised value falls
 back to the declared severity rather than to `warn`. Git validates nothing here,
 so a typo would otherwise be a silent disable — the exact failure this feature

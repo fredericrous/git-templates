@@ -16,6 +16,25 @@ pub fn stdout(args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// The same, run inside `dir`.
+///
+/// The dashboard asks about repositories it is not standing in, and must get
+/// the answer git would give THERE — config is per-repository, so asking from
+/// the wrong directory returns the wrong severity.
+pub fn stdout_in(dir: &std::path::Path, args: &[&str]) -> Option<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// True when the command exits 0. Output discarded.
 pub fn succeeds(args: &[&str]) -> bool {
     Command::new("git")

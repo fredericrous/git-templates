@@ -45,11 +45,7 @@ fn declared_checks(repo: &Path) -> Vec<DeclaredCheck> {
         .map(|l| DeclaredCheck {
             name: l.name,
             stage: l.stage.as_str().to_string(),
-            severity: match l.severity {
-                githooks_runtime::check::Severity::Block => "block",
-                githooks_runtime::check::Severity::Warn => "warn",
-            }
-            .to_string(),
+            severity: l.severity.as_str().to_string(),
             exts: l.exts,
             command: l.argv.join(" "),
             broken: l.broken,
@@ -341,9 +337,19 @@ fn applicable_checks(repo: &Path) -> Vec<String> {
         .lines()
         .map(str::to_owned)
         .collect();
+    applicable_from_paths(&paths)
+}
+
+/// The pure half: which checks could ever fire in a repository containing these
+/// paths.
+///
+/// Split out because the rollup's fixtures used to recompute this filter
+/// themselves. A test that builds its own answer cannot fail when the answer is
+/// wrong — the fixtures call this now.
+pub fn applicable_from_paths(paths: &[String]) -> Vec<String> {
     githooks_runtime::registry::CHECKS
         .iter()
-        .filter(|c| c.scope.matches(&paths))
+        .filter(|c| c.scope.matches(paths))
         .map(|c| c.name.to_string())
         .collect()
 }

@@ -749,7 +749,15 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
             };
             // Three outcomes worth telling apart, and only one of them is what
             // the author probably thought they were writing.
-            let head = if e.is_inert() {
+            let head = if e.shadowed() {
+                // Configured, and overridden by a later entry. Saying "does NOT
+                // block" here would be the dashboard contradicting the
+                // dispatcher, which is the one thing this block must not do.
+                // Which entry wins is git's precedence, not ours to name — an
+                // include can beat a local. The other row for this check is the
+                // one that applies, and it is listed right here.
+                "overridden — another entry for this check is the one git applies".to_string()
+            } else if e.is_inert() {
                 // Silent no-op. Git accepts any key and any value here, so a
                 // typo leaves a line in the config that looks like policy and
                 // enforces the default.
@@ -1484,6 +1492,45 @@ mod tests {
         assert!(
             !out.contains(".githooks.conf"),
             "a file that does not exist was mentioned: {out}"
+        );
+    }
+
+    /// An overridden entry must not read as active policy — that is the
+    /// dashboard contradicting the dispatcher.
+    #[test]
+    fn detail_marks_a_shadowed_entry_rather_than_calling_it_a_downgrade() {
+        let mut r = repo("a", true);
+        r.severities = vec![
+            crate::severities::shadowed_for_test("pre-commit-clippy", "warn"),
+            crate::severities::for_test("pre-commit-clippy", "block"),
+        ];
+        let mut app = App::new(scan_with_repos(vec![r]));
+        app.mode = Mode::Detail;
+        let out = render(&app, 120, 30);
+        assert!(out.contains("overridden"), "{out}");
+        assert!(
+            !out.contains("does NOT block"),
+            "an overridden warn was reported as a live downgrade:\n{out}"
+        );
+    }
+
+    /// And the column must not count it either.
+    #[test]
+    fn the_warn_column_ignores_a_shadowed_entry() {
+        let mut r = repo("a", true);
+        r.severities = vec![
+            crate::severities::shadowed_for_test("pre-commit-clippy", "warn"),
+            crate::severities::for_test("pre-commit-clippy", "block"),
+        ];
+        let app = App::new(scan_with_repos(vec![r]));
+        let out = render(&app, 140, 12);
+        let row = out
+            .lines()
+            .find(|l| l.contains("a "))
+            .expect("the repo row");
+        assert!(
+            !row.contains(" 1 "),
+            "counted an override git does not apply: {row}"
         );
     }
 
