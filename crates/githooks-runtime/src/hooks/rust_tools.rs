@@ -33,11 +33,11 @@ const RUST_PATHS: [&str; 5] = [
 
 fn is_rust_path(f: &str) -> bool {
     let name = f.rsplit('/').next().unwrap_or(f);
-    RUST_PATHS.iter().any(|p| {
-        if p.starts_with('.') {
-            name.ends_with(p)
+    RUST_PATHS.iter().any(|pattern| {
+        if pattern.starts_with('.') {
+            name.ends_with(pattern)
         } else {
-            name == *p
+            name == *pattern
         }
     })
 }

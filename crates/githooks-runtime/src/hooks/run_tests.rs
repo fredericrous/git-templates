@@ -120,11 +120,11 @@ pub fn packages_to_test(pkg_dirs: &[String], changed_dirs: &[String]) -> Vec<Str
     pkg_dirs
         .iter()
         .filter(|pkg| {
-            changed_dirs.iter().any(|d| {
+            changed_dirs.iter().any(|dir| {
                 if pkg.is_empty() {
                     true
                 } else {
-                    d == *pkg || d.starts_with(&format!("{pkg}/"))
+                    dir == *pkg || dir.starts_with(&format!("{pkg}/"))
                 }
             })
         })

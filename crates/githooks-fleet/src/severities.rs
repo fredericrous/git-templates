@@ -141,17 +141,17 @@ pub fn read(repo: &Path) -> Vec<SeverityOverride> {
 /// wrong.
 fn resolve(repo: &Path, raws: Vec<RawEntry>) -> Vec<SeverityOverride> {
     let mut applied: BTreeMap<&str, Option<String>> = BTreeMap::new();
-    for r in &raws {
-        if !applied.contains_key(r.check.as_str()) {
+    for raw in &raws {
+        if !applied.contains_key(raw.check.as_str()) {
             let v = githooks_runtime::git::stdout_in(
                 repo,
                 &[
                     "config",
                     "--get",
-                    &githooks_runtime::registry::severity_key(&r.check),
+                    &githooks_runtime::registry::severity_key(&raw.check),
                 ],
             );
-            applied.insert(r.check.as_str(), v);
+            applied.insert(raw.check.as_str(), v);
         }
     }
     raws.iter()

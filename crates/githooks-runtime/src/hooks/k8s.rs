@@ -37,8 +37,8 @@ const ARGO_KINDS: [&str; 4] = [
 /// `^kind: <one of the Argo kinds>$` — anchored per line, so a `kind:` nested
 /// in a template body or a longer word does not qualify.
 pub fn declares_argo_kind(content: &str) -> bool {
-    content.lines().any(|l| {
-        l.strip_prefix("kind: ")
+    content.lines().any(|line| {
+        line.strip_prefix("kind: ")
             .map(|k| ARGO_KINDS.contains(&k.trim_end()))
             .unwrap_or(false)
     })
@@ -52,8 +52,8 @@ pub fn argo_lint(_args: &[std::ffi::OsString]) -> Outcome {
     let root = repo_root();
     let workflows: Vec<String> = staged
         .into_iter()
-        .filter(|f| {
-            std::fs::read_to_string(Path::new(&root).join(f))
+        .filter(|file| {
+            std::fs::read_to_string(Path::new(&root).join(file))
                 .map(|c| declares_argo_kind(&c))
                 .unwrap_or(false)
         })

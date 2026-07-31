@@ -41,9 +41,9 @@ pub type HookFn = fn(&Ctx) -> i32;
 pub const ENTRYPOINTS: &[(&str, HookFn)] = &[
     ("pre-commit", dispatch::pre_commit),
     ("pre-push", dispatch::pre_push),
-    ("commit-msg", |c| hooks::commit_msg::run(c.args)),
-    ("prepare-commit-msg", |c| {
-        hooks::prepare_commit_msg::run(c.args)
+    ("commit-msg", |ctx| hooks::commit_msg::run(ctx.args)),
+    ("prepare-commit-msg", |ctx| {
+        hooks::prepare_commit_msg::run(ctx.args)
     }),
 ];
 
@@ -66,28 +66,28 @@ pub const CHECKS: &[Builtin] = &[
             &["kustomization.yaml", "kustomization.yml"],
         ),
         severity: Severity::Block,
-        run: |c| hooks::k8s::argo_lint(c.args),
+        run: |ctx| hooks::k8s::argo_lint(ctx.args),
     },
     Builtin {
         name: "pre-commit-ban-terms",
         stage: Stage::PreCommit,
         scope: Scope::files(&[".js", ".jsx", ".ts", ".tsx", ".vue"]),
         severity: Severity::Block,
-        run: |c| Outcome::from_code(hooks::ban_terms::run(c.name, c.args)),
+        run: |ctx| Outcome::from_code(hooks::ban_terms::run(ctx.name, ctx.args)),
     },
     Builtin {
         name: "pre-commit-cargo-fmt",
         stage: Stage::PreCommit,
         scope: Scope::new(&[".rs"], &["Cargo.toml"]),
         severity: Severity::Block,
-        run: |c| hooks::rust_tools::fmt(c.args),
+        run: |ctx| hooks::rust_tools::fmt(ctx.args),
     },
     Builtin {
         name: "pre-commit-clippy",
         stage: Stage::PreCommit,
         scope: Scope::new(&[".rs"], &["Cargo.toml"]),
         severity: Severity::Block,
-        run: |c| hooks::rust_tools::clippy(c.args),
+        run: |ctx| hooks::rust_tools::clippy(ctx.args),
     },
     Builtin {
         name: "pre-commit-kube-linter",
@@ -97,7 +97,7 @@ pub const CHECKS: &[Builtin] = &[
             &[".kube-linter*.yaml", ".kube-linter*.yml"],
         ),
         severity: Severity::Block,
-        run: |c| hooks::k8s::kube_linter(c.args),
+        run: |ctx| hooks::k8s::kube_linter(ctx.args),
     },
     Builtin {
         name: "pre-commit-kubeconform",
@@ -107,35 +107,35 @@ pub const CHECKS: &[Builtin] = &[
             &["kustomization.yaml", "kustomization.yml"],
         ),
         severity: Severity::Block,
-        run: |c| hooks::k8s::kubeconform(c.args),
+        run: |ctx| hooks::k8s::kubeconform(ctx.args),
     },
     Builtin {
         name: "pre-commit-lint-js",
         stage: Stage::PreCommit,
         scope: Scope::new(&[".js", ".jsx", ".ts", ".tsx", ".vue"], &["package.json"]),
         severity: Severity::Block,
-        run: |c| hooks::lint_js::run(c.args),
+        run: |ctx| hooks::lint_js::run(ctx.args),
     },
     Builtin {
         name: "pre-commit-lint-json-yaml",
         stage: Stage::PreCommit,
         scope: Scope::files(&[".json", ".yaml", ".yml"]),
         severity: Severity::Block,
-        run: |c| hooks::lint_json_yaml::run(c.args),
+        run: |ctx| hooks::lint_json_yaml::run(ctx.args),
     },
     Builtin {
         name: "pre-commit-merge-conflict",
         stage: Stage::PreCommit,
         scope: Scope::ALWAYS,
         severity: Severity::Block,
-        run: |c| Outcome::from_code(hooks::merge_conflict::run(c.name, c.args)),
+        run: |ctx| Outcome::from_code(hooks::merge_conflict::run(ctx.name, ctx.args)),
     },
     Builtin {
         name: "pre-commit-package-lock",
         stage: Stage::PreCommit,
         scope: Scope::new(&[], &["package.json"]),
         severity: Severity::Block,
-        run: |c| hooks::package_lock::run(c.args),
+        run: |ctx| hooks::package_lock::run(ctx.args),
     },
     Builtin {
         name: "pre-commit-prettier",
@@ -152,7 +152,7 @@ pub const CHECKS: &[Builtin] = &[
             ],
         ),
         severity: Severity::Block,
-        run: |c| hooks::prettier::run(c.args),
+        run: |ctx| hooks::prettier::run(ctx.args),
     },
     Builtin {
         name: "pre-commit-pyright",
@@ -166,7 +166,7 @@ pub const CHECKS: &[Builtin] = &[
             ],
         ),
         severity: Severity::Block,
-        run: |c| hooks::python_tools::pyright(c.args),
+        run: |ctx| hooks::python_tools::pyright(ctx.args),
     },
     Builtin {
         name: "pre-commit-ruff",
@@ -176,14 +176,14 @@ pub const CHECKS: &[Builtin] = &[
             &["ruff.toml", ".ruff.toml", "pyproject.toml"],
         ),
         severity: Severity::Block,
-        run: |c| hooks::python_tools::ruff(c.args),
+        run: |ctx| hooks::python_tools::ruff(ctx.args),
     },
     Builtin {
         name: "pre-commit-usual-name",
         stage: Stage::PreCommit,
         scope: Scope::ALWAYS,
         severity: Severity::Block,
-        run: |c| hooks::usual_name::run(c.args),
+        run: |ctx| hooks::usual_name::run(ctx.args),
     },
     Builtin {
         name: "pre-commit-yamllint",
@@ -193,7 +193,7 @@ pub const CHECKS: &[Builtin] = &[
             &[".yamllint.yaml", ".yamllint.yml", ".yamllint"],
         ),
         severity: Severity::Block,
-        run: |c| hooks::yamllint::run(c.args),
+        run: |ctx| hooks::yamllint::run(ctx.args),
     },
     // ---- pre-push, cheapest and most decisive first ----
     Builtin {
@@ -201,35 +201,35 @@ pub const CHECKS: &[Builtin] = &[
         stage: Stage::PrePush,
         scope: Scope::ALWAYS,
         severity: Severity::Block,
-        run: |c| Outcome::from_code(hooks::branch_protect::run(c.push.get())),
+        run: |ctx| Outcome::from_code(hooks::branch_protect::run(ctx.push.get())),
     },
     Builtin {
         name: "pre-push-branch-pattern",
         stage: Stage::PrePush,
         scope: Scope::ALWAYS,
         severity: Severity::Block,
-        run: |c| Outcome::from_code(hooks::branch_pattern::run(c.args)),
+        run: |ctx| Outcome::from_code(hooks::branch_pattern::run(ctx.args)),
     },
     Builtin {
         name: "pre-push-pull-rebase",
         stage: Stage::PrePush,
         scope: Scope::ALWAYS,
         severity: Severity::Block,
-        run: |c| Outcome::from_code(hooks::pull_rebase::run(c.args)),
+        run: |ctx| Outcome::from_code(hooks::pull_rebase::run(ctx.args)),
     },
     Builtin {
         name: "pre-push-run-tests-js",
         stage: Stage::PrePush,
         scope: Scope::new(&[".js", ".jsx", ".ts", ".tsx", ".vue"], &["package.json"]),
         severity: Severity::Block,
-        run: |c| Outcome::from_code(hooks::run_tests::run(c.push.get())),
+        run: |ctx| Outcome::from_code(hooks::run_tests::run(ctx.push.get())),
     },
     Builtin {
         name: "pre-push-cargo-test",
         stage: Stage::PrePush,
         scope: Scope::new(&[".rs"], &["Cargo.toml"]),
         severity: Severity::Block,
-        run: |c| hooks::rust_tools::test(c.push.get()),
+        run: |ctx| hooks::rust_tools::test(ctx.push.get()),
     },
 ];
 
@@ -323,7 +323,7 @@ pub fn effective_override(repo: Option<&Path>, check: &str) -> Option<Severity> 
 
 /// Built-in checks for one stage, in declared order.
 pub fn stage_checks(stage: Stage) -> impl Iterator<Item = &'static Builtin> {
-    CHECKS.iter().filter(move |c| c.stage == stage)
+    CHECKS.iter().filter(move |check| check.stage == stage)
 }
 
 /// Every check for one stage — built-ins first, then whatever this repository
@@ -333,12 +333,14 @@ pub fn stage_checks(stage: Stage) -> impl Iterator<Item = &'static Builtin> {
 /// not be able to delay `pre-push-branch-protect`, and appending is the only
 /// arrangement in which it cannot.
 pub fn all_stage_checks(stage: Stage) -> Vec<&'static dyn Check> {
-    let mut out: Vec<&'static dyn Check> = stage_checks(stage).map(|c| c as &dyn Check).collect();
+    let mut out: Vec<&'static dyn Check> = stage_checks(stage)
+        .map(|check| check as &dyn Check)
+        .collect();
     out.extend(
         crate::manifest::externals()
             .iter()
-            .filter(|e| e.stage == stage)
-            .map(|e| e as &dyn Check),
+            .filter(|external| external.stage == stage)
+            .map(|external| external as &dyn Check),
     );
     out
 }
@@ -351,12 +353,14 @@ pub fn lookup(name: &str) -> Option<HookFn> {
     // and how `githooks <check>` works from a shell. Its Outcome collapses to an
     // exit code here, honouring severity, so a `warn` check invoked directly
     // reports without failing exactly as it does inside a dispatcher.
-    if CHECKS.iter().any(|c| c.name == name)
-        || crate::manifest::externals().iter().any(|e| e.name == name)
+    if CHECKS.iter().any(|check| check.name == name)
+        || crate::manifest::externals()
+            .iter()
+            .any(|external| external.name == name)
     {
-        return Some(|c: &Ctx| {
-            let check = one_named(c.name).expect("checked above");
-            match check.run(c) {
+        return Some(|ctx: &Ctx| {
+            let check = one_named(ctx.name).expect("checked above");
+            match check.run(ctx) {
                 Outcome::Failed if severity_of(check) == Severity::Block => 1,
                 _ => 0,
             }
@@ -369,13 +373,13 @@ pub fn lookup(name: &str) -> Option<HookFn> {
 /// costs nothing because `manifest::parse` refuses a name a built-in already
 /// holds — the two guards together mean neither kind can shadow the other.
 pub fn one_named(name: &str) -> Option<&'static dyn Check> {
-    if let Some(b) = CHECKS.iter().find(|c| c.name == name) {
-        return Some(b);
+    if let Some(builtin) = CHECKS.iter().find(|check| check.name == name) {
+        return Some(builtin);
     }
     crate::manifest::externals()
         .iter()
-        .find(|e| e.name == name)
-        .map(|e| e as &dyn Check)
+        .find(|external| external.name == name)
+        .map(|external| external as &dyn Check)
 }
 
 #[cfg(test)]
@@ -449,7 +453,7 @@ mod tests {
         for n in ENTRYPOINTS
             .iter()
             .map(|(n, _)| *n)
-            .chain(CHECKS.iter().map(|c| c.name))
+            .chain(CHECKS.iter().map(|check| check.name))
         {
             assert!(seen.insert(n), "duplicate registration: {n}");
         }
@@ -462,7 +466,7 @@ mod tests {
         let mut shipped: Vec<String> = std::fs::read_dir(dir)
             .expect("templates/hooks")
             .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         shipped.sort();
         assert_eq!(
@@ -481,8 +485,8 @@ mod tests {
     /// invoke one directly.
     #[test]
     fn every_check_is_reachable_by_name() {
-        for c in CHECKS {
-            assert!(lookup(c.name).is_some(), "{} not reachable", c.name);
+        for check in CHECKS {
+            assert!(lookup(check.name).is_some(), "{} not reachable", check.name);
         }
         assert!(lookup("pre-commit-not-a-check").is_none());
     }
@@ -491,7 +495,7 @@ mod tests {
     #[test]
     fn pre_push_runs_cheapest_first() {
         let order: Vec<&str> = super::stage_checks(Stage::PrePush)
-            .map(|c| c.name)
+            .map(|check| check.name)
             .collect();
         assert_eq!(
             order,

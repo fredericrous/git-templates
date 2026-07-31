@@ -82,12 +82,12 @@ pub fn apply(plan: &FixPlan) -> Outcome {
     }
 
     let mut written = 0;
-    for w in plan.write.iter().filter(|w| w.changes) {
-        let body = shim::render(&w.baked);
-        if let Err(e) = write_executable(&w.path, &body) {
+    for write in plan.write.iter().filter(|write| write.changes) {
+        let body = shim::render(&write.baked);
+        if let Err(e) = write_executable(&write.path, &body) {
             return Outcome::Failed {
                 error: e.to_string(),
-                at: w.path.display().to_string(),
+                at: write.path.display().to_string(),
             };
         }
         written += 1;

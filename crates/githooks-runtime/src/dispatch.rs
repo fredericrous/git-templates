@@ -135,7 +135,7 @@ pub fn pre_commit(ctx: &Ctx) -> i32 {
 /// A seam, so a test can hand it a check that panics. Without it the value
 /// standing in for a dead check was a literal at one call site that no test
 /// could reach — the rule was asserted on the runner and merely hoped for here.
-fn run_stage(checks: &[&'static dyn Check], ctx: &Ctx, sev: &Overrides) -> i32 {
+fn run_stage(checks: &[&'static dyn Check], ctx: &Ctx, severities: &Overrides) -> i32 {
     if checks.is_empty() {
         return 0;
     }
@@ -156,7 +156,7 @@ fn run_stage(checks: &[&'static dyn Check], ctx: &Ctx, sev: &Overrides) -> i32 {
         Outcome::Failed,
     );
 
-    let report = classify(checks, &outcomes, sev);
+    let report = classify(checks, &outcomes, severities);
     announce(&report);
     report.exit_code()
 }
@@ -188,7 +188,11 @@ impl Report<'_> {
 }
 
 /// Pure: outcomes and severities in, a verdict out. No IO.
-fn classify<'a>(checks: &[&'a dyn Check], outcomes: &[Outcome], sev: &Overrides) -> Report<'a> {
+fn classify<'a>(
+    checks: &[&'a dyn Check],
+    outcomes: &[Outcome],
+    severities: &Overrides,
+) -> Report<'a> {
     let mut report = Report::default();
     for (check, outcome) in checks.iter().zip(outcomes) {
         match outcome {
@@ -196,7 +200,7 @@ fn classify<'a>(checks: &[&'a dyn Check], outcomes: &[Outcome], sev: &Overrides)
             // said what it wanted to, and a roll-up would only repeat it.
             Outcome::Passed | Outcome::Warned => {}
             Outcome::Unavailable => report.unavailable.push(check.name()),
-            Outcome::Failed => match sev.of(*check) {
+            Outcome::Failed => match severities.of(*check) {
                 Severity::Block => report.blocked.push(check.name()),
                 Severity::Warn => report.downgraded.push(check.name()),
             },
@@ -237,7 +241,7 @@ fn announce(report: &Report) {
 
 pub fn pre_push(ctx: &Ctx) -> i32 {
     // NB: no CHERRY_PICK_HEAD check here — the zsh pre-push had none either.
-    let sev = Overrides::read();
+    let severities = Overrides::read();
     for check in selected(Stage::PrePush) {
         let sub = Ctx {
             name: check.name(),
@@ -257,7 +261,7 @@ pub fn pre_push(ctx: &Ctx) -> i32 {
                 )
             }
             Outcome::Warned => {}
-            Outcome::Failed => match sev.of(check) {
+            Outcome::Failed => match severities.of(check) {
                 Severity::Warn => println!(
                     "{} {} reported a problem (severity warn)",
                     warning_sign(),

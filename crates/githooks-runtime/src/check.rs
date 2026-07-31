@@ -69,7 +69,7 @@ impl Scope {
         let by_ext = self.files.is_empty()
             || paths
                 .iter()
-                .any(|p| self.files.iter().any(|e| p.ends_with(e)));
+                .any(|path| self.files.iter().any(|ext| path.ends_with(ext)));
         let opted_in = self.opt_in.is_empty()
             || paths.iter().any(|p| {
                 let name = p.rsplit('/').next().unwrap_or(p);

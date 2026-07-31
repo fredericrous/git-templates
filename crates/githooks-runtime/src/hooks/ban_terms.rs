@@ -390,8 +390,8 @@ pub fn run(hook_name: &str, _args: &[std::ffi::OsString]) -> i32 {
             .filter(|f| !f.is_empty())
             .filter(|f| is_searchable(f))
             .filter(|f| !stem_matches_self(f))
-            .filter(|f| {
-                match git::stdout(&["show", &format!(":{f}")]) {
+            .filter(|file| {
+                match git::stdout(&["show", &format!(":{file}")]) {
                     // Unreadable (binary, or vanished between the two git
                     // calls): keep the prefilter's verdict rather than
                     // silently clearing it.
