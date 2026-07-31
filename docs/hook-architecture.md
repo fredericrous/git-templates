@@ -286,6 +286,14 @@ exits, and wrong in a dashboard that reads ninety-six and may re-read them on
 every refresh. `parse_lines` returns owned `Line`s and only `External::from`
 leaks, with a test pinning the two to the same answers.
 
+## What came next
+
+Built, in `docs/`: this document's plan shipped as #57–#67. The comparison
+against `pre-commit`, `lefthook` and `husky` that followed is
+[index-fidelity-and-run-modes.md](index-fidelity-and-run-modes.md) — four ideas
+worth taking, one refused on the record, and one correctness gap this document
+did not notice.
+
 ## Open decisions
 
 1. ~~**Does `Custom` scope survive?**~~ RESOLVED: no, and the question was
