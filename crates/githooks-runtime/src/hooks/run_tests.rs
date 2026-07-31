@@ -173,6 +173,9 @@ pub fn run(refs: &[crate::pushrefs::PushRef]) -> Outcome {
     let Some(root) = git::stdout(&["rev-parse", "--show-toplevel"]) else {
         return Outcome::Passed;
     };
+    // Same question as cargo-test: the suite should be answering about the
+    // commits being pushed, not about whatever is open in the editor.
+    let (run_in, _guard) = crate::pushed_tree::where_to_run(refs, &root);
     let pkg_dirs = git::stdout(&["ls-files"])
         .map(|f| package_dirs(&f))
         .unwrap_or_default();
@@ -204,7 +207,8 @@ pub fn run(refs: &[crate::pushrefs::PushRef]) -> Outcome {
         }
 
         for folder in packages_to_test(&pkg_dirs, &changed_dirs) {
-            if !run_gate(&root, &folder) {
+            let where_ = run_in.to_string_lossy().into_owned();
+            if !run_gate(&where_, &folder) {
                 return Outcome::Failed;
             }
         }
