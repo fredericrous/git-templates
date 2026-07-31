@@ -26,6 +26,7 @@ pub mod install;
 pub mod manifest;
 pub mod pushrefs;
 pub mod registry;
+pub mod staged_only;
 pub mod trust;
 pub mod ui;
 pub mod vocabulary;

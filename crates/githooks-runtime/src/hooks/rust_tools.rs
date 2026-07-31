@@ -145,10 +145,12 @@ pub fn fmt(_args: &[std::ffi::OsString]) -> Outcome {
     if roots.is_empty() {
         return Outcome::Passed;
     }
-    // `--all -- --check` per the project convention. Note this inspects the
-    // WORKING TREE, not the index, so a partially-staged file is judged by its
-    // unstaged form too. Same trade-off cargo fmt gives everyone; scoping it to
-    // staged paths would need the edition resolved by hand.
+    // `--all -- --check` per the project convention. It inspects the working
+    // TREE rather than the index — and that is now correct, because the
+    // pre-commit stage holds the unstaged changes aside for the duration, so
+    // the tree IS the staged content. This comment used to call that "the same
+    // trade-off cargo fmt gives everyone", which was true of the observation
+    // and wrong about the conclusion: see `staged_only`.
     match each_root(
         &roots,
         Some("fmt"),
