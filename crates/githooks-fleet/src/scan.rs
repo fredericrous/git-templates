@@ -59,24 +59,22 @@ impl DeclaredCheck {
 /// parser the dispatcher uses, so the dashboard cannot form its own opinion
 /// about what a manifest means.
 fn declared_checks(repo: &Path) -> Vec<DeclaredCheck> {
-    use githooks_runtime::manifest::Line;
     githooks_runtime::manifest::read_lines(repo)
         .into_iter()
-        .map(|l| {
-            let (name, stage) = (l.name().to_string(), l.stage().as_str().to_string());
-            let why = l.broken();
-            let state = match (l, why) {
-                (Line::Usable(d), _) => DeclaredState::Usable {
-                    severity: d.severity.as_str().to_string(),
-                    command: d.command(),
-                    exts: d.exts,
+        .map(|line| {
+            let (name, stage, parsed) = line.into_parts();
+            DeclaredCheck {
+                name,
+                stage: stage.as_str().to_string(),
+                state: match parsed {
+                    Ok(declared) => DeclaredState::Usable {
+                        severity: declared.severity.as_str().to_string(),
+                        command: declared.command(),
+                        exts: declared.exts,
+                    },
+                    Err(why) => DeclaredState::Unusable { why },
                 },
-                (Line::Broken { .. }, Some(why)) => DeclaredState::Unusable { why },
-                (Line::Broken { why, lineno, .. }, None) => DeclaredState::Unusable {
-                    why: format!("line {lineno}: {why}"),
-                },
-            };
-            DeclaredCheck { name, stage, state }
+            }
         })
         .collect()
 }
