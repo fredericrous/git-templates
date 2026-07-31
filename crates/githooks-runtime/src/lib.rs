@@ -73,7 +73,10 @@ pub fn list_checks() {
 
     let broken: std::collections::BTreeMap<&str, &str> = manifest::externals()
         .iter()
-        .filter_map(|e| e.broken.as_deref().map(|w| (e.name.as_str(), w)))
+        .filter_map(|e| match &e.kind {
+            manifest::Kind::Unusable { why } => Some((e.name.as_str(), why.as_str())),
+            manifest::Kind::Runnable { .. } => None,
+        })
         .collect();
 
     for stage in [Stage::PreCommit, Stage::PrePush] {

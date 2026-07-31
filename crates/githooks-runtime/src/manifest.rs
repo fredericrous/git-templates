@@ -46,37 +46,138 @@ use crate::registry::{Ctx, CHECKS, ENTRYPOINTS};
 
 pub const MANIFEST: &str = ".githooks.conf";
 
-/// One manifest line, fully parsed and owning everything it holds.
+/// Why a line could not be used.
 ///
-/// Separate from `External` because the fleet dashboard reads ninety-six
-/// manifests and may re-read them on every refresh, while `External` holds a
-/// `Scope` whose `&'static` slices are LEAKED. One parser, and the leak confined
-/// to the hook process, which reads one manifest once and exits.
+/// A type rather than a `String`: the prose belongs in `Display`, and a caller
+/// that wants to ask "was this a duplicate?" should not have to grep for the
+/// word. The tests used to assert on substrings, which coupled them to wording
+/// and would have kept passing if the wording stayed while the meaning changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Line {
+pub enum ParseError {
+    MissingFields,
+    MissingName,
+    /// Names a check compiled into the binary.
+    NameTaken(String),
+    /// A second USABLE line claiming a name already claimed.
+    Duplicate(String),
+    BadStage(String),
+    BadScope(String),
+    BadSeverity(String),
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseError::MissingFields => {
+                write!(f, "expected 5 fields: stage name scope severity command")
+            }
+            ParseError::MissingName => write!(f, "missing name"),
+            ParseError::NameTaken(n) => write!(f, "{n:?} is a built-in check name"),
+            ParseError::Duplicate(n) => write!(f, "{n:?} is declared twice"),
+            ParseError::BadStage(t) => {
+                write!(f, "stage {t:?} must be `pre-commit` or `pre-push`")
+            }
+            ParseError::BadScope(t) => write!(f, "scope {t:?} must be `*` or `*.<ext>`"),
+            ParseError::BadSeverity(t) => {
+                write!(f, "severity {t:?} must be `block` or `warn`")
+            }
+        }
+    }
+}
+
+/// A line that parsed. Every field means something.
+///
+/// `program` and `args` rather than one `argv`: a runnable check must have a
+/// command, and splitting the head off makes that structural instead of a
+/// `split_first` guard that can only ever be dead code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declared {
     pub name: String,
     pub stage: Stage,
     pub severity: Severity,
     /// Extensions that gate it. Empty means any change — the `*` scope.
     pub exts: Vec<String>,
-    /// Already split. Empty only when `broken` is set.
-    pub argv: Vec<String>,
-    /// Why this line could not be used. `Some` makes the check inert but
-    /// VISIBLE — see the module docs.
-    pub broken: Option<String>,
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+impl Declared {
+    /// The command as written, for display.
+    pub fn command(&self) -> String {
+        std::iter::once(self.program.as_str())
+            .chain(self.args.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// One manifest line: usable, or not.
+///
+/// A SUM, not a struct with an `Option<why>` beside the fields. The struct
+/// form let a broken line carry a severity, a scope and an argv that meant
+/// nothing — and it produced a wrong diagnosis: because broken and usable
+/// entries shared one list, a valid line was rejected as "declared twice" for
+/// colliding with a line that could not run. Dedup now sees only `Usable`.
+///
+/// Separate from `External` because the fleet reads ninety-six manifests and may
+/// re-read them on every refresh, while `External` holds a `Scope` whose
+/// `&'static` slices are LEAKED.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Line {
+    Usable(Declared),
+    Broken {
+        /// The declared name, or `<file>:<lineno>` when the line has none — a
+        /// gap has to be nameable to be reportable.
+        name: String,
+        /// Broken lines land on pre-commit unless the stage token parsed: seen
+        /// on every commit beats seen on every push.
+        stage: Stage,
+        lineno: usize,
+        why: ParseError,
+    },
+}
+
+impl Line {
+    pub fn name(&self) -> &str {
+        match self {
+            Line::Usable(d) => &d.name,
+            Line::Broken { name, .. } => name,
+        }
+    }
+    pub fn stage(&self) -> Stage {
+        match self {
+            Line::Usable(d) => d.stage,
+            Line::Broken { stage, .. } => *stage,
+        }
+    }
+    /// `Some(reason)` when this line declares a check that cannot run.
+    pub fn broken(&self) -> Option<String> {
+        match self {
+            Line::Usable(_) => None,
+            Line::Broken { lineno, why, .. } => Some(format!("line {lineno}: {why}")),
+        }
+    }
 }
 
 /// A check a repository declares, rather than one compiled in.
 pub struct External {
     pub name: String,
     pub stage: Stage,
-    pub scope: Scope,
-    pub severity: Severity,
-    /// Already split. Empty only when `broken` is set.
-    pub argv: Vec<String>,
-    /// Why this line could not be used. `Some` makes the check inert but
-    /// VISIBLE — see the module docs.
-    pub broken: Option<String>,
+    pub kind: Kind,
+}
+
+/// The two things an external can be. `Scope` and `Severity` live only on the
+/// runnable side, so a broken external cannot carry a severity nobody applies.
+pub enum Kind {
+    Runnable {
+        scope: Scope,
+        severity: Severity,
+        program: String,
+        args: Vec<String>,
+    },
+    Unusable {
+        why: String,
+    },
 }
 
 impl Check for External {
@@ -86,21 +187,41 @@ impl Check for External {
     fn stage(&self) -> Stage {
         self.stage
     }
+    /// Derived for an unusable check rather than stored: it never runs, so its
+    /// scope is a question with no answer, and computing one here keeps the
+    /// DATA from carrying a value that means nothing.
     fn scope(&self) -> Scope {
-        self.scope
+        match &self.kind {
+            Kind::Runnable { scope, .. } => *scope,
+            Kind::Unusable { .. } => Scope::ALWAYS,
+        }
     }
     fn severity(&self) -> Severity {
-        self.severity
+        match &self.kind {
+            Kind::Runnable { severity, .. } => *severity,
+            // Never consulted: an unusable check reports `Unavailable`, which
+            // no severity can turn into a block.
+            Kind::Unusable { .. } => Severity::Warn,
+        }
     }
 
     fn run(&self, ctx: &Ctx) -> Outcome {
-        if let Some(why) = &self.broken {
-            crate::hooks::common::warn(&format!(
-                "{MANIFEST}: {} — {why}",
-                crate::ui::highlight(&self.name)
-            ));
-            return Outcome::Unavailable;
-        }
+        let (scope, program, args) = match &self.kind {
+            Kind::Runnable {
+                scope,
+                program,
+                args,
+                ..
+            } => (scope, program, args),
+            Kind::Unusable { why } => {
+                crate::hooks::common::warn(&format!(
+                    "{MANIFEST}: {} — {why}",
+                    crate::ui::highlight(&self.name)
+                ));
+                return Outcome::Unavailable;
+            }
+        };
+
         // The scope gate lives HERE, unlike a built-in's, which enforces its own
         // in its first three lines. A declared command has no way to know what
         // was staged, so if this did not gate it, `*.sh` would run on every
@@ -109,19 +230,16 @@ impl Check for External {
         // Which files to test against depends on the stage: what is staged for
         // a commit, what is being pushed for a push. `*` short-circuits before
         // either is computed, which is the common case.
-        if !self.scope.files.is_empty() {
+        if !scope.files.is_empty() {
             let paths = match self.stage {
                 Stage::PreCommit => crate::hooks::common::staged_files(&[]),
                 Stage::PrePush => crate::pushrefs::changed_files(ctx.push.get()),
             };
-            if !self.scope.matches(&paths) {
+            if !scope.matches(&paths) {
                 return Outcome::Passed;
             }
         }
         let root = crate::hooks::common::repo_root();
-        let Some((program, args)) = self.argv.split_first() else {
-            return Outcome::Unavailable;
-        };
         let mut cmd = Command::new(program);
         cmd.args(args).current_dir(&root).stdin(Stdio::null());
         crate::hooks::common::strip_git_env(&mut cmd);
@@ -174,35 +292,27 @@ fn leak(exts: Vec<String>) -> &'static [&'static str] {
 /// Returns owned extensions rather than a `Scope`, so validating a manifest
 /// costs nothing permanent. Only `External::from` turns these into the
 /// `&'static` form `Scope` requires.
-fn parse_scope(token: &str) -> Result<Vec<String>, String> {
+fn parse_scope(token: &str) -> Result<Vec<String>, ParseError> {
     if token == "*" {
         return Ok(Vec::new());
     }
     let mut exts = Vec::new();
     for part in token.split(',') {
-        let Some(ext) = part.strip_prefix('*') else {
-            return Err(format!("scope {part:?} must be `*` or `*.<ext>`"));
-        };
-        if ext.is_empty() || !ext.starts_with('.') {
-            return Err(format!("scope {part:?} must be `*` or `*.<ext>`"));
-        }
+        let ext = part
+            .strip_prefix('*')
+            .filter(|e| e.starts_with('.'))
+            .ok_or_else(|| ParseError::BadScope(part.to_string()))?;
         exts.push(ext.to_string());
     }
     Ok(exts)
 }
 
-fn parse_stage(token: &str) -> Result<Stage, String> {
+fn parse_stage(token: &str) -> Option<Stage> {
     match token {
-        "pre-commit" => Ok(Stage::PreCommit),
-        "pre-push" => Ok(Stage::PrePush),
-        other => Err(format!(
-            "stage {other:?} must be `pre-commit` or `pre-push`"
-        )),
+        "pre-commit" => Some(Stage::PreCommit),
+        "pre-push" => Some(Stage::PrePush),
+        _ => None,
     }
-}
-
-fn parse_severity(token: &str) -> Result<Severity, String> {
-    Severity::parse(token).ok_or_else(|| format!("severity {token:?} must be `block` or `warn`"))
 }
 
 /// A name already spoken for. An external must not be able to shadow
@@ -212,27 +322,27 @@ fn name_is_taken(name: &str) -> bool {
     CHECKS.iter().any(|c| c.name == name) || ENTRYPOINTS.iter().any(|(n, _)| *n == name)
 }
 
-/// The first four whitespace-separated tokens, and the untouched remainder.
-fn tokenise(line: &str) -> (Vec<&str>, &str) {
-    let mut fields = Vec::new();
+/// The four leading tokens and the untouched remainder, or `None` when the line
+/// does not have them.
+///
+/// The arity is in the TYPE. Returning a `Vec` made "four or it is malformed"
+/// a rule every caller had to remember and none could be checked against.
+///
+/// NOT `splitn(5, char::is_whitespace)`: that splits at the FIRST whitespace
+/// character every time, so a file aligned into columns — which is how the
+/// format invites you to write it — yields empty fields for every run of
+/// spaces after the first.
+fn tokenise(line: &str) -> Option<([&str; 4], &str)> {
+    let mut fields: [&str; 4] = [""; 4];
     let mut rest = line;
-    for _ in 0..4 {
+    for slot in fields.iter_mut() {
         rest = rest.trim_start();
-        match rest.find(char::is_whitespace) {
-            Some(i) => {
-                fields.push(&rest[..i]);
-                rest = &rest[i..];
-            }
-            None => {
-                if !rest.is_empty() {
-                    fields.push(rest);
-                    rest = "";
-                }
-                break;
-            }
-        }
+        let i = rest.find(char::is_whitespace)?;
+        *slot = &rest[..i];
+        rest = &rest[i..];
     }
-    (fields, rest.trim())
+    let command = rest.trim();
+    (!command.is_empty()).then_some((fields, command))
 }
 
 pub fn parse_lines(text: &str) -> Vec<Line> {
@@ -243,104 +353,112 @@ pub fn parse_lines(text: &str) -> Vec<Line> {
             continue;
         }
         let lineno = i + 1;
-        // Four tokens, then everything left is the command.
-        //
-        // NOT `splitn(5, char::is_whitespace)`: that splits at the FIRST
-        // whitespace character every time, so a file aligned into columns —
-        // which is how the format invites you to write it — yields empty fields
-        // for every run of spaces after the first.
-        let (fields, command) = tokenise(line);
-
-        // A name we can print even when the line is too broken to have one:
-        // a gap has to be nameable to be reportable.
-        let fallback = format!("{MANIFEST}:{lineno}");
-        let declared = fields.get(1).copied().unwrap_or("");
-        let name = if declared.is_empty() {
-            fallback.clone()
-        } else {
-            declared.to_string()
-        };
-
-        let broken = |why: String| Line {
-            name: name.clone(),
-            // Broken lines land on pre-commit even when the stage token is what
-            // failed to parse: seen on every commit beats seen on every push.
-            stage: fields
-                .first()
-                .and_then(|s| parse_stage(s).ok())
-                .unwrap_or(Stage::PreCommit),
-            severity: Severity::Warn,
-            exts: Vec::new(),
-            argv: Vec::new(),
-            broken: Some(format!("line {lineno}: {why}")),
-        };
-
-        if fields.len() < 4 || command.is_empty() {
-            out.push(broken(
-                "expected 5 fields: stage name scope severity command".to_string(),
-            ));
-            continue;
-        }
-        if declared.is_empty() {
-            out.push(broken("missing name".to_string()));
-            continue;
-        }
-        if name_is_taken(declared) {
-            out.push(broken(format!("{declared:?} is a built-in check name")));
-            continue;
-        }
-        if out.iter().any(|e| e.name == declared) {
-            out.push(broken(format!("{declared:?} is declared twice")));
-            continue;
-        }
-        let stage = match parse_stage(fields[0]) {
-            Ok(s) => s,
-            Err(e) => {
-                out.push(broken(e));
-                continue;
-            }
-        };
-        let exts = match parse_scope(fields[2]) {
-            Ok(s) => s,
-            Err(e) => {
-                out.push(broken(e));
-                continue;
-            }
-        };
-        let severity = match parse_severity(fields[3]) {
-            Ok(s) => s,
-            Err(e) => {
-                out.push(broken(e));
-                continue;
-            }
-        };
-        let argv: Vec<String> = command.split_whitespace().map(str::to_owned).collect();
-        out.push(Line {
-            name: declared.to_string(),
-            stage,
-            severity,
-            exts,
-            argv,
-            broken: None,
-        });
+        out.push(parse_line(lineno, line, &out));
     }
     out
 }
 
+/// One line, given the lines already accepted.
+///
+/// `earlier` is read ONLY for the duplicate check, and only its `Usable`
+/// entries — a line that cannot run does not reserve its name. Before this, a
+/// valid declaration was rejected as "declared twice" for colliding with a
+/// broken one, which pointed the reader at the wrong line entirely.
+fn parse_line(lineno: usize, line: &str, earlier: &[Line]) -> Line {
+    let (fields, command) = match tokenise(line) {
+        Some(t) => t,
+        // No name to report: fall back to the position, which is the only
+        // handle a reader has on a line this malformed.
+        None => {
+            return broken_at(
+                lineno,
+                name_or_position(tokenise(line).map(|(f, _)| f[1]).unwrap_or(""), lineno),
+                None,
+                ParseError::MissingFields,
+            )
+        }
+    };
+    let [stage_tok, declared, scope_tok, severity_tok] = fields;
+    let stage = parse_stage(stage_tok);
+    let name = name_or_position(declared, lineno);
+    let fail = |why| broken_at(lineno, name.clone(), stage, why);
+
+    if declared.is_empty() {
+        return fail(ParseError::MissingName);
+    }
+    if name_is_taken(declared) {
+        return fail(ParseError::NameTaken(declared.to_string()));
+    }
+    if earlier
+        .iter()
+        .any(|l| matches!(l, Line::Usable(d) if d.name == declared))
+    {
+        return fail(ParseError::Duplicate(declared.to_string()));
+    }
+    let Some(stage) = stage else {
+        return fail(ParseError::BadStage(stage_tok.to_string()));
+    };
+    let exts = match parse_scope(scope_tok) {
+        Ok(e) => e,
+        Err(why) => return fail(why),
+    };
+    let Some(severity) = Severity::parse(severity_tok) else {
+        return fail(ParseError::BadSeverity(severity_tok.to_string()));
+    };
+    // `tokenise` guarantees a non-empty command, so the split cannot fail.
+    let mut argv = command.split_whitespace().map(str::to_owned);
+    let Some(program) = argv.next() else {
+        return fail(ParseError::MissingFields);
+    };
+    Line::Usable(Declared {
+        name: declared.to_string(),
+        stage,
+        severity,
+        exts,
+        program,
+        args: argv.collect(),
+    })
+}
+
+fn name_or_position(declared: &str, lineno: usize) -> String {
+    if declared.is_empty() {
+        format!("{MANIFEST}:{lineno}")
+    } else {
+        declared.to_string()
+    }
+}
+
+fn broken_at(lineno: usize, name: String, stage: Option<Stage>, why: ParseError) -> Line {
+    Line::Broken {
+        name,
+        stage: stage.unwrap_or(Stage::PreCommit),
+        lineno,
+        why,
+    }
+}
+
 impl From<Line> for External {
     fn from(l: Line) -> External {
-        External {
-            scope: if l.exts.is_empty() {
-                Scope::ALWAYS
-            } else {
-                Scope::files(leak(l.exts))
+        let why = l.broken();
+        let (name, stage) = (l.name().to_string(), l.stage());
+        let kind = match (l, why) {
+            (Line::Usable(d), _) => Kind::Runnable {
+                scope: if d.exts.is_empty() {
+                    Scope::ALWAYS
+                } else {
+                    Scope::files(leak(d.exts))
+                },
+                severity: d.severity,
+                program: d.program,
+                args: d.args,
             },
-            name: l.name,
-            stage: l.stage,
-            severity: l.severity,
-            argv: l.argv,
-            broken: l.broken,
-        }
+            (Line::Broken { .. }, Some(why)) => Kind::Unusable { why },
+            // `broken()` is `Some` for every `Broken`, by construction.
+            (Line::Broken { why, lineno, .. }, None) => Kind::Unusable {
+                why: format!("line {lineno}: {why}"),
+            },
+        };
+        External { name, stage, kind }
     }
 }
 
@@ -368,7 +486,13 @@ pub fn read_lines(root: &Path) -> Vec<Line> {
 /// A `static OnceLock` rather than a leak: the borrow is genuinely `'static`
 /// because the storage is, and it also guarantees the file is read once however
 /// many checks ask for it.
-pub fn externals() -> &'static [External] {
+///
+/// `pub(crate)`, NOT `pub`. The answer depends on the working directory at the
+/// FIRST call and is then cached for the life of the process — safe in a hook,
+/// which handles one repository and exits, and a trap for anything that walks
+/// many. The fleet crate reads `read_lines(path)` instead, which takes the
+/// repository it means.
+pub(crate) fn externals() -> &'static [External] {
     static EXTERNALS: OnceLock<Vec<External>> = OnceLock::new();
     EXTERNALS.get_or_init(|| read(Path::new(&crate::hooks::common::repo_root())))
 }
@@ -377,34 +501,53 @@ pub fn externals() -> &'static [External] {
 mod tests {
     use super::*;
 
-    fn one(text: &str) -> External {
-        let mut v = parse(text);
+    fn one(text: &str) -> Line {
+        let mut v = parse_lines(text);
         assert_eq!(v.len(), 1, "expected one entry from {text:?}");
         v.pop().expect("one")
     }
 
+    /// The error a line produced, as a VALUE. Tests used to match on the prose,
+    /// which coupled them to wording and would have kept passing if the wording
+    /// stayed while the meaning changed.
+    fn why(l: &Line) -> ParseError {
+        match l {
+            Line::Broken { why, .. } => why.clone(),
+            Line::Usable(d) => panic!("{} parsed when it should not have", d.name),
+        }
+    }
+
+    fn usable(l: &Line) -> &Declared {
+        match l {
+            Line::Usable(d) => d,
+            Line::Broken { name, why, .. } => panic!("{name} failed to parse: {why}"),
+        }
+    }
+
     #[test]
     fn parses_the_documented_example() {
-        let v = parse(
+        let v = parse_lines(
             "# stage       name        scope   severity  command\n\
              pre-commit    shellcheck  *.sh    block     scripts/lint-shell.sh\n\
              pre-push      smoke       *       warn      make smoke\n",
         );
         assert_eq!(v.len(), 2);
-        assert!(v.iter().all(|e| e.broken.is_none()), "{:?}", v[0].broken);
 
-        assert_eq!(v[0].name, "shellcheck");
-        assert_eq!(v[0].stage, Stage::PreCommit);
-        assert_eq!(v[0].severity, Severity::Block);
-        assert_eq!(v[0].argv, ["scripts/lint-shell.sh"]);
-        assert!(v[0].scope.matches(&["a.sh".into()]));
-        assert!(!v[0].scope.matches(&["a.rs".into()]));
+        let a = usable(&v[0]);
+        assert_eq!(a.name, "shellcheck");
+        assert_eq!(a.stage, Stage::PreCommit);
+        assert_eq!(a.severity, Severity::Block);
+        assert_eq!(a.program, "scripts/lint-shell.sh");
+        assert!(a.args.is_empty());
+        assert_eq!(a.exts, [".sh"]);
 
-        assert_eq!(v[1].stage, Stage::PrePush);
-        assert_eq!(v[1].severity, Severity::Warn);
+        let b = usable(&v[1]);
+        assert_eq!(b.stage, Stage::PrePush);
+        assert_eq!(b.severity, Severity::Warn);
         // A command with arguments is split, not handed to a shell.
-        assert_eq!(v[1].argv, ["make", "smoke"]);
-        assert!(v[1].scope.matches(&["anything".into()]));
+        assert_eq!(b.program, "make");
+        assert_eq!(b.args, ["smoke"]);
+        assert!(b.exts.is_empty(), "`*` gates on nothing");
     }
 
     /// Blank lines and comments are not entries, and must not become broken
@@ -412,42 +555,52 @@ mod tests {
     /// dozen gaps.
     #[test]
     fn comments_and_blank_lines_produce_nothing() {
-        assert!(parse("\n  \n# just a comment\n\t# indented\n").is_empty());
+        assert!(parse_lines("\n  \n# just a comment\n\t# indented\n").is_empty());
     }
 
-    /// The rule the module docs commit to: a line that cannot be understood
-    /// still yields a check, so its absence is visible.
+    /// The rule the module commits to: a line that cannot be understood still
+    /// yields a check, so its absence is visible. Matched by VARIANT.
     #[test]
     fn a_malformed_line_becomes_a_visible_gap() {
-        for (text, needle) in [
-            ("pre-commit shellcheck *.sh block\n", "5 fields"),
-            ("nonsense shellcheck *.sh block x\n", "stage"),
-            ("pre-commit shellcheck ?.sh block x\n", "scope"),
-            ("pre-commit shellcheck *.sh loud x\n", "severity"),
-        ] {
-            let e = one(text);
-            let why = e.broken.expect("must be reported as broken");
-            assert!(why.contains(needle), "{why:?} should mention {needle:?}");
-            assert!(why.contains("line 1"), "{why:?} must locate the line");
+        let cases: [(&str, ParseError); 4] = [
+            (
+                "pre-commit shellcheck *.sh block\n",
+                ParseError::MissingFields,
+            ),
+            (
+                "nonsense shellcheck *.sh block x\n",
+                ParseError::BadStage("nonsense".into()),
+            ),
+            (
+                "pre-commit shellcheck ?.sh block x\n",
+                ParseError::BadScope("?.sh".into()),
+            ),
+            (
+                "pre-commit shellcheck *.sh loud x\n",
+                ParseError::BadSeverity("loud".into()),
+            ),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(why(&one(text)), expected, "for {text:?}");
         }
+    }
+
+    /// The prose still has to locate the line, even though the tests no longer
+    /// depend on its wording.
+    #[test]
+    fn a_gap_reports_where_it_is() {
+        let l = one("pre-commit shellcheck *.sh loud x\n");
+        let said = l.broken().expect("broken");
+        assert!(said.contains("line 1"), "{said}");
+        assert!(said.contains("severity"), "{said}");
     }
 
     /// A gap with no name cannot be reported, and a line this broken has none.
     #[test]
     fn a_nameless_line_is_named_after_its_position() {
-        let e = one("pre-commit\n");
-        assert_eq!(e.name, ".githooks.conf:1");
-        assert!(e.broken.is_some());
-    }
-
-    /// Running it must never be an option, so it is never `Passed` either.
-    #[test]
-    fn a_broken_entry_carries_no_command() {
-        let e = one("pre-commit shellcheck *.sh loud echo hi\n");
-        assert!(
-            e.argv.is_empty(),
-            "a line we did not understand has no argv"
-        );
+        let l = one("pre-commit\n");
+        assert_eq!(l.name(), ".githooks.conf:1");
+        assert_eq!(why(&l), ParseError::MissingFields);
     }
 
     /// An external must not be able to take a built-in's name — it would either
@@ -455,27 +608,47 @@ mod tests {
     /// something a repository should be able to do by editing a text file.
     #[test]
     fn a_built_in_name_is_refused() {
-        let e = one("pre-commit pre-commit-clippy *.rs block x\n");
-        let why = e.broken.expect("must be refused");
-        assert!(why.contains("built-in"), "{why:?}");
-
+        assert_eq!(
+            why(&one("pre-commit pre-commit-clippy *.rs block x\n")),
+            ParseError::NameTaken("pre-commit-clippy".into())
+        );
         // Including the four names git itself invokes.
-        let e = one("pre-commit pre-push * block x\n");
-        assert!(e.broken.is_some(), "an entrypoint name is taken too");
+        assert_eq!(
+            why(&one("pre-commit pre-push * block x\n")),
+            ParseError::NameTaken("pre-push".into())
+        );
     }
 
-    /// Two lines with one name: the second cannot be addressed by `hook.skip`
-    /// or by a severity override, so it is refused rather than run anonymously.
+    /// Two USABLE lines with one name: the second cannot be addressed by
+    /// `hook.skip` or by a severity override, so it is refused.
     #[test]
     fn a_duplicate_name_is_refused() {
-        let v = parse(
+        let v = parse_lines(
             "pre-commit smoke * block a\n\
              pre-push   smoke * block b\n",
         );
         assert_eq!(v.len(), 2);
-        assert!(v[0].broken.is_none());
-        let why = v[1].broken.clone().expect("the second must be refused");
-        assert!(why.contains("twice"), "{why:?}");
+        assert_eq!(usable(&v[0]).name, "smoke");
+        assert_eq!(why(&v[1]), ParseError::Duplicate("smoke".into()));
+    }
+
+    /// A line that cannot run does not RESERVE its name.
+    ///
+    /// It used to: broken and usable entries shared one list, so a valid
+    /// declaration was rejected as "declared twice" for colliding with a line
+    /// that could never execute — pointing the reader at the wrong line, and
+    /// forcing them to fix the first before the second would work at all.
+    #[test]
+    fn a_broken_line_does_not_reserve_its_name() {
+        let v = parse_lines(
+            "pre-commit smoke * LOUD   make a\n\
+             pre-commit smoke * block  make b\n",
+        );
+        assert_eq!(v.len(), 2);
+        assert_eq!(why(&v[0]), ParseError::BadSeverity("LOUD".into()));
+        let good = usable(&v[1]);
+        assert_eq!(good.name, "smoke");
+        assert_eq!(good.program, "make");
     }
 
     /// Alignment is cosmetic. A file someone has lined up with tabs, or not
@@ -484,17 +657,44 @@ mod tests {
     fn field_alignment_does_not_matter() {
         let spaced = one("pre-commit      shellcheck    *.sh      block     make lint\n");
         let tabbed = one("pre-commit\tshellcheck\t*.sh\tblock\tmake lint\n");
-        assert_eq!(spaced.name, tabbed.name);
-        assert_eq!(spaced.argv, tabbed.argv);
-        assert_eq!(spaced.argv, ["make", "lint"]);
+        assert_eq!(usable(&spaced), usable(&tabbed));
+        assert_eq!(usable(&spaced).args, ["lint"]);
     }
 
     #[test]
     fn several_extensions_can_gate_one_check() {
-        let e = one("pre-commit shell *.sh,*.bash block make lint\n");
-        assert!(e.scope.matches(&["a.bash".into()]));
-        assert!(e.scope.matches(&["a.sh".into()]));
-        assert!(!e.scope.matches(&["a.zsh".into()]));
+        let e = External::from(one("pre-commit shell *.sh,*.bash block make lint\n"));
+        assert!(e.scope().matches(&["a.bash".into()]));
+        assert!(e.scope().matches(&["a.sh".into()]));
+        assert!(!e.scope().matches(&["a.zsh".into()]));
+    }
+
+    /// `tokenise` states its arity in the type, so "four tokens then a command"
+    /// is checked rather than remembered.
+    #[test]
+    fn tokenise_wants_four_fields_and_a_command() {
+        assert!(tokenise("a b c").is_none(), "too few fields");
+        assert!(tokenise("a b c d").is_none(), "four fields, no command");
+        // Trailing whitespace reaches the four fields but still leaves nothing
+        // to run — the case the `?` on the last field cannot catch.
+        assert!(
+            tokenise("a b c d   ").is_none(),
+            "command is all whitespace"
+        );
+        assert!(tokenise("a b c d\t").is_none(), "command is a tab");
+        let (fields, cmd) = tokenise("a  b\tc   d   run it").expect("four and a command");
+        assert_eq!(fields, ["a", "b", "c", "d"]);
+        assert_eq!(cmd, "run it");
+    }
+
+    /// An unusable line carries no command at all — the type has nowhere to put
+    /// one, which is the point of the split.
+    #[test]
+    fn an_unusable_external_holds_no_command() {
+        let e = External::from(one("pre-commit shellcheck *.sh loud echo hi\n"));
+        assert!(matches!(e.kind, Kind::Unusable { .. }));
+        // And it can never block, whatever severity anyone configures.
+        assert_eq!(e.severity(), Severity::Warn);
     }
 
     /// A missing manifest is the normal case and must not be an error.
@@ -504,9 +704,8 @@ mod tests {
         assert!(read_lines(Path::new("/nonexistent-c8f2")).is_empty());
     }
 
-    /// The two readers must not be allowed to disagree. `Line` exists to spare
-    /// the dashboard a leak, not to become a second opinion about what a
-    /// manifest says.
+    /// `Line` exists to spare the dashboard a leak, not to become a second
+    /// opinion about what a manifest says.
     #[test]
     fn the_leaking_and_non_leaking_parsers_agree() {
         let text = "pre-commit  shellcheck  *.sh,*.bash  block  make lint\n\
@@ -516,14 +715,18 @@ mod tests {
         let externals = parse(text);
         assert_eq!(lines.len(), externals.len());
         for (l, e) in lines.iter().zip(&externals) {
-            assert_eq!(l.name, e.name);
-            assert_eq!(l.stage, e.stage);
-            assert_eq!(l.severity, e.severity);
-            assert_eq!(l.argv, e.argv);
-            assert_eq!(l.broken, e.broken);
-            // And the scope the dashboard would DESCRIBE is the scope the
-            // dispatcher would ENFORCE.
-            assert_eq!(l.exts, e.scope.files, "scope diverged for {}", l.name);
+            assert_eq!(l.name(), e.name());
+            assert_eq!(l.stage(), e.stage());
+            assert_eq!(
+                l.broken().is_some(),
+                matches!(e.kind, Kind::Unusable { .. })
+            );
+            if let Line::Usable(d) = l {
+                assert_eq!(d.severity, e.severity());
+                // The scope the dashboard would DESCRIBE is the scope the
+                // dispatcher would ENFORCE.
+                assert_eq!(d.exts, e.scope().files);
+            }
         }
     }
 }

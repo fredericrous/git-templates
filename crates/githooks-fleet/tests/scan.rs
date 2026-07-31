@@ -300,10 +300,11 @@ fn a_declared_check_reaches_the_scan() {
     let d = &v["repos"][0]["declared"][0];
     assert_eq!(d["name"], "shellcheck");
     assert_eq!(d["stage"], "pre-commit");
+    // A tagged sum, so the usable fields exist only when the line is usable.
+    assert_eq!(d["state"], "usable");
     assert_eq!(d["severity"], "block");
     assert_eq!(d["command"], "scripts/lint-shell.sh");
     assert_eq!(d["exts"][0], ".sh");
-    assert!(d["broken"].is_null(), "a good line is not broken: {d}");
 }
 
 /// The case worth scanning ninety-six repositories for: a line committed
@@ -315,9 +316,12 @@ fn an_unusable_declaration_is_reported_as_such() {
         .manifest("a", "pre-commit  shellcheck  *.sh  LOUD  make lint\n");
     let v = json(&["--root", t.path().to_str().unwrap()]);
     let d = &v["repos"][0]["declared"][0];
-    let why = d["broken"].as_str().expect("must be flagged broken");
+    assert_eq!(d["state"], "unusable", "{d}");
+    let why = d["why"].as_str().expect("must say why");
     assert!(why.contains("severity"), "{why}");
     assert!(why.contains("line 1"), "{why}");
+    // And it carries no command, because the type has nowhere to put one.
+    assert!(d["command"].is_null(), "{d}");
 }
 
 /// Ninety-six repositories have no manifest, and that must cost nothing and
