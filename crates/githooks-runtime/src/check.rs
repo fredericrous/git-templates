@@ -136,8 +136,12 @@ pub enum Severity {
     Warn,
 }
 
-/// One check. `Builtin` today; `External` when a declared command implements it.
-pub trait Check {
+/// One check, whether compiled in or declared by the repository.
+///
+/// `Sync` because `pre-commit` hands every check to its own thread. Both
+/// implementations satisfy it for free, and requiring it here is what lets the
+/// dispatcher hold `&'static dyn Check` without caring which kind it has.
+pub trait Check: Sync {
     fn name(&self) -> &str;
     fn stage(&self) -> Stage;
     fn scope(&self) -> Scope;

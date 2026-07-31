@@ -28,9 +28,9 @@
 
 use std::sync::Mutex;
 
-use crate::check::{Builtin, Check, Outcome, Severity, Stage};
+use crate::check::{Check, Outcome, Severity, Stage};
 use crate::registry::severity_of;
-use crate::registry::{stage_checks, Ctx};
+use crate::registry::{all_stage_checks, Ctx};
 use crate::ui::{highlight, warning_sign};
 use crate::{cherry_pick_in_progress, configured_skips};
 
@@ -38,11 +38,16 @@ use crate::{cherry_pick_in_progress, configured_skips};
 /// yields substrings and matches by CONTAINS, exactly as it did against paths,
 /// so existing config keeps working: `git config hook.skip ruff` still skips
 /// `pre-commit-ruff`.
-fn selected(stage: Stage) -> Vec<&'static Builtin> {
+fn selected(stage: Stage) -> Vec<&'static dyn Check> {
     let skips = configured_skips();
-    let (kept, dropped): (Vec<_>, Vec<_>) =
-        stage_checks(stage).partition(|c| !skips.iter().any(|s| crate::skip_suppresses(c.name, s)));
-    let names: Vec<&str> = dropped.iter().map(|c| c.name).collect();
+    // Externals are included here, so `hook.skip` and the severity override
+    // govern a declared command exactly as they govern a built-in. A repository
+    // that can add a check it cannot disable would be a worse deal than not
+    // being able to add one.
+    let (kept, dropped): (Vec<_>, Vec<_>) = all_stage_checks(stage)
+        .into_iter()
+        .partition(|c| !skips.iter().any(|s| crate::skip_suppresses(c.name(), s)));
+    let names: Vec<&str> = dropped.iter().map(|c| c.name()).collect();
     announce_skips(&names);
     kept
 }
@@ -119,7 +124,7 @@ pub fn pre_commit(ctx: &Ctx) -> i32 {
 
     let outcomes = run_concurrently(&checks, |check| {
         let sub = Ctx {
-            name: check.name,
+            name: check.name(),
             args: ctx.args,
             hooks_dir: ctx.hooks_dir,
             push: ctx.push,
@@ -135,7 +140,7 @@ pub fn pre_commit(ctx: &Ctx) -> i32 {
 /// A `Warn` check that fails is reported and does not block — that is the whole
 /// of the severity feature. `Unavailable` never blocks either, but it is
 /// announced, because a check that could not run is not a check that passed.
-fn report(checks: &[&'static Builtin], outcomes: &[Outcome]) -> i32 {
+fn report(checks: &[&'static dyn Check], outcomes: &[Outcome]) -> i32 {
     let mut blocked = Vec::new();
     let mut downgraded = Vec::new();
     let mut unavailable = Vec::new();
@@ -148,10 +153,10 @@ fn report(checks: &[&'static Builtin], outcomes: &[Outcome]) -> i32 {
             // printed an error and means it, so the fact that it is not
             // blocking has to be said by someone.
             Outcome::Passed | Outcome::Warned => {}
-            Outcome::Unavailable => unavailable.push(check.name),
-            Outcome::Failed => match severity_of(check) {
-                Severity::Block => blocked.push(check.name),
-                Severity::Warn => downgraded.push(check.name),
+            Outcome::Unavailable => unavailable.push(check.name()),
+            Outcome::Failed => match severity_of(*check) {
+                Severity::Block => blocked.push(check.name()),
+                Severity::Warn => downgraded.push(check.name()),
             },
         }
     }
@@ -189,7 +194,7 @@ pub fn pre_push(ctx: &Ctx) -> i32 {
     // NB: no CHERRY_PICK_HEAD check here — the zsh pre-push had none either.
     for check in selected(Stage::PrePush) {
         let sub = Ctx {
-            name: check.name,
+            name: check.name(),
             args: ctx.args,
             hooks_dir: ctx.hooks_dir,
             push: ctx.push,
@@ -199,19 +204,23 @@ pub fn pre_push(ctx: &Ctx) -> i32 {
             // Announced, never fatal: a check that could not run has not
             // invalidated anything, and neither has a warning.
             Outcome::Unavailable => {
-                println!("{} {} could not run", warning_sign(), highlight(check.name))
+                println!(
+                    "{} {} could not run",
+                    warning_sign(),
+                    highlight(check.name())
+                )
             }
             Outcome::Warned => {}
             Outcome::Failed => match severity_of(check) {
                 Severity::Warn => println!(
                     "{} {} reported a problem (severity warn)",
                     warning_sign(),
-                    highlight(check.name)
+                    highlight(check.name())
                 ),
                 // Fail-fast applies ONLY to Block: the later steps are
                 // expensive and their preconditions are gone.
                 Severity::Block => {
-                    println!("\n🚨  Error raised by hook {}", highlight(check.name));
+                    println!("\n🚨  Error raised by hook {}", highlight(check.name()));
                     return 1;
                 }
             },
@@ -223,7 +232,7 @@ pub fn pre_push(ctx: &Ctx) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::check::Scope;
+    use crate::check::{Builtin, Scope};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A check whose only job is to carry a name and a severity into `report`.
@@ -244,20 +253,28 @@ mod tests {
     static BLOCKER: Builtin = stub("stub-blocker", Severity::Block);
     static WARNER: Builtin = stub("stub-warner", Severity::Warn);
 
+    /// The unit tests hold `&dyn Check` for the same reason the dispatcher
+    /// does: `report` must not be able to tell a built-in from an external.
+    const fn as_checks(cs: [&'static Builtin; 3]) -> [&'static dyn Check; 3] {
+        [cs[0], cs[1], cs[2]]
+    }
+
     #[test]
     fn a_blocking_failure_is_the_only_thing_that_fails_the_commit() {
-        assert_eq!(report(&[&BLOCKER], &[Outcome::Failed]), 1);
-        assert_eq!(report(&[&BLOCKER], &[Outcome::Passed]), 0);
+        let b: &dyn Check = &BLOCKER;
+        let w: &dyn Check = &WARNER;
+        assert_eq!(report(&[b], &[Outcome::Failed]), 1);
+        assert_eq!(report(&[b], &[Outcome::Passed]), 0);
         // Every non-blocking shape, one at a time, so a regression cannot hide
         // behind a passing sibling.
-        assert_eq!(report(&[&BLOCKER], &[Outcome::Warned]), 0);
-        assert_eq!(report(&[&BLOCKER], &[Outcome::Unavailable]), 0);
-        assert_eq!(report(&[&WARNER], &[Outcome::Failed]), 0);
+        assert_eq!(report(&[b], &[Outcome::Warned]), 0);
+        assert_eq!(report(&[b], &[Outcome::Unavailable]), 0);
+        assert_eq!(report(&[w], &[Outcome::Failed]), 0);
     }
 
     #[test]
     fn one_blocking_failure_among_many_still_fails() {
-        let checks = [&BLOCKER, &WARNER, &BLOCKER];
+        let checks = as_checks([&BLOCKER, &WARNER, &BLOCKER]);
         assert_eq!(
             report(
                 &checks,

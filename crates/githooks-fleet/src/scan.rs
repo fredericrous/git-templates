@@ -21,6 +21,42 @@ use crate::severities::{self, SeverityOverride};
 use crate::shim::{self, BakeState, ShimState, DISPATCHERS};
 use crate::skips::{self, SkipEntry};
 
+/// One `.githooks.conf` line, flattened for display and for `--json`.
+///
+/// A projection rather than a re-parse: `manifest::read_lines` is the same
+/// parser the dispatcher uses, so the dashboard cannot form its own opinion
+/// about what a manifest means.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeclaredCheck {
+    pub name: String,
+    pub stage: String,
+    pub severity: String,
+    /// Extensions that gate it. Empty means every change.
+    pub exts: Vec<String>,
+    pub command: String,
+    /// Why the line is unusable, if it is. The check does not run, and saying
+    /// so is the whole reason the dashboard reads these files.
+    pub broken: Option<String>,
+}
+
+fn declared_checks(repo: &Path) -> Vec<DeclaredCheck> {
+    githooks_runtime::manifest::read_lines(repo)
+        .into_iter()
+        .map(|l| DeclaredCheck {
+            name: l.name,
+            stage: l.stage.as_str().to_string(),
+            severity: match l.severity {
+                githooks_runtime::check::Severity::Block => "block",
+                githooks_runtime::check::Severity::Warn => "warn",
+            }
+            .to_string(),
+            exts: l.exts,
+            command: l.argv.join(" "),
+            broken: l.broken,
+        })
+        .collect()
+}
+
 /// Subtrees never worth descending. Matches the exclusions the shell sweep
 /// used, so the two agree about what "the fleet" means.
 pub const EXCLUDED: [&str; 6] = ["node_modules", "target", "dist", "build", ".venv", "vendor"];
@@ -57,6 +93,11 @@ pub struct Repo {
     /// repo that enforces nothing reads exactly like one that enforces
     /// everything unless this column says otherwise.
     pub severities: Vec<SeverityOverride>,
+    /// Checks this repo declares in `.githooks.conf`. Invisible to the fleet
+    /// view until now: a repo could be running a command on every commit that
+    /// no dashboard column mentioned, and a manifest line nobody can parse is a
+    /// check that silently is not running.
+    pub declared: Vec<DeclaredCheck>,
 }
 
 /// A whole scan, including how it was performed.
@@ -253,6 +294,7 @@ fn inspect(root: &Path, repo: &Path, hooks: &Path, managed: bool, installed_bina
         applicable: applicable_checks(repo),
         skips: skips::read(repo),
         severities: severities::read(repo),
+        declared: declared_checks(repo),
     }
 }
 

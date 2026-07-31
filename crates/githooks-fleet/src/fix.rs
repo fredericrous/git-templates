@@ -190,6 +190,7 @@ mod tests {
             applicable: Vec::new(),
             skips: Vec::new(),
             severities: Vec::new(),
+            declared: Vec::new(),
         }
     }
 

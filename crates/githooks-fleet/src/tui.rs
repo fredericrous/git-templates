@@ -353,6 +353,9 @@ fn tint(on: bool, c: Color) -> Style {
 /// remains the terminal's business; only the slot is chosen here.
 const ACCENT: Color = Color::Cyan;
 
+/// Named once so the pane and its tests cannot drift apart.
+const DECLARED_FILE: &str = githooks_runtime::manifest::MANIFEST;
+
 /// How the highlighted row is marked.
 ///
 /// Reverse video, NOT an accent foreground. A row style with `fg` overrides the
@@ -528,7 +531,9 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
     let mid = area.width >= 76;
 
     let header = if wide {
-        vec!["REPO", "SHIMS", "BAKE", "LANG", "SKIPS", "WARN", "STATE"]
+        vec![
+            "REPO", "SHIMS", "BAKE", "LANG", "SKIPS", "WARN", "DECL", "STATE",
+        ]
     } else if mid {
         vec!["REPO", "SHIMS", "BAKE", "STATE"]
     } else {
@@ -577,6 +582,19 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
                         },
                     )),
                 );
+                // Declared checks, with unusable lines called out. A count
+                // alone would let "3 custom checks" and "3 custom checks, two
+                // of which have never run" render identically.
+                let broken = r.declared.iter().filter(|d| d.broken.is_some()).count();
+                let text = match (r.declared.len(), broken) {
+                    (0, _) => "-".to_string(),
+                    (n, 0) => n.to_string(),
+                    (n, b) => format!("{n}!{b}"),
+                };
+                cells.push(Cell::from(text).style(tint(
+                    app.color,
+                    if broken > 0 { Color::Red } else { Color::Reset },
+                )));
             }
             let word = state_word(r);
             let colour = if word.starts_with('x') {
@@ -599,6 +617,7 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
             Constraint::Length(12),
             Constraint::Length(6),
             Constraint::Length(5),
+            Constraint::Length(6),
             Constraint::Length(14),
         ]
     } else if mid {
@@ -744,6 +763,35 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
                 "  {:<22} {:<7} {:<6} -> {head}",
                 e.check, scope, e.value
             )));
+        }
+    }
+    if !r.declared.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(format!("{DECLARED_FILE} (declared here)")).style(tint(app.color, ACCENT)),
+        );
+        for d in &r.declared {
+            let scope = if d.exts.is_empty() {
+                "*".to_string()
+            } else {
+                d.exts
+                    .iter()
+                    .map(|e| format!("*{e}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            match &d.broken {
+                // The verdict first, as in the hook.skip block: a long command
+                // must not push the reason it never runs off the right edge.
+                Some(why) => lines.push(
+                    Line::from(format!("  {:<18} ! {why}", d.name))
+                        .style(tint(app.color, Color::Red)),
+                ),
+                None => lines.push(Line::from(format!(
+                    "  {:<18} {:<6} {:<10} {}",
+                    d.name, d.stage, scope, d.command
+                ))),
+            }
         }
     }
     lines.push(Line::from(""));
@@ -1039,6 +1087,7 @@ mod tests {
             applicable: Vec::new(),
             skips: Vec::new(),
             severities: Vec::new(),
+            declared: Vec::new(),
         }
     }
 
@@ -1354,6 +1403,87 @@ mod tests {
         assert!(
             row.contains(" 1 "),
             "expected a count of 1 downgrade, got: {row}"
+        );
+    }
+
+    fn declared(name: &str, broken: Option<&str>) -> crate::scan::DeclaredCheck {
+        crate::scan::DeclaredCheck {
+            name: name.to_string(),
+            stage: "pre-commit".to_string(),
+            severity: "block".to_string(),
+            exts: vec![".sh".to_string()],
+            command: "make lint".to_string(),
+            broken: broken.map(str::to_owned),
+        }
+    }
+
+    /// The fleet view could not see declared checks at all: a repo could run a
+    /// command on every commit that no column mentioned.
+    #[test]
+    fn detail_lists_what_the_repo_declares() {
+        let mut r = repo("a", true);
+        r.declared = vec![declared("shellcheck", None)];
+        let mut app = App::new(scan_with_repos(vec![r]));
+        app.mode = Mode::Detail;
+        let out = render(&app, 120, 30);
+        assert!(out.contains(".githooks.conf"), "{out}");
+        assert!(out.contains("shellcheck"), "{out}");
+        assert!(out.contains("make lint"), "the command itself: {out}");
+        assert!(out.contains("*.sh"), "and what gates it: {out}");
+    }
+
+    /// A line nobody can parse is a check that is not running. The reason goes
+    /// FIRST, so a long command cannot push it off the right edge.
+    #[test]
+    fn detail_leads_with_why_a_declared_check_cannot_run() {
+        let mut r = repo("a", true);
+        r.declared = vec![declared("shellcheck", Some("line 1: severity \"LOUD\""))];
+        let mut app = App::new(scan_with_repos(vec![r]));
+        app.mode = Mode::Detail;
+        let out = render(&app, 120, 30);
+        let row = out
+            .lines()
+            .find(|l| l.contains("shellcheck"))
+            .expect("the row");
+        assert!(row.contains("line 1"), "{row}");
+        assert!(
+            !row.contains("make lint"),
+            "a broken line must not read as a command that runs: {row}"
+        );
+    }
+
+    /// Three declared checks and three declared checks two of which never run
+    /// must not render identically.
+    #[test]
+    fn the_decl_column_separates_broken_from_merely_present() {
+        let mut clean = repo("clean", true);
+        clean.declared = vec![declared("a", None), declared("b", None)];
+        let mut dirty = repo("dirty", true);
+        dirty.declared = vec![declared("a", None), declared("b", Some("line 2: nope"))];
+        let app = App::new(scan_with_repos(vec![clean, dirty]));
+        let out = render(&app, 140, 12);
+
+        assert!(out.contains("DECL"), "the column must exist: {out}");
+        let row = |needle: &str| {
+            out.lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert!(row("clean").contains(" 2 "), "{}", row("clean"));
+        assert!(row("dirty").contains("2!1"), "{}", row("dirty"));
+    }
+
+    /// Ninety-six repositories declare nothing. The columns and the pane must
+    /// stay silent for them.
+    #[test]
+    fn a_repo_declaring_nothing_says_nothing() {
+        let mut app = App::new(scan_with_repos(vec![repo("a", true)]));
+        app.mode = Mode::Detail;
+        let out = render(&app, 120, 30);
+        assert!(
+            !out.contains(".githooks.conf"),
+            "a file that does not exist was mentioned: {out}"
         );
     }
 

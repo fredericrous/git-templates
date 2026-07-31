@@ -215,29 +215,10 @@ pub fn clippy(_args: &[std::ffi::OsString]) -> Outcome {
 /// pre-push. Mirrors `run-tests-js`: the range that is actually being pushed
 /// decides whether the suite runs, so a docs-only push costs nothing.
 pub fn test(refs: &[crate::pushrefs::PushRef]) -> Outcome {
-    let zero = git::stdout(&["hash-object", "--stdin"])
-        .map(|h| "0".repeat(h.len()))
-        .unwrap_or_else(|| "0".repeat(40));
     let Some(root) = git::stdout(&["rev-parse", "--show-toplevel"]) else {
         return Outcome::Passed;
     };
-
-    let mut changed: BTreeSet<String> = BTreeSet::new();
-    for r in refs {
-        if r.local_oid == zero {
-            continue; // deleting a ref pushes no code
-        }
-        let range = if r.remote_oid == zero {
-            r.local_oid.clone()
-        } else {
-            format!("{}..{}", r.remote_oid, r.local_oid)
-        };
-        if let Some(out) =
-            git::stdout(&["diff-tree", "--no-commit-id", "--name-only", "-r", &range])
-        {
-            changed.extend(out.lines().map(str::trim).map(str::to_owned));
-        }
-    }
+    let changed = crate::pushrefs::changed_files(refs);
     let roots = cargo_roots(&root, changed.iter().map(String::as_str));
     if roots.is_empty() {
         return Outcome::Passed;

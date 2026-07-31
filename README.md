@@ -59,12 +59,28 @@ rm $(git rev-parse --git-dir)/hooks/*
 git init
 ```
 
+## Custom checks
+
+A repository can declare checks of its own in a committed `.githooks.conf`:
+
+```
+# stage       name        scope   severity  command
+pre-commit    shellcheck  *.sh    block     scripts/lint-shell.sh
+pre-push      smoke       *       warn      make smoke
+```
+
+They run alongside the built-ins and obey the same `hook.skip` and
+`githooks.severity.<name>` controls. `githooks list` shows what would run here.
+Full reference: [docs/custom-checks.md](docs/custom-checks.md).
+
 ## Requirements
 
 - Git 2.22+
-- ZSH
-- NodeJS 11.7+
-- [ripgrep](https://github.com/BurntSushi/ripgrep/)
+
+The hooks are a single Rust binary with no runtime dependencies; each check
+brings its own tool requirement only where you have opted into that check (a
+repo with no `ruff.toml` never needs ruff). ZSH, NodeJS and ripgrep were
+requirements of the shell implementation and are no longer needed.
 
 ## Wiki
 
