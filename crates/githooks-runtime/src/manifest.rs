@@ -506,7 +506,29 @@ pub fn read_lines(root: &Path) -> Vec<Line> {
 /// repository it means.
 pub(crate) fn externals() -> &'static [External] {
     static EXTERNALS: OnceLock<Vec<External>> = OnceLock::new();
-    EXTERNALS.get_or_init(|| read(Path::new(&crate::hooks::common::repo_root())))
+    EXTERNALS.get_or_init(|| {
+        let root = crate::hooks::common::repo_root();
+        let root = Path::new(&root);
+        let declared = read(root);
+        // Untrusted declarations are kept and DISABLED, not dropped. The names
+        // stay visible in `githooks list`, in the dashboard and in the "could
+        // not run" roll-up, because a repository quietly declaring checks that
+        // never run is the failure this project is arranged against — and the
+        // reader needs to know there is a decision waiting for them.
+        match crate::trust::why(crate::trust::state(root)) {
+            None => declared,
+            Some(reason) => declared
+                .into_iter()
+                .map(|external| External {
+                    name: external.name,
+                    stage: external.stage,
+                    kind: Kind::Unusable {
+                        why: reason.to_string(),
+                    },
+                })
+                .collect(),
+        }
+    })
 }
 
 #[cfg(test)]

@@ -36,8 +36,23 @@ const PROBE: &str = "probe.sh";
 #[cfg(not(unix))]
 const PROBE: &str = "probe.cmd";
 
+/// Write the manifest AND trust it.
+///
+/// Trust is a separate decision (see `an_untrusted_manifest_does_not_run`), so
+/// every test about what a declared check does has to make it first — otherwise
+/// they would all be testing the trust gate instead.
 fn manifest(r: &Repo, body: &str) {
     r.stage(".githooks.conf", body);
+    trust(r);
+}
+
+fn trust(r: &Repo) {
+    let out = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("trust")
+        .current_dir(&r.dir)
+        .output()
+        .expect("githooks trust");
+    assert!(out.status.success(), "could not trust the manifest");
 }
 
 fn pre_push(r: &Repo) -> (i32, String) {
@@ -327,6 +342,77 @@ fn a_pre_push_scope_is_judged_against_the_pushed_range() {
     assert!(
         out.contains("probe-"),
         "a push containing Rust must fire it: {out}"
+    );
+}
+
+/// The whole point of the trust gate: a manifest nobody accepted does not run,
+/// and is not silently dropped either.
+#[test]
+fn an_untrusted_manifest_does_not_run() {
+    let r = Repo::new();
+    probe(&r, PROBE, 1);
+    // NOT `manifest()` — that trusts it. This is the cloned-repo case.
+    r.stage(
+        ".githooks.conf",
+        &format!("pre-commit  audit  *  block  ./{PROBE}\n"),
+    );
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(
+        !run.says("probe-"),
+        "an untrusted manifest executed its command:\n{}",
+        run.output()
+    );
+    assert!(
+        run.passed(),
+        "and it must not block either:\n{}",
+        run.output()
+    );
+    // Reported, not dropped — the name stays visible and so does the reason.
+    assert!(run.says("audit"), "{}", run.output());
+    assert!(
+        run.says("trust"),
+        "must say how to accept it:\n{}",
+        run.output()
+    );
+    assert!(run.says("could not run"), "{}", run.output());
+
+    // And after trusting, the same manifest runs.
+    trust(&r);
+    let run = r.hook("pre-commit", &[]);
+    assert!(
+        run.says("probe-"),
+        "trusting did not enable it:\n{}",
+        run.output()
+    );
+}
+
+/// Consent is to CONTENT: a `git pull` that adds a command cannot inherit the
+/// acceptance given to the file before it.
+#[test]
+fn editing_a_trusted_manifest_stops_it_running() {
+    let r = Repo::new();
+    probe(&r, PROBE, 0);
+    manifest(&r, &format!("pre-commit  audit  *  block  ./{PROBE}\n"));
+    assert!(r.hook("pre-commit", &[]).says("probe-"), "baseline");
+
+    // As if a pull had added a line.
+    r.stage(
+        ".githooks.conf",
+        &format!(
+            "pre-commit  audit  *  block  ./{PROBE}\npre-commit  extra  *  block  ./{PROBE}\n"
+        ),
+    );
+    let run = r.hook("pre-commit", &[]);
+    assert!(
+        !run.says("probe-"),
+        "an edited manifest kept its trust:\n{}",
+        run.output()
+    );
+    assert!(
+        run.says("changed"),
+        "must say WHICH happened:\n{}",
+        run.output()
     );
 }
 

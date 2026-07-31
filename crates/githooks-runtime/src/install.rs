@@ -213,7 +213,47 @@ fn make_executable(_p: &Path) -> std::io::Result<()> {
 pub fn run(force: bool) -> Result<(), String> {
     let binary = install_binary()?;
     populate_template_dir(&binary)?;
-    bake_repo_hooks(&binary, force)
+    bake_repo_hooks(&binary, force)?;
+    offer_trust();
+    Ok(())
+}
+
+/// Ask about the manifest, once, at the moment somebody is already deciding
+/// about this repository.
+///
+/// `direnv` has to ask lazily on `cd` because it has no install step to hang
+/// the question from. We have one — so this is a single question, shown with
+/// the declarations in view, and declining still leaves the built-ins working.
+///
+/// Never blocks and never fails the install: a repository that declares nothing
+/// says nothing, and a non-interactive install simply reports the state.
+fn offer_trust() {
+    let root = crate::hooks::common::repo_root();
+    let root = Path::new(&root);
+    let state = crate::trust::state(root);
+    if matches!(
+        state,
+        crate::trust::State::NoManifest | crate::trust::State::Trusted
+    ) {
+        return;
+    }
+
+    println!();
+    println!(
+        "{} {} declares checks that would run on your commits:",
+        warning_sign(),
+        crate::manifest::MANIFEST
+    );
+    print!("{}", crate::trust::describe(root));
+    if crate::trust::confirm("    Trust them? (y/N) ") {
+        match crate::trust::record(root) {
+            Ok(fp) => println!("{} trusted ({fp})", valid_sign()),
+            Err(e) => println!("{} {e}", warning_sign()),
+        }
+    } else {
+        println!("    Left untrusted. The built-ins still run; these do not.");
+        println!("    Change your mind with `githooks trust`.");
+    }
 }
 
 /// Copy the running binary to a stable location, and return where it now lives.

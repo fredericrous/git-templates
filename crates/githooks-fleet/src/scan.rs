@@ -120,6 +120,10 @@ pub struct Repo {
     /// no dashboard column mentioned, and a manifest line nobody can parse is a
     /// check that silently is not running.
     pub declared: Vec<DeclaredCheck>,
+    /// Whether this repo's `.githooks.conf` is trusted here. `None` when there
+    /// is no manifest — which is almost every repo, and must read differently
+    /// from "declared something and it is not running".
+    pub trusted: Option<bool>,
 }
 
 /// A whole scan, including how it was performed.
@@ -317,6 +321,11 @@ fn inspect(root: &Path, repo: &Path, hooks: &Path, managed: bool, installed_bina
         skips: skips::read(repo),
         severities: severities::read(repo),
         declared: declared_checks(repo),
+        trusted: match githooks_runtime::trust::state(repo) {
+            githooks_runtime::trust::State::NoManifest => None,
+            githooks_runtime::trust::State::Trusted => Some(true),
+            _ => Some(false),
+        },
     }
 }
 
