@@ -9,24 +9,52 @@
 mod common;
 use common::Repo;
 
-/// A stand-in for prettier: `--check` fails on BAD, `--write` repairs it.
+/// A rewriting probe, in whatever form this platform can execute.
 ///
-/// Deliberately not the real thing — the test is about the fix-and-restage
-/// machinery, and a real formatter would make it a test of that formatter's
-/// version.
-fn fake_prettier(r: &Repo) {
-    r.write("package.json", "{ \"name\": \"x\" }\n");
-    r.write(".prettierrc", "{}\n");
-    let bin = r.path("node_modules/.bin");
-    std::fs::create_dir_all(&bin).expect("mkdir");
-    let script = "#!/bin/sh\nmode=check\nfor a in \"$@\"; do case \"$a\" in --write) mode=write;; esac; done\nrc=0\nfor f in \"$@\"; do case \"$f\" in --*) continue;; esac; [ -f \"$f\" ] || continue\n if grep -q BAD \"$f\"; then if [ \"$mode\" = write ]; then sed -i.bak 's/BAD/GOOD/' \"$f\" && rm -f \"$f.bak\"; else rc=1; fi; fi\ndone\nexit $rc\n";
-    let p = bin.join("prettier");
-    std::fs::write(&p, script).expect("write");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    }
+/// The same shape `tests/external.rs` uses, because it is the one fixture
+/// proven to run on all three platforms — a `#!/bin/sh` file has no
+/// interpreter on Windows, which is exactly how the first version of this test
+/// failed there.
+#[cfg(unix)]
+fn rewriter(r: &Repo, name: &str) {
+    r.write(
+        name,
+        "#!/bin/sh\nfor f in *.js; do [ -f \"$f\" ] || continue; sed -i.bak 's/BAD/GOOD/' \"$f\" && rm -f \"$f.bak\"; done\n",
+    );
+    let p = r.path(name);
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    r.git(&["add", name]);
+}
+
+#[cfg(not(unix))]
+fn rewriter(r: &Repo, name: &str) {
+    r.write(
+        name,
+        "@echo off\r\nfor %%f in (*.js) do powershell -NoProfile -Command \"(Get-Content '%%f') -replace 'BAD','GOOD' | Set-Content -NoNewline '%%f'\"\r\n",
+    );
+    r.git(&["add", name]);
+}
+
+#[cfg(unix)]
+const REWRITER: &str = "rewrite.sh";
+#[cfg(not(unix))]
+const REWRITER: &str = "rewrite.cmd";
+
+/// Declare it as an external so the test exercises the same machinery a user
+/// would reach for, on every platform.
+fn manifest_with_fixer(r: &Repo) {
+    rewriter(r, REWRITER);
+    r.stage(
+        ".githooks.conf",
+        &format!("pre-commit  fmt  *.js  block  fix ./{REWRITER}\n"),
+    );
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("trust")
+        .current_dir(&r.dir)
+        .output()
+        .expect("githooks trust");
+    assert!(out.status.success(), "could not trust the manifest");
 }
 
 /// The default. A hook that edits your files unasked is a larger surprise than
@@ -34,26 +62,24 @@ fn fake_prettier(r: &Repo) {
 #[test]
 fn fixing_is_off_unless_asked_for() {
     let r = Repo::new();
-    fake_prettier(&r);
+    manifest_with_fixer(&r);
     r.stage("a.js", "const a = BAD\n");
 
     let run = r.hook("pre-commit", &[]);
-    assert!(
-        !run.passed(),
-        "should report, not repair:\n{}",
-        run.output()
-    );
+    // The declared command is not even invoked: fixing is all it does, and
+    // nobody asked for a fix.
     assert_eq!(
         std::fs::read_to_string(r.path("a.js")).expect("read"),
         "const a = BAD\n",
         "it edited a file without being asked"
     );
+    assert!(!run.says("fixed and re-staged"), "{}", run.output());
 }
 
 #[test]
 fn with_fixing_on_it_repairs_and_restages() {
     let r = Repo::new();
-    fake_prettier(&r);
+    manifest_with_fixer(&r);
     r.git(&["config", "githooks.fix", "true"]);
     r.stage("a.js", "const a = BAD\n");
 
@@ -78,7 +104,7 @@ fn with_fixing_on_it_repairs_and_restages() {
 #[test]
 fn a_clean_file_is_not_reported_as_fixed() {
     let r = Repo::new();
-    fake_prettier(&r);
+    manifest_with_fixer(&r);
     r.git(&["config", "githooks.fix", "true"]);
     r.stage("a.js", "const a = GOOD\n");
 
@@ -92,7 +118,7 @@ fn a_clean_file_is_not_reported_as_fixed() {
 #[test]
 fn a_repair_does_not_sweep_in_unstaged_work() {
     let r = Repo::new();
-    fake_prettier(&r);
+    manifest_with_fixer(&r);
     r.git(&["config", "githooks.fix", "true"]);
     r.stage("other.txt", "committed\n");
     r.commit("chore: seed");

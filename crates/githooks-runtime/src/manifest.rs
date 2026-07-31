@@ -205,6 +205,7 @@ pub enum Kind {
         severity: Severity,
         program: String,
         args: Vec<String>,
+        fix: Fix,
     },
     Unusable {
         why: String,
@@ -237,13 +238,14 @@ impl Check for External {
     }
 
     fn run(&self, ctx: &Ctx) -> Outcome {
-        let (scope, program, args) = match &self.kind {
+        let (scope, program, args, fix) = match &self.kind {
             Kind::Runnable {
                 scope,
                 program,
                 args,
+                fix,
                 ..
-            } => (scope, program, args),
+            } => (scope, program, args, *fix),
             Kind::Unusable { why } => {
                 crate::hooks::common::warn(&format!(
                     "{MANIFEST}: {} — {why}",
@@ -261,14 +263,12 @@ impl Check for External {
         // Which files to test against depends on the stage: what is staged for
         // a commit, what is being pushed for a push. `*` short-circuits before
         // either is computed, which is the common case.
-        if !scope.files.is_empty() {
-            let paths = match self.stage {
-                Stage::PreCommit => crate::hooks::common::staged_files(&[]),
-                Stage::PrePush => crate::pushrefs::changed_files(ctx.push.get()),
-            };
-            if !scope.matches(&paths) {
-                return Outcome::Passed;
-            }
+        let in_scope = match self.stage {
+            Stage::PreCommit => crate::hooks::common::staged_files(&[]),
+            Stage::PrePush => crate::pushrefs::changed_files(ctx.push.get()),
+        };
+        if !scope.files.is_empty() && !scope.matches(&in_scope) {
+            return Outcome::Passed;
         }
         let root = crate::hooks::common::repo_root();
         let mut cmd = Command::new(program);
@@ -287,7 +287,22 @@ impl Check for External {
                 ));
                 Outcome::Unavailable
             }
-            Ok(s) if s.success() => Outcome::Passed,
+            Ok(s) if s.success() => {
+                // A declared fixer that ran clean may still have rewritten
+                // something; re-stage exactly what moved. Only its own scope,
+                // so it cannot stage a file it never looked at.
+                if fix == Fix::Rewrite
+                    && crate::hooks::common::fixing_enabled()
+                    && crate::hooks::common::restage(&scoped(scope, &in_scope))
+                {
+                    crate::hooks::common::ok(&format!(
+                        "{} fixed and re-staged",
+                        crate::ui::highlight(&self.name)
+                    ));
+                    return Outcome::Fixed;
+                }
+                Outcome::Passed
+            }
             Ok(_) => {
                 crate::hooks::common::fail(&format!(
                     "{} failed (output above)",
@@ -297,6 +312,18 @@ impl Check for External {
             }
         }
     }
+}
+
+/// The paths this check's scope actually covers.
+fn scoped(scope: &Scope, paths: &[String]) -> Vec<String> {
+    if scope.files.is_empty() {
+        return paths.to_vec();
+    }
+    paths
+        .iter()
+        .filter(|p| scope.files.iter().any(|e| p.ends_with(e)))
+        .cloned()
+        .collect()
 }
 
 /// `Scope` holds `&'static` slices so a built-in can be a `const`. A parsed
@@ -491,6 +518,7 @@ impl From<Line> for External {
                 severity: d.severity,
                 program: d.program,
                 args: d.args,
+                fix: d.fix,
             },
             Err(why) => Kind::Unusable { why },
         };
