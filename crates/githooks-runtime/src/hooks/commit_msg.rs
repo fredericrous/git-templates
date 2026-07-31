@@ -8,6 +8,7 @@
 //! Ported from ~190 lines of JS. The one structural simplification is how the
 //! optional leading emoji is recognised — see `split_leading_emoji`.
 
+use crate::check::Verdict;
 use crate::git;
 use crate::ui::{error_sign, highlight, valid_sign};
 
@@ -205,13 +206,13 @@ fn orange(s: &str) -> String {
     highlight(s)
 }
 
-pub fn run(args: &[std::ffi::OsString]) -> i32 {
+pub fn run(args: &[std::ffi::OsString]) -> Verdict {
     let Some(filename) = args.first().and_then(|a| a.to_str()) else {
         println!("Usage:\n\n./commit-msg <filename>");
-        return 1;
+        return Verdict::Block;
     };
     let Ok(raw) = std::fs::read_to_string(filename) else {
-        return 1;
+        return Verdict::Block;
     };
     let cleaned = strip_comments(&raw);
     let mut parts = cleaned.splitn(2, '\n');
@@ -223,7 +224,7 @@ pub fn run(args: &[std::ffi::OsString]) -> i32 {
             "Commit's first line should exist and be at most {} characters.",
             orange(&MAX_SUMMARY_LINE_SIZE.to_string())
         ));
-        return 1;
+        return Verdict::Block;
     }
     valid(&format!(
         "Summary size is at most {} characters",
@@ -241,7 +242,7 @@ pub fn run(args: &[std::ffi::OsString]) -> i32 {
     a section of the codebase surrounded by parenthesis, e.g., fix(parser)",
             types.join(", ")
         ));
-        return 1;
+        return Verdict::Block;
     };
     valid("A prefix is defined");
 
@@ -251,7 +252,7 @@ pub fn run(args: &[std::ffi::OsString]) -> i32 {
     The description is a short summary of the code changes, e.g., fix: array parsing issue when multiple spaces were contained in string.",
             orange("colon"), orange("space")
         ));
-        return 1;
+        return Verdict::Block;
     }
     valid("A description is present in the summary");
 
@@ -261,7 +262,7 @@ pub fn run(args: &[std::ffi::OsString]) -> i32 {
             orange("colon"),
             orange(&MAX_DESCRIPTION_SIZE.to_string())
         ));
-        return 1;
+        return Verdict::Block;
     }
     valid(&format!(
         "Description size is at most {} characters",
@@ -286,9 +287,9 @@ pub fn run(args: &[std::ffi::OsString]) -> i32 {
         wrap(&strip_comments(body), MAX_BODY_LINE_SIZE)
     );
     if std::fs::write(filename, group_footer(&formatted)).is_err() {
-        return 1;
+        return Verdict::Block;
     }
-    0
+    Verdict::Proceed
 }
 
 #[cfg(test)]

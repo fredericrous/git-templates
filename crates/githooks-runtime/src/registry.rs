@@ -14,7 +14,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use crate::check::{Builtin, Check, Outcome, Scope, Severity, Stage};
+use crate::check::{Builtin, Check, Outcome, Scope, Severity, Stage, Verdict};
 use crate::pushrefs::PushRefs;
 use crate::{dispatch, hooks};
 
@@ -34,7 +34,7 @@ pub struct Ctx<'a> {
     pub push: &'a PushRefs,
 }
 
-pub type HookFn = fn(&Ctx) -> i32;
+pub type HookFn = fn(&Ctx) -> Verdict;
 
 /// name → handler. The single place a hook is registered.
 /// The four hook names git itself invokes. Everything else is a `Check`.
@@ -73,7 +73,7 @@ pub const CHECKS: &[Builtin] = &[
         stage: Stage::PreCommit,
         scope: Scope::files(&[".js", ".jsx", ".ts", ".tsx", ".vue"]),
         severity: Severity::Block,
-        run: |ctx| Outcome::from_code(hooks::ban_terms::run(ctx.name, ctx.args)),
+        run: |ctx| hooks::ban_terms::run(ctx.name, ctx.args),
     },
     Builtin {
         name: "pre-commit-cargo-fmt",
@@ -128,7 +128,7 @@ pub const CHECKS: &[Builtin] = &[
         stage: Stage::PreCommit,
         scope: Scope::ALWAYS,
         severity: Severity::Block,
-        run: |ctx| Outcome::from_code(hooks::merge_conflict::run(ctx.name, ctx.args)),
+        run: |ctx| hooks::merge_conflict::run(ctx.name, ctx.args),
     },
     Builtin {
         name: "pre-commit-package-lock",
@@ -201,28 +201,28 @@ pub const CHECKS: &[Builtin] = &[
         stage: Stage::PrePush,
         scope: Scope::ALWAYS,
         severity: Severity::Block,
-        run: |ctx| Outcome::from_code(hooks::branch_protect::run(ctx.push.get())),
+        run: |ctx| hooks::branch_protect::run(ctx.push.get()),
     },
     Builtin {
         name: "pre-push-branch-pattern",
         stage: Stage::PrePush,
         scope: Scope::ALWAYS,
         severity: Severity::Block,
-        run: |ctx| Outcome::from_code(hooks::branch_pattern::run(ctx.args)),
+        run: |ctx| hooks::branch_pattern::run(ctx.args),
     },
     Builtin {
         name: "pre-push-pull-rebase",
         stage: Stage::PrePush,
         scope: Scope::ALWAYS,
         severity: Severity::Block,
-        run: |ctx| Outcome::from_code(hooks::pull_rebase::run(ctx.args)),
+        run: |ctx| hooks::pull_rebase::run(ctx.args),
     },
     Builtin {
         name: "pre-push-run-tests-js",
         stage: Stage::PrePush,
         scope: Scope::new(&[".js", ".jsx", ".ts", ".tsx", ".vue"], &["package.json"]),
         severity: Severity::Block,
-        run: |ctx| Outcome::from_code(hooks::run_tests::run(ctx.push.get())),
+        run: |ctx| hooks::run_tests::run(ctx.push.get()),
     },
     Builtin {
         name: "pre-push-cargo-test",
@@ -360,10 +360,10 @@ pub fn lookup(name: &str) -> Option<HookFn> {
     {
         return Some(|ctx: &Ctx| {
             let check = one_named(ctx.name).expect("checked above");
-            match check.run(ctx) {
-                Outcome::Failed if severity_of(check) == Severity::Block => 1,
-                _ => 0,
-            }
+            Verdict::blocking(matches!(
+                (check.run(ctx), severity_of(check)),
+                (Outcome::Failed, Severity::Block)
+            ))
         });
     }
     None

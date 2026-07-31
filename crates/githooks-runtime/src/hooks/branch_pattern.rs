@@ -7,6 +7,7 @@
 //! entirely — as does the failure mode that motivated them, where a missing
 //! `rg` made `! rg …` true and the hook rejected EVERY branch name.
 
+use crate::check::Outcome;
 use crate::git;
 use crate::ui::{error_sign, highlight, valid_sign};
 
@@ -34,10 +35,10 @@ pub fn conforms(branch: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || (p.dots && c == '.'))
 }
 
-pub fn run(args: &[std::ffi::OsString]) -> i32 {
+pub fn run(args: &[std::ffi::OsString]) -> Outcome {
     // Unresolvable HEAD (an unborn branch) — nothing to check, don't block.
     let Some(branch) = git::stdout(&["rev-parse", "--abbrev-ref", "HEAD"]) else {
-        return 0;
+        return Outcome::Passed;
     };
 
     if git::succeeds(&["show-branch", &format!("remotes/origin/{branch}")]) {
@@ -45,7 +46,7 @@ pub fn run(args: &[std::ffi::OsString]) -> i32 {
             "{} Branch already on server. Name is authorized.",
             valid_sign()
         );
-        return 0;
+        return Outcome::Passed;
     }
 
     // Initial push to a brand-new empty remote: there's no feature-branch
@@ -64,7 +65,7 @@ pub fn run(args: &[std::ffi::OsString]) -> i32 {
             "{} Remote has no branches yet (initial push). Name is authorized.",
             valid_sign()
         );
-        return 0;
+        return Outcome::Passed;
     }
 
     if !conforms(&branch) {
@@ -77,14 +78,14 @@ pub fn run(args: &[std::ffi::OsString]) -> i32 {
             highlight(&vocabulary::branch_contract()),
             highlight("git branch -m")
         );
-        return 1;
+        return Outcome::Failed;
     }
 
     println!(
         "{} Branch name conforms with authorized pattern",
         valid_sign()
     );
-    0
+    Outcome::Passed
 }
 
 #[cfg(test)]

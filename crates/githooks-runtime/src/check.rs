@@ -114,13 +114,32 @@ pub enum Outcome {
     Unavailable,
 }
 
-impl Outcome {
-    /// Legacy adapter while checks are converted one at a time.
-    pub fn from_code(code: i32) -> Outcome {
-        if code == 0 {
-            Outcome::Passed
+/// What a HOOK concluded — the only thing git actually reads.
+///
+/// Distinct from `Outcome`, which is what one CHECK concluded. Git has exactly
+/// two questions to ask a hook, so this has exactly two answers, and the `i32`
+/// that expresses them lives at the process boundary rather than being threaded
+/// through every hook, dispatcher and handler as it used to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Proceed,
+    Block,
+}
+
+impl Verdict {
+    /// The exit code git reads. The ONLY place a hook result becomes a number.
+    pub fn exit_code(self) -> i32 {
+        match self {
+            Verdict::Proceed => 0,
+            Verdict::Block => 1,
+        }
+    }
+
+    pub fn blocking(blocked: bool) -> Verdict {
+        if blocked {
+            Verdict::Block
         } else {
-            Outcome::Failed
+            Verdict::Proceed
         }
     }
 }

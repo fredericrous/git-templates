@@ -4,6 +4,7 @@
 //! commit the user is authoring: `-m`, `-t`, a merge, a squash and `--amend`
 //! all pass a source in $2 and are left alone.
 
+use crate::check::Verdict;
 use crate::git;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -63,23 +64,23 @@ pub fn find_digits(s: &str, min: usize) -> Option<String> {
     None
 }
 
-fn append(path: &str, line: &str) -> i32 {
+/// Append a line, best-effort.
+///
+/// Returns nothing, because there is nothing to decide: a commit is never
+/// blocked over the message file, the id being a convenience rather than a
+/// gate. That was previously expressed as an `i32` that could only ever be
+/// zero — a decision type for a function that makes no decision.
+fn append(path: &str, line: &str) {
     // create(true): the shell's `>>` makes the file when absent, and git does
     // not always pre-create the message file.
-    match OpenOptions::new().create(true).append(true).open(path) {
-        Ok(mut f) => {
-            let _ = writeln!(f, "\n{line}");
-            0
-        }
-        // Never block a commit because the message file could not be appended
-        // to — the id is a convenience, not a gate.
-        Err(_) => 0,
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "\n{line}");
     }
 }
 
-pub fn run(args: &[std::ffi::OsString]) -> i32 {
+pub fn run(args: &[std::ffi::OsString]) -> Verdict {
     let Some(msg_file) = args.first().and_then(|a| a.to_str()) else {
-        return 0;
+        return Verdict::Proceed;
     };
     // $2 is the commit source, and the shell version switched on it with a
     // `case` that named five values and let EVERYTHING ELSE fall through to
@@ -92,22 +93,24 @@ pub fn run(args: &[std::ffi::OsString]) -> i32 {
         source,
         "message" | "template" | "merge" | "squash" | "commit"
     ) {
-        return 0;
+        return Verdict::Proceed;
     }
 
     let branch = git::stdout(&["branch", "--show-current"]).unwrap_or_default();
 
     if let Some(id) = find_jira(&branch) {
-        return append(msg_file, &format!("Issue: {id}"));
+        append(msg_file, &format!("Issue: {id}"));
+        return Verdict::Proceed;
     }
     // Only when there IS an id. The shell version tested `$?` after a pipeline
     // ending in `head -n 1`, which is head's status and therefore always 0 —
     // so a branch with no digits appended a dangling "Issue: #id " with an
     // empty value. Untested there, and fixed here.
     if let Some(id) = find_digits(&branch, 3) {
-        return append(msg_file, &format!("Issue: #id {id}"));
+        append(msg_file, &format!("Issue: #id {id}"));
+        return Verdict::Proceed;
     }
-    0
+    Verdict::Proceed
 }
 
 #[cfg(test)]

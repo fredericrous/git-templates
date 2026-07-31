@@ -13,6 +13,7 @@
 //! The escape hatch is git's own: `git push --no-verify` skips every hook. That
 //! is deliberate — a hook that cannot be bypassed is a hook people delete.
 
+use crate::check::Outcome;
 use crate::pushrefs::PushRef;
 use crate::ui::{error_sign, highlight};
 
@@ -33,7 +34,7 @@ fn is_delete(r: &PushRef) -> bool {
     r.local_oid.chars().all(|c| c == '0')
 }
 
-pub fn run(refs: &[PushRef]) -> i32 {
+pub fn run(refs: &[PushRef]) -> Outcome {
     let mut blocked = Vec::new();
     for r in refs {
         if let Some(name) = protected_name(&r.remote_ref) {
@@ -42,7 +43,7 @@ pub fn run(refs: &[PushRef]) -> i32 {
     }
     if blocked.is_empty() {
         crate::hooks::common::ok("No push to a protected branch");
-        return 0;
+        return Outcome::Passed;
     }
     for (name, deleting) in &blocked {
         let what = if *deleting { "Deleting" } else { "Pushing to" };
@@ -56,7 +57,7 @@ pub fn run(refs: &[PushRef]) -> i32 {
         "    (if you really mean it: {})",
         highlight("git push --no-verify")
     );
-    1
+    Outcome::Failed
 }
 
 #[cfg(test)]
@@ -74,21 +75,21 @@ mod tests {
 
     #[test]
     fn blocks_main_and_master() {
-        assert_eq!(run(&[r("a", "refs/heads/main")]), 1);
-        assert_eq!(run(&[r("a", "refs/heads/master")]), 1);
+        assert_eq!(run(&[r("a", "refs/heads/main")]), Outcome::Failed);
+        assert_eq!(run(&[r("a", "refs/heads/master")]), Outcome::Failed);
     }
 
     #[test]
     fn allows_any_other_branch() {
-        assert_eq!(run(&[r("a", "refs/heads/feat/x")]), 0);
-        assert_eq!(run(&[r("a", "refs/heads/maintenance")]), 0);
-        assert_eq!(run(&[r("a", "refs/heads/mainline")]), 0);
+        assert_eq!(run(&[r("a", "refs/heads/feat/x")]), Outcome::Passed);
+        assert_eq!(run(&[r("a", "refs/heads/maintenance")]), Outcome::Passed);
+        assert_eq!(run(&[r("a", "refs/heads/mainline")]), Outcome::Passed);
     }
 
     /// Tags and other non-branch refs are not branches.
     #[test]
     fn allows_tags_even_named_main() {
-        assert_eq!(run(&[r("a", "refs/tags/main")]), 0);
+        assert_eq!(run(&[r("a", "refs/tags/main")]), Outcome::Passed);
     }
 
     /// The check is on the REMOTE ref: pushing a differently-named local branch
@@ -97,7 +98,7 @@ mod tests {
     fn a_renamed_push_to_main_is_still_blocked() {
         let mut p = r("a", "refs/heads/main");
         p.local_ref = "refs/heads/my-feature".into();
-        assert_eq!(run(&[p]), 1);
+        assert_eq!(run(&[p]), Outcome::Failed);
     }
 
     #[test]
@@ -107,13 +108,13 @@ mod tests {
                 "0000000000000000000000000000000000000000",
                 "refs/heads/main"
             )]),
-            1
+            Outcome::Failed
         );
     }
 
     #[test]
     fn no_refs_is_a_pass() {
-        assert_eq!(run(&[]), 0);
+        assert_eq!(run(&[]), Outcome::Passed);
     }
 
     /// One bad ref among several still fails the push.
@@ -121,7 +122,7 @@ mod tests {
     fn a_mixed_push_is_blocked() {
         assert_eq!(
             run(&[r("a", "refs/heads/feat/x"), r("a", "refs/heads/main")]),
-            1
+            Outcome::Failed
         );
     }
 }
