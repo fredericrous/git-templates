@@ -75,11 +75,19 @@ be deleted rather than documented.
 ```rust
 pub enum Outcome {
     Passed,
-    Failed { detail: String },       // ran, found a problem
-    Warned { detail: String },       // ran, found something non-blocking
-    Unavailable { reason: String },  // COULD NOT RUN
+    Failed,       // ran, found a problem
+    Warned,       // ran, found something non-blocking
+    Unavailable,  // COULD NOT RUN
 }
 ```
+
+Shipped without the `detail` / `reason` payloads the sketch carried. Every check
+already prints its own diagnosis at the moment it has the context to phrase it;
+threading the same string back for the dispatcher to print again produced two
+messages about one problem. The variant is the whole signal.
+
+`Failed` is `Default`, so the slot of a check whose thread died reads as a
+failure rather than a pass.
 
 `Unavailable` is the important addition. Today `ruff config found but no
 ruff/uvx binary` prints a warning and returns 0, which is indistinguishable
@@ -90,6 +98,18 @@ That is the same failure that `hook.skip` had before the dispatcher announced
 skipped checks, and it cost three PRs to notice there. Modelling it means the
 dashboard can show *ran clean* separately from *never ran*, which is the
 difference between a green fleet and an unverified one.
+
+Classifying the fifteen sites turned up an ordering bug it would not otherwise
+have found. Three checks — yamllint, kube-linter, kubeconform — tested for their
+binary BEFORE testing whether the repo had opted in, so a repo that never wanted
+yamllint was told to install it, and under `Outcome` would have reported a gap it
+did not have. One repo in the fleet configures yamllint; the nag reached the
+other ninety-five. All three now test the opt-in first, and `Unavailable` means
+what it says: this repo asked for the check and the tool was missing.
+
+One site was reclassified in the other direction. An unpinned `uvx ruff` prints a
+caveat about which ruff spoke — but it RAN, and a clean verdict from it is a
+pass. The caveat is advice, not a gap.
 
 ## `Severity` is declared, and choosable
 
@@ -110,6 +130,18 @@ that `hook.skip = e` silently disables everything. A downgrade keeps the signal
 and removes only the block, which is what people usually want when they reach
 for `--no-verify`. I would ship this alongside, and expect it to become the
 common case.
+
+Shipped, with one property the sketch did not state: an unrecognised value falls
+back to the declared severity rather than to `warn`. Git validates nothing here,
+so a typo would otherwise be a silent disable — the exact failure this feature
+exists to replace.
+
+**And the dashboard has to show it.** A downgrade is quieter than a skip: the
+check runs, prints its failure in red, and the commit passes. Nothing on screen
+distinguishes it from enforcement, so the fleet view carries a `WARN` column and
+a per-repo `githooks.severity` block. That block separates three cases a config
+line cannot: a real downgrade, an explicit `block` (the default written out), and
+a line that changes nothing because the check name or the value is misspelt.
 
 ## Scope, declared rather than reimplemented
 
@@ -208,10 +240,10 @@ High mechanical risk, no user-visible payoff, so it lands alone, proved inert
 by a differential over hook output rather than by the test suite (tests will
 legitimately change shape).
 
-**PR 2 — `Outcome` and `Severity`.** Convert the 15 warn-and-return-0 sites to
-`Warned` or `Unavailable` deliberately, one at a time, deciding which each
-actually is. Add the config override. Dashboard shows *never ran* apart from
-*ran clean*.
+**PR 2 — `Outcome` and `Severity`.** DONE. The 15 warn-and-return-0 sites are
+classified one at a time: 12 `Unavailable`, 2 `Warned` (a waived-past lockfile, a
+first-time author identity), 1 left `Passed` (unpinned ruff, which ran). Config
+override shipped. Dashboard shows downgrades apart from enforcement.
 
 **PR 3 — external checks.** Manifest, parser, `External`, and the fleet views.
 

@@ -14,6 +14,7 @@
 //! mid-refactor, without losing the formatting gate.
 
 use super::common::{fail, hl, ok, repo_root, run as run_tool, staged_files, warn, which};
+use crate::check::Outcome;
 use crate::git;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -134,15 +135,15 @@ fn each_root(
     Some(all_ok)
 }
 
-pub fn fmt(_args: &[std::ffi::OsString]) -> i32 {
+pub fn fmt(_args: &[std::ffi::OsString]) -> Outcome {
     let files = staged_files(&[".rs"]);
     if files.is_empty() {
-        return 0;
+        return Outcome::Passed;
     }
     let root = repo_root();
     let roots = cargo_roots(&root, files.iter().map(String::as_str));
     if roots.is_empty() {
-        return 0;
+        return Outcome::Passed;
     }
     // `--all -- --check` per the project convention. Note this inspects the
     // WORKING TREE, not the index, so a partially-staged file is judged by its
@@ -154,19 +155,19 @@ pub fn fmt(_args: &[std::ffi::OsString]) -> i32 {
         &["fmt", "--all", "--", "--check"],
         "Rust staged but rustfmt is not installed. `rustup component add rustfmt`.",
     ) {
-        None => 0,
+        None => Outcome::Unavailable,
         Some(true) => {
             ok("Rust formatting is clean");
-            0
+            Outcome::Passed
         }
         Some(false) => {
             fail(&format!("Unformatted Rust. Run {}.", hl("cargo fmt --all")));
-            1
+            Outcome::Failed
         }
     }
 }
 
-pub fn clippy(_args: &[std::ffi::OsString]) -> i32 {
+pub fn clippy(_args: &[std::ffi::OsString]) -> Outcome {
     // `staged_files` matches by suffix, which would also accept
     // `vendor/NotCargo.toml`. `is_rust_path` compares the basename, so let it
     // be the only filter rather than keeping two that disagree.
@@ -175,12 +176,12 @@ pub fn clippy(_args: &[std::ffi::OsString]) -> i32 {
         .filter(|f| is_rust_path(f))
         .collect();
     if files.is_empty() {
-        return 0;
+        return Outcome::Passed;
     }
     let root = repo_root();
     let roots = cargo_roots(&root, files.iter().map(String::as_str));
     if roots.is_empty() {
-        return 0;
+        return Outcome::Passed;
     }
     match each_root(
         &roots,
@@ -196,29 +197,29 @@ pub fn clippy(_args: &[std::ffi::OsString]) -> i32 {
         ],
         "Rust staged but clippy is not installed. `rustup component add clippy`.",
     ) {
-        None => 0,
+        None => Outcome::Unavailable,
         Some(true) => {
             ok("Clippy passed");
-            0
+            Outcome::Passed
         }
         Some(false) => {
             fail(&format!(
                 "Clippy warnings. Fix them or run {}.",
                 hl("cargo clippy --fix")
             ));
-            1
+            Outcome::Failed
         }
     }
 }
 
 /// pre-push. Mirrors `run-tests-js`: the range that is actually being pushed
 /// decides whether the suite runs, so a docs-only push costs nothing.
-pub fn test(refs: &[crate::pushrefs::PushRef]) -> i32 {
+pub fn test(refs: &[crate::pushrefs::PushRef]) -> Outcome {
     let zero = git::stdout(&["hash-object", "--stdin"])
         .map(|h| "0".repeat(h.len()))
         .unwrap_or_else(|| "0".repeat(40));
     let Some(root) = git::stdout(&["rev-parse", "--show-toplevel"]) else {
-        return 0;
+        return Outcome::Passed;
     };
 
     let mut changed: BTreeSet<String> = BTreeSet::new();
@@ -239,7 +240,7 @@ pub fn test(refs: &[crate::pushrefs::PushRef]) -> i32 {
     }
     let roots = cargo_roots(&root, changed.iter().map(String::as_str));
     if roots.is_empty() {
-        return 0;
+        return Outcome::Passed;
     }
     match each_root(
         &roots,
@@ -247,14 +248,14 @@ pub fn test(refs: &[crate::pushrefs::PushRef]) -> i32 {
         &["test", "--workspace", "--all-features"],
         "Rust changed but cargo is not installed.",
     ) {
-        None => 0,
+        None => Outcome::Unavailable,
         Some(true) => {
             ok("Rust tests passed");
-            0
+            Outcome::Passed
         }
         Some(false) => {
             fail("Rust tests failed. Push aborted.");
-            1
+            Outcome::Failed
         }
     }
 }

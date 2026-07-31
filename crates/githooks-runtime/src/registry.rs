@@ -14,7 +14,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use crate::check::{Builtin, Scope, Stage};
+use crate::check::{Builtin, Outcome, Scope, Severity, Stage};
 use crate::pushrefs::PushRefs;
 use crate::{dispatch, hooks};
 
@@ -65,24 +65,28 @@ pub const CHECKS: &[Builtin] = &[
             &[".yaml", ".yml"],
             &["kustomization.yaml", "kustomization.yml"],
         ),
+        severity: Severity::Block,
         run: |c| hooks::k8s::argo_lint(c.args),
     },
     Builtin {
         name: "pre-commit-ban-terms",
         stage: Stage::PreCommit,
         scope: Scope::files(&[".js", ".jsx", ".ts", ".tsx", ".vue"]),
-        run: |c| hooks::ban_terms::run(c.name, c.args),
+        severity: Severity::Block,
+        run: |c| Outcome::from_code(hooks::ban_terms::run(c.name, c.args)),
     },
     Builtin {
         name: "pre-commit-cargo-fmt",
         stage: Stage::PreCommit,
         scope: Scope::new(&[".rs"], &["Cargo.toml"]),
+        severity: Severity::Block,
         run: |c| hooks::rust_tools::fmt(c.args),
     },
     Builtin {
         name: "pre-commit-clippy",
         stage: Stage::PreCommit,
         scope: Scope::new(&[".rs"], &["Cargo.toml"]),
+        severity: Severity::Block,
         run: |c| hooks::rust_tools::clippy(c.args),
     },
     Builtin {
@@ -92,6 +96,7 @@ pub const CHECKS: &[Builtin] = &[
             &[".yaml", ".yml"],
             &[".kube-linter*.yaml", ".kube-linter*.yml"],
         ),
+        severity: Severity::Block,
         run: |c| hooks::k8s::kube_linter(c.args),
     },
     Builtin {
@@ -101,30 +106,35 @@ pub const CHECKS: &[Builtin] = &[
             &[".yaml", ".yml"],
             &["kustomization.yaml", "kustomization.yml"],
         ),
+        severity: Severity::Block,
         run: |c| hooks::k8s::kubeconform(c.args),
     },
     Builtin {
         name: "pre-commit-lint-js",
         stage: Stage::PreCommit,
         scope: Scope::new(&[".js", ".jsx", ".ts", ".tsx", ".vue"], &["package.json"]),
+        severity: Severity::Block,
         run: |c| hooks::lint_js::run(c.args),
     },
     Builtin {
         name: "pre-commit-lint-json-yaml",
         stage: Stage::PreCommit,
         scope: Scope::files(&[".json", ".yaml", ".yml"]),
+        severity: Severity::Block,
         run: |c| hooks::lint_json_yaml::run(c.args),
     },
     Builtin {
         name: "pre-commit-merge-conflict",
         stage: Stage::PreCommit,
         scope: Scope::ALWAYS,
-        run: |c| hooks::merge_conflict::run(c.name, c.args),
+        severity: Severity::Block,
+        run: |c| Outcome::from_code(hooks::merge_conflict::run(c.name, c.args)),
     },
     Builtin {
         name: "pre-commit-package-lock",
         stage: Stage::PreCommit,
         scope: Scope::new(&[], &["package.json"]),
+        severity: Severity::Block,
         run: |c| hooks::package_lock::run(c.args),
     },
     Builtin {
@@ -141,6 +151,7 @@ pub const CHECKS: &[Builtin] = &[
                 "prettier.config.js",
             ],
         ),
+        severity: Severity::Block,
         run: |c| hooks::prettier::run(c.args),
     },
     Builtin {
@@ -154,6 +165,7 @@ pub const CHECKS: &[Builtin] = &[
                 "pyproject.toml",
             ],
         ),
+        severity: Severity::Block,
         run: |c| hooks::python_tools::pyright(c.args),
     },
     Builtin {
@@ -163,12 +175,14 @@ pub const CHECKS: &[Builtin] = &[
             &[".py", ".pyi"],
             &["ruff.toml", ".ruff.toml", "pyproject.toml"],
         ),
+        severity: Severity::Block,
         run: |c| hooks::python_tools::ruff(c.args),
     },
     Builtin {
         name: "pre-commit-usual-name",
         stage: Stage::PreCommit,
         scope: Scope::ALWAYS,
+        severity: Severity::Block,
         run: |c| hooks::usual_name::run(c.args),
     },
     Builtin {
@@ -178,6 +192,7 @@ pub const CHECKS: &[Builtin] = &[
             &[".yaml", ".yml"],
             &[".yamllint.yaml", ".yamllint.yml", ".yamllint"],
         ),
+        severity: Severity::Block,
         run: |c| hooks::yamllint::run(c.args),
     },
     // ---- pre-push, cheapest and most decisive first ----
@@ -185,33 +200,52 @@ pub const CHECKS: &[Builtin] = &[
         name: "pre-push-branch-protect",
         stage: Stage::PrePush,
         scope: Scope::ALWAYS,
-        run: |c| hooks::branch_protect::run(c.push.get()),
+        severity: Severity::Block,
+        run: |c| Outcome::from_code(hooks::branch_protect::run(c.push.get())),
     },
     Builtin {
         name: "pre-push-branch-pattern",
         stage: Stage::PrePush,
         scope: Scope::ALWAYS,
-        run: |c| hooks::branch_pattern::run(c.args),
+        severity: Severity::Block,
+        run: |c| Outcome::from_code(hooks::branch_pattern::run(c.args)),
     },
     Builtin {
         name: "pre-push-pull-rebase",
         stage: Stage::PrePush,
         scope: Scope::ALWAYS,
-        run: |c| hooks::pull_rebase::run(c.args),
+        severity: Severity::Block,
+        run: |c| Outcome::from_code(hooks::pull_rebase::run(c.args)),
     },
     Builtin {
         name: "pre-push-run-tests-js",
         stage: Stage::PrePush,
         scope: Scope::new(&[".js", ".jsx", ".ts", ".tsx", ".vue"], &["package.json"]),
-        run: |c| hooks::run_tests::run(c.push.get()),
+        severity: Severity::Block,
+        run: |c| Outcome::from_code(hooks::run_tests::run(c.push.get())),
     },
     Builtin {
         name: "pre-push-cargo-test",
         stage: Stage::PrePush,
         scope: Scope::new(&[".rs"], &["Cargo.toml"]),
+        severity: Severity::Block,
         run: |c| hooks::rust_tools::test(c.push.get()),
     },
 ];
+
+/// A check's severity, after any per-repository override.
+///
+/// `git config githooks.severity.<check> warn` downgrades a blocking check to a
+/// warning. Unlike `hook.skip` it keeps the signal: the check still runs and
+/// still reports, it just stops failing the commit.
+pub fn severity_of(check: &Builtin) -> Severity {
+    let key = format!("githooks.severity.{}", check.name);
+    match crate::git::stdout(&["config", "--get", &key]).as_deref() {
+        Some("warn") => Severity::Warn,
+        Some("block") => Severity::Block,
+        _ => check.severity,
+    }
+}
 
 /// Checks for one stage, in declared order.
 pub fn stage_checks(stage: Stage) -> impl Iterator<Item = &'static Builtin> {
@@ -223,8 +257,22 @@ pub fn lookup(name: &str) -> Option<HookFn> {
         return Some(*f);
     }
     // A check invoked directly by name — how the tests drive individual checks,
-    // and how `githooks <check>` works from a shell.
-    CHECKS.iter().find(|c| c.name == name).map(|c| c.run)
+    // and how `githooks <check>` works from a shell. Its Outcome collapses to an
+    // exit code here, honouring severity, so a `warn` check invoked directly
+    // reports without failing exactly as it does inside a dispatcher.
+    if CHECKS.iter().any(|c| c.name == name) {
+        return Some(|c: &Ctx| {
+            let check = CHECKS
+                .iter()
+                .find(|k| k.name == c.name)
+                .expect("checked above");
+            match (check.run)(c) {
+                Outcome::Failed if severity_of(check) == Severity::Block => 1,
+                _ => 0,
+            }
+        });
+    }
+    None
 }
 
 #[cfg(test)]

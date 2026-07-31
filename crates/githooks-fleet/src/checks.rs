@@ -114,6 +114,7 @@ mod tests {
             languages: Vec::new(),
             applicable,
             skips: skips.iter().map(|s| crate::skips::for_test(s)).collect(),
+            severities: Vec::new(),
         }
     }
 
@@ -146,6 +147,7 @@ mod tests {
             languages: langs.iter().map(|s| s.to_string()).collect(),
             applicable: Vec::new(),
             skips: skips.iter().map(|s| crate::skips::for_test(s)).collect(),
+            severities: Vec::new(),
         }
     }
 

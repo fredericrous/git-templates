@@ -4,6 +4,7 @@
 use super::common::{
     fail, first_existing, hl, ok, repo_root, resolve_tool, run as run_tool, staged_files, warn,
 };
+use crate::check::Outcome;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -42,10 +43,10 @@ fn has_config(root: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn run(_args: &[std::ffi::OsString]) -> i32 {
+pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
     let files = staged_files(&EXTS);
     if files.is_empty() {
-        return 0;
+        return Outcome::Passed;
     }
     let root = repo_root();
 
@@ -57,14 +58,14 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
         .map(|t| t[0].contains("node_modules/.bin"))
         .unwrap_or(false);
     if !has_config(&root) && !local_pinned {
-        return 0;
+        return Outcome::Passed;
     }
     let Some(argv) = tool else {
         warn(&format!(
             "prettier config found but no prettier binary. Run {}",
             hl("npm install")
         ));
-        return 0;
+        return Outcome::Unavailable;
     };
 
     // Ignore a GLOBAL ~/.editorconfig when this repo defines none of its own:
@@ -89,10 +90,10 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
         list.push("--list-different".into());
         list.extend(files);
         let _ = run_tool(&root, &argv, &list);
-        return 1;
+        return Outcome::Failed;
     }
     ok("Prettier passed");
-    0
+    Outcome::Passed
 }
 
 /// Like `common::run` but silent — the check pass only decides the verdict; the

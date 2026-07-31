@@ -528,7 +528,7 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
     let mid = area.width >= 76;
 
     let header = if wide {
-        vec!["REPO", "SHIMS", "BAKE", "LANG", "SKIPS", "STATE"]
+        vec!["REPO", "SHIMS", "BAKE", "LANG", "SKIPS", "WARN", "STATE"]
     } else if mid {
         vec!["REPO", "SHIMS", "BAKE", "STATE"]
     } else {
@@ -556,6 +556,27 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     r.skips.len().to_string()
                 }));
+                // Downgrades get their own column rather than being folded into
+                // SKIPS. They are not the same thing and the difference is the
+                // point: a skipped check is silent, a downgraded one prints its
+                // failure in red and lets the commit through anyway. Summing
+                // them would hide exactly the case worth seeing.
+                let weakened = r.severities.iter().filter(|e| e.weakens()).count();
+                cells.push(
+                    Cell::from(if weakened == 0 {
+                        "-".to_string()
+                    } else {
+                        weakened.to_string()
+                    })
+                    .style(tint(
+                        app.color,
+                        if weakened == 0 {
+                            Color::Reset
+                        } else {
+                            Color::Yellow
+                        },
+                    )),
+                );
             }
             let word = state_word(r);
             let colour = if word.starts_with('x') {
@@ -577,6 +598,7 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
             Constraint::Length(8),
             Constraint::Length(12),
             Constraint::Length(6),
+            Constraint::Length(5),
             Constraint::Length(14),
         ]
     } else if mid {
@@ -695,6 +717,33 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
                     "", ""
                 )));
             }
+        }
+    }
+    if !r.severities.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from("githooks.severity").style(tint(app.color, ACCENT)));
+        for e in &r.severities {
+            let scope = match &e.scope {
+                crate::skips::Scope::Local => "local",
+                crate::skips::Scope::Global => "global",
+                crate::skips::Scope::Other { .. } => "other",
+            };
+            // Three outcomes worth telling apart, and only one of them is what
+            // the author probably thought they were writing.
+            let head = if e.is_inert() {
+                // Silent no-op. Git accepts any key and any value here, so a
+                // typo leaves a line in the config that looks like policy and
+                // enforces the default.
+                "! changes nothing — unknown check or value".to_string()
+            } else if e.weakens() {
+                "runs and reports, does NOT block".to_string()
+            } else {
+                "blocks (the default, written out)".to_string()
+            };
+            lines.push(Line::from(format!(
+                "  {:<22} {:<7} {:<6} -> {head}",
+                e.check, scope, e.value
+            )));
         }
     }
     lines.push(Line::from(""));
@@ -989,6 +1038,7 @@ mod tests {
             languages: vec!["rust".into()],
             applicable: Vec::new(),
             skips: Vec::new(),
+            severities: Vec::new(),
         }
     }
 
@@ -1227,6 +1277,83 @@ mod tests {
         assert!(
             out.contains("probably not intended"),
             "an over-broad skip must be flagged: {out}"
+        );
+    }
+
+    /// A downgraded check is the case the dashboard was blind to: it runs, it
+    /// prints, the commit passes, and every column read "ok". The detail view
+    /// has to say what the config line does, because the config line does not.
+    #[test]
+    fn detail_says_a_downgraded_check_does_not_block() {
+        let mut r = repo("a", true);
+        r.severities = vec![crate::severities::for_test("pre-commit-clippy", "warn")];
+        let mut app = App::new(scan_with_repos(vec![r]));
+        app.mode = Mode::Detail;
+        let out = render(&app, 120, 30);
+        assert!(out.contains("githooks.severity"), "{out}");
+        assert!(out.contains("does NOT block"), "{out}");
+        assert!(
+            !out.contains("changes nothing"),
+            "it does change things: {out}"
+        );
+    }
+
+    /// Git accepts any key and any value under this section, so the two ways of
+    /// configuring nothing look exactly like the way that works.
+    #[test]
+    fn detail_flags_a_severity_line_that_does_nothing() {
+        for entry in [
+            crate::severities::for_test("pre-commit-clipy", "warn"),
+            crate::severities::for_test("pre-commit-clippy", "advisory"),
+        ] {
+            let mut r = repo("a", true);
+            r.severities = vec![entry.clone()];
+            let mut app = App::new(scan_with_repos(vec![r]));
+            app.mode = Mode::Detail;
+            let out = render(&app, 120, 30);
+            assert!(
+                out.contains("changes nothing"),
+                "{entry:?} was not flagged as inert: {out}"
+            );
+        }
+    }
+
+    /// An explicit `block` is the default written out. Showing it is right;
+    /// alarming about it is not.
+    #[test]
+    fn an_explicit_block_is_shown_without_alarm() {
+        let mut r = repo("a", true);
+        r.severities = vec![crate::severities::for_test("pre-commit-clippy", "block")];
+        let mut app = App::new(scan_with_repos(vec![r]));
+        app.mode = Mode::Detail;
+        let out = render(&app, 120, 30);
+        assert!(out.contains("githooks.severity"), "{out}");
+        assert!(!out.contains("does NOT block"), "{out}");
+        assert!(!out.contains("changes nothing"), "{out}");
+    }
+
+    /// The table counts only real downgrades. An inert line must not inflate
+    /// the number, or the column becomes noise nobody acts on.
+    #[test]
+    fn the_warn_column_counts_only_what_actually_weakens() {
+        let mut r = repo("a", true);
+        r.severities = vec![
+            crate::severities::for_test("pre-commit-clippy", "warn"),
+            crate::severities::for_test("pre-commit-prettier", "block"),
+            crate::severities::for_test("nonsense", "warn"),
+        ];
+        let mut app = App::new(scan_with_repos(vec![r]));
+        app.mode = Mode::Browse;
+        let out = render(&app, 130, 12);
+        assert!(out.contains("WARN"), "the column must exist: {out}");
+        let row = out
+            .lines()
+            .find(|l| l.contains("a "))
+            .expect("the repo row");
+        // Three lines configured, one of which weakens anything.
+        assert!(
+            row.contains(" 1 "),
+            "expected a count of 1 downgrade, got: {row}"
         );
     }
 

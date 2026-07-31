@@ -26,10 +26,10 @@
 //! because it cannot execute a `#!` script, and the spawn plumbing under both.
 //! Order is now a declared list in `registry`.
 
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
 
-use crate::check::{Builtin, Check, Stage};
+use crate::check::{Builtin, Check, Outcome, Severity, Stage};
+use crate::registry::severity_of;
 use crate::registry::{stage_checks, Ctx};
 use crate::ui::{highlight, warning_sign};
 use crate::{cherry_pick_in_progress, configured_skips};
@@ -86,12 +86,13 @@ fn announce_skips(dropped: &[&str]) {
 /// Extracted so the concurrency itself can be tested with a rendezvous instead
 /// of a stopwatch — an earlier wall-clock test was flaky the moment the machine
 /// was busy, and a threshold that trips under load teaches you to ignore it.
-fn run_concurrently<T, F>(items: &[T], run: F) -> Vec<i32>
+fn run_concurrently<T, R, F>(items: &[T], run: F) -> Vec<R>
 where
     T: Sync,
-    F: Fn(&T) -> i32 + Sync,
+    R: Send + Default,
+    F: Fn(&T) -> R + Sync,
 {
-    let slots: Vec<Mutex<Option<i32>>> = items.iter().map(|_| Mutex::new(None)).collect();
+    let slots: Vec<Mutex<Option<R>>> = items.iter().map(|_| Mutex::new(None)).collect();
     std::thread::scope(|scope| {
         for (item, slot) in items.iter().zip(&slots) {
             let run = &run;
@@ -103,7 +104,7 @@ where
     });
     slots
         .into_iter()
-        .map(|s| s.into_inner().expect("poisoned").unwrap_or(1))
+        .map(|s| s.into_inner().expect("poisoned").unwrap_or_default())
         .collect()
 }
 
@@ -116,37 +117,72 @@ pub fn pre_commit(ctx: &Ctx) -> i32 {
         return 0;
     }
 
-    let last_failure = AtomicI32::new(0);
-    let codes = run_concurrently(&checks, |check| {
+    let outcomes = run_concurrently(&checks, |check| {
         let sub = Ctx {
             name: check.name,
             args: ctx.args,
             hooks_dir: ctx.hooks_dir,
             push: ctx.push,
         };
-        let code = check.run(&sub);
-        if code != 0 {
-            // Last failure wins the exit code, as the zsh version did.
-            last_failure.store(code, Ordering::Relaxed);
-        }
-        code
+        check.run(&sub)
     });
 
-    let failed: Vec<&str> = checks
-        .iter()
-        .zip(&codes)
-        .filter(|(_, c)| **c != 0)
-        .map(|(check, _)| check.name)
-        .collect();
-    if failed.is_empty() {
+    report(&checks, &outcomes)
+}
+
+/// Turn outcomes into an exit code, and say what did not run.
+///
+/// A `Warn` check that fails is reported and does not block — that is the whole
+/// of the severity feature. `Unavailable` never blocks either, but it is
+/// announced, because a check that could not run is not a check that passed.
+fn report(checks: &[&'static Builtin], outcomes: &[Outcome]) -> i32 {
+    let mut blocked = Vec::new();
+    let mut downgraded = Vec::new();
+    let mut unavailable = Vec::new();
+
+    for (check, outcome) in checks.iter().zip(outcomes) {
+        match outcome {
+            // `Warned` needs nothing here: a check that chose to warn has
+            // already said what it wanted to, and a roll-up would only repeat
+            // it. `Failed` under `Severity::Warn` is different — that check
+            // printed an error and means it, so the fact that it is not
+            // blocking has to be said by someone.
+            Outcome::Passed | Outcome::Warned => {}
+            Outcome::Unavailable => unavailable.push(check.name),
+            Outcome::Failed => match severity_of(check) {
+                Severity::Block => blocked.push(check.name),
+                Severity::Warn => downgraded.push(check.name),
+            },
+        }
+    }
+
+    if !unavailable.is_empty() {
+        // Distinct from "passed". Silence here is how a repo looks verified
+        // when nothing actually ran — and with twenty checks interleaving
+        // their output, a trailing count is the only place you can see it.
+        println!(
+            "{} {} check(s) could not run: {}",
+            warning_sign(),
+            unavailable.len(),
+            unavailable.join(", ")
+        );
+    }
+    if !downgraded.is_empty() {
+        println!(
+            "{} {} check(s) reported a problem but are set to warn: {}",
+            warning_sign(),
+            downgraded.len(),
+            downgraded.join(", ")
+        );
+    }
+    if blocked.is_empty() {
         return 0;
     }
-    // Every failure is listed — that is the whole reason this one is concurrent.
     println!("\n🚨  Error raised by:");
-    for f in &failed {
+    for f in &blocked {
         println!("    - {}", highlight(f));
     }
-    last_failure.load(Ordering::Relaxed)
+    1
 }
 
 pub fn pre_push(ctx: &Ctx) -> i32 {
@@ -158,12 +194,27 @@ pub fn pre_push(ctx: &Ctx) -> i32 {
             hooks_dir: ctx.hooks_dir,
             push: ctx.push,
         };
-        let code = check.run(&sub);
-        if code != 0 {
-            // Singular, and stop here: the later steps are expensive and their
-            // preconditions no longer hold.
-            println!("\n🚨  Error raised by hook {}", highlight(check.name));
-            return code;
+        match check.run(&sub) {
+            Outcome::Passed => {}
+            // Announced, never fatal: a check that could not run has not
+            // invalidated anything, and neither has a warning.
+            Outcome::Unavailable => {
+                println!("{} {} could not run", warning_sign(), highlight(check.name))
+            }
+            Outcome::Warned => {}
+            Outcome::Failed => match severity_of(check) {
+                Severity::Warn => println!(
+                    "{} {} reported a problem (severity warn)",
+                    warning_sign(),
+                    highlight(check.name)
+                ),
+                // Fail-fast applies ONLY to Block: the later steps are
+                // expensive and their preconditions are gone.
+                Severity::Block => {
+                    println!("\n🚨  Error raised by hook {}", highlight(check.name));
+                    return 1;
+                }
+            },
         }
     }
     0
@@ -172,7 +223,66 @@ pub fn pre_push(ctx: &Ctx) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use crate::check::Scope;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A check whose only job is to carry a name and a severity into `report`.
+    /// Its `run` is never called — `report` is fed outcomes directly, which is
+    /// what makes `Unavailable` testable at all: the real thing needs a missing
+    /// binary, and a test that uninstalls the developer's toolchain is worse
+    /// than no test.
+    const fn stub(name: &'static str, severity: Severity) -> Builtin {
+        Builtin {
+            name,
+            stage: Stage::PreCommit,
+            scope: Scope::ALWAYS,
+            severity,
+            run: |_| Outcome::Passed,
+        }
+    }
+
+    static BLOCKER: Builtin = stub("stub-blocker", Severity::Block);
+    static WARNER: Builtin = stub("stub-warner", Severity::Warn);
+
+    #[test]
+    fn a_blocking_failure_is_the_only_thing_that_fails_the_commit() {
+        assert_eq!(report(&[&BLOCKER], &[Outcome::Failed]), 1);
+        assert_eq!(report(&[&BLOCKER], &[Outcome::Passed]), 0);
+        // Every non-blocking shape, one at a time, so a regression cannot hide
+        // behind a passing sibling.
+        assert_eq!(report(&[&BLOCKER], &[Outcome::Warned]), 0);
+        assert_eq!(report(&[&BLOCKER], &[Outcome::Unavailable]), 0);
+        assert_eq!(report(&[&WARNER], &[Outcome::Failed]), 0);
+    }
+
+    #[test]
+    fn one_blocking_failure_among_many_still_fails() {
+        let checks = [&BLOCKER, &WARNER, &BLOCKER];
+        assert_eq!(
+            report(
+                &checks,
+                &[Outcome::Unavailable, Outcome::Failed, Outcome::Failed]
+            ),
+            1
+        );
+        // Same shape, with the only *blocking* failure removed.
+        assert_eq!(
+            report(
+                &checks,
+                &[Outcome::Unavailable, Outcome::Failed, Outcome::Passed]
+            ),
+            0
+        );
+    }
+
+    /// The slot of a check whose thread died. Reading that as a pass is how a
+    /// crash becomes a green commit, so the default is pinned here rather than
+    /// left to whatever `derive(Default)` picks up if the variants are
+    /// reordered.
+    #[test]
+    fn a_missing_outcome_defaults_to_failure() {
+        assert_eq!(Outcome::default(), Outcome::Failed);
+    }
     use std::time::{Duration, Instant};
 
     /// Concurrency proved by RENDEZVOUS, not by a stopwatch: every task must

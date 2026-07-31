@@ -10,6 +10,7 @@
 //! because it flags issues the CI-pinned version does not — phantom failures).
 
 use super::common::{fail, hl, ok, repo_root, run as run_tool, staged_files, warn, which};
+use crate::check::Outcome;
 use crate::git;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -69,18 +70,18 @@ fn opts_in(root: &str, configs: &[&str], table: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn ruff(_args: &[std::ffi::OsString]) -> i32 {
+pub fn ruff(_args: &[std::ffi::OsString]) -> Outcome {
     let files = staged_files(&[".py", ".pyi"]);
     if files.is_empty() {
-        return 0;
+        return Outcome::Passed;
     }
     let root = repo_root();
     if !opts_in(&root, &["ruff.toml", ".ruff.toml"], "[tool.ruff") {
-        return 0;
+        return Outcome::Passed;
     }
     let Some((argv, unpinned)) = resolve_python_tool(&root, "ruff") else {
         warn("ruff config found but no ruff/uvx binary. Install ruff or uv.");
-        return 0;
+        return Outcome::Unavailable;
     };
     if unpinned {
         warn(&format!(
@@ -111,16 +112,19 @@ pub fn ruff(_args: &[std::ffi::OsString]) -> i32 {
     }
 
     if failed {
-        return 1;
+        return Outcome::Failed;
     }
+    // An unpinned ruff RAN, and its verdict was clean — that is a pass, not a
+    // gap. The caveat above is advice about which ruff spoke, not a claim that
+    // none did.
     ok("Ruff passed");
-    0
+    Outcome::Passed
 }
 
-pub fn pyright(_args: &[std::ffi::OsString]) -> i32 {
+pub fn pyright(_args: &[std::ffi::OsString]) -> Outcome {
     let files = staged_files(&[".py", ".pyi"]);
     if files.is_empty() {
-        return 0;
+        return Outcome::Passed;
     }
     let root = repo_root();
     if !opts_in(
@@ -128,11 +132,11 @@ pub fn pyright(_args: &[std::ffi::OsString]) -> i32 {
         &["pyrightconfig.json", "pyrightconfig.jsonc"],
         "[tool.pyright",
     ) {
-        return 0;
+        return Outcome::Passed;
     }
     let Some((argv, _)) = resolve_python_tool(&root, "pyright") else {
         warn("pyright config found but no pyright binary. Install pyright or uv.");
-        return 0;
+        return Outcome::Unavailable;
     };
     // Scoped to the STAGED files, not the whole tree: fast enough for a
     // pre-commit hook while catching the per-file errors that are the usual
@@ -141,8 +145,8 @@ pub fn pyright(_args: &[std::ffi::OsString]) -> i32 {
     // whole-tree run stays the authority for cross-file-only errors.
     if !run_tool(&root, &argv, &files) {
         fail("Pyright type errors. Please fix");
-        return 1;
+        return Outcome::Failed;
     }
     ok("pyright passed");
-    0
+    Outcome::Passed
 }

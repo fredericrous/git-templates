@@ -4,13 +4,14 @@
 //!
 //! Warning only: it never blocks a commit.
 
+use crate::check::Outcome;
 use crate::git;
 use crate::ui::{highlight, warning_sign};
 
-pub fn run(_args: &[std::ffi::OsString]) -> i32 {
+pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
     // An empty repo has no history to compare against.
     if !git::succeeds(&["log", "-1"]) {
-        return 0;
+        return Outcome::Passed;
     }
 
     let name = git::stdout(&["config", "user.name"]).unwrap_or_default();
@@ -24,14 +25,18 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
     let seen = git::stdout(&["shortlog", "-s", "-n", "-e", "--all"])
         .is_some_and(|log| log.contains(&full));
 
+    // A new identity is the one thing this check exists to notice, so it is
+    // `Warned` and not `Passed` — the commit proceeds either way, but the
+    // dashboard should not count a fresh identity as a clean run.
     if !seen {
         println!(
             "{} It is the first time you commit as {}",
             warning_sign(),
             highlight(&full)
         );
+        return Outcome::Warned;
     }
-    0
+    Outcome::Passed
 }
 
 #[cfg(test)]
