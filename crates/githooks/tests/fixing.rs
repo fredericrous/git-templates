@@ -31,7 +31,7 @@ fn rewriter(r: &Repo, name: &str) {
 fn rewriter(r: &Repo, name: &str) {
     r.write(
         name,
-        "@echo off\r\nfor %%f in (*.js) do powershell -NoProfile -Command \"(Get-Content '%%f') -replace 'BAD','GOOD' | Set-Content -NoNewline '%%f'\"\r\n",
+        "@echo off\r\nfor %%f in (*.js) do powershell -NoProfile -Command \"$c = Get-Content -Raw '%%f'; [IO.File]::WriteAllText('%%f', ($c -replace 'BAD','GOOD'))\"\r\n",
     );
     r.git(&["add", name]);
 }
