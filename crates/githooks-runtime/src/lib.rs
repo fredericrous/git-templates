@@ -73,8 +73,8 @@ pub fn list_checks() {
 
     let broken: std::collections::BTreeMap<&str, &str> = manifest::externals()
         .iter()
-        .filter_map(|e| match &e.kind {
-            manifest::Kind::Unusable { why } => Some((e.name.as_str(), why.as_str())),
+        .filter_map(|external| match &external.kind {
+            manifest::Kind::Unusable { why } => Some((external.name.as_str(), why.as_str())),
             manifest::Kind::Runnable { .. } => None,
         })
         .collect();
@@ -84,10 +84,10 @@ pub fn list_checks() {
         // Externals are listed here too, and marked, because the question this
         // command answers — "would this run here?" — is asked most often about
         // the check somebody just added to `.githooks.conf`.
-        for c in registry::all_stage_checks(stage) {
-            let name = c.name();
+        for check in registry::all_stage_checks(stage) {
+            let name = check.name();
             let skipped = skips.iter().any(|s| skip_suppresses(name, s));
-            let applies = c.scope().matches(&paths);
+            let applies = check.scope().matches(&paths);
             // Four states, four glyphs: a check that is correctly silent must
             // never look like one that is disabled, and neither must look like
             // one whose declaration could not be read.
@@ -98,7 +98,10 @@ pub fn list_checks() {
             } else if applies {
                 ('●', String::new())
             } else {
-                ('○', format!("inert here — needs {}", describe(c.scope())))
+                (
+                    '○',
+                    format!("inert here — needs {}", describe(check.scope())),
+                )
             };
             // Where a check CAME FROM belongs next to its name, not appended
             // after a reason that is often empty. A reader scanning this list
@@ -116,7 +119,9 @@ pub fn list_checks() {
 }
 
 fn is_external(name: &str) -> bool {
-    manifest::externals().iter().any(|e| e.name == name)
+    manifest::externals()
+        .iter()
+        .any(|external| external.name == name)
 }
 
 fn describe(s: crate::check::Scope) -> String {

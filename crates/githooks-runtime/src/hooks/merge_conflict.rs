@@ -44,10 +44,10 @@ pub fn run(hook_name: &str, _args: &[std::ffi::OsString]) -> i32 {
     let flagged: Vec<String> = staged
         .into_iter()
         .filter(|f| !is_own_test(f, hook_name))
-        .filter(|f| {
+        .filter(|file| {
             // The STAGED content, not the worktree's: what is being committed
             // is what matters, and they differ during a partial `git add -p`.
-            crate::git::stdout(&["show", &format!(":{f}")])
+            crate::git::stdout(&["show", &format!(":{file}")])
                 .map(|c| m.iter().all(|mk| c.contains(mk.as_str())))
                 .unwrap_or(false)
         })

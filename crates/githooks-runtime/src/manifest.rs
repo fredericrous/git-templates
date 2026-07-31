@@ -317,7 +317,7 @@ fn parse_scope(token: &str) -> Result<Vec<String>, ParseError> {
     for part in token.split(',') {
         let ext = part
             .strip_prefix('*')
-            .filter(|e| e.starts_with('.'))
+            .filter(|ext| ext.starts_with('.'))
             .ok_or_else(|| ParseError::BadScope(part.to_string()))?;
         exts.push(ext.to_string());
     }

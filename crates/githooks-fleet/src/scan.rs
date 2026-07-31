@@ -264,8 +264,8 @@ fn walk(
     if budget == 0 {
         return;
     }
-    for d in subdirs {
-        walk(root, &d, budget - 1, installed_binary, on, s);
+    for subdir in subdirs {
+        walk(root, &subdir, budget - 1, installed_binary, on, s);
     }
 }
 
@@ -279,12 +279,12 @@ fn inspect(root: &Path, repo: &Path, hooks: &Path, managed: bool, installed_bina
     let (mut stale_ours, mut foreign_subs) = (Vec::new(), Vec::new());
     let mut hook_pkgjson = false;
     if let Ok(entries) = std::fs::read_dir(hooks) {
-        for e in entries.flatten() {
-            let p = e.path();
+        for entry in entries.flatten() {
+            let p = entry.path();
             if !p.is_file() {
                 continue;
             }
-            let name = e.file_name().to_string_lossy().into_owned();
+            let name = entry.file_name().to_string_lossy().into_owned();
             if name.ends_with(".sample") || DISPATCHERS.contains(&name.as_str()) {
                 continue;
             }

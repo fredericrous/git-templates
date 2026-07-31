@@ -65,10 +65,10 @@ pub fn rollup(repos: &[Repo]) -> Vec<CheckRollup> {
         .iter()
         .map(|check| {
             let (mut applicable, mut skipped, mut inert) = (0, 0, 0);
-            for r in &managed {
-                if r.applicable.iter().any(|a| a == check.name) {
+            for repo in &managed {
+                if repo.applicable.iter().any(|a| a == check.name) {
                     applicable += 1;
-                    if is_skipped(r, check.name) {
+                    if is_skipped(repo, check.name) {
                         skipped += 1;
                     }
                 } else {

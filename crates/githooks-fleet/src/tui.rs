@@ -138,9 +138,10 @@ impl App {
         self.scan
             .repos
             .iter()
-            .filter(|r| {
+            .filter(|repo| {
                 self.filter.is_empty()
-                    || r.path
+                    || repo
+                        .path
                         .to_string_lossy()
                         .to_lowercase()
                         .contains(&self.filter.as_str().to_lowercase())
@@ -290,8 +291,8 @@ impl App {
         let Some(target) = rows.get(self.selected).map(|r| r.path.clone()) else {
             return;
         };
-        if let Some(r) = self.scan.repos.iter_mut().find(|r| r.path == target) {
-            r.skips = fresh;
+        if let Some(repo) = self.scan.repos.iter_mut().find(|repo| repo.path == target) {
+            repo.skips = fresh;
         }
     }
     fn browse_key(&mut self, key: Key) {
@@ -362,7 +363,7 @@ fn scope_of(exts: &[String]) -> String {
         "*".to_string()
     } else {
         exts.iter()
-            .map(|e| format!("*{e}"))
+            .map(|ext| format!("*{ext}"))
             .collect::<Vec<_>>()
             .join(",")
     }
@@ -554,31 +555,31 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
 
     let body: Vec<Row> = rows
         .iter()
-        .map(|r| {
-            let path = r.path.to_string_lossy().into_owned();
+        .map(|repo| {
+            let path = repo.path.to_string_lossy().into_owned();
             let mut cells = vec![Cell::from(path)];
             if mid {
-                let g = shim_glyphs(r);
+                let g = shim_glyphs(repo);
                 let all_ok = g.chars().all(|c| c == '●');
                 cells.push(Cell::from(g).style(tint(
                     app.color,
                     if all_ok { Color::Green } else { Color::Red },
                 )));
-                cells.push(Cell::from(bake_word(&r.baked)));
+                cells.push(Cell::from(bake_word(&repo.baked)));
             }
             if wide {
-                cells.push(Cell::from(r.languages.join(" ")));
-                cells.push(Cell::from(if r.skips.is_empty() {
+                cells.push(Cell::from(repo.languages.join(" ")));
+                cells.push(Cell::from(if repo.skips.is_empty() {
                     "-".to_string()
                 } else {
-                    r.skips.len().to_string()
+                    repo.skips.len().to_string()
                 }));
                 // Downgrades get their own column rather than being folded into
                 // SKIPS. They are not the same thing and the difference is the
                 // point: a skipped check is silent, a downgraded one prints its
                 // failure in red and lets the commit through anyway. Summing
                 // them would hide exactly the case worth seeing.
-                let weakened = r.severities.iter().filter(|e| e.weakens()).count();
+                let weakened = repo.severities.iter().filter(|e| e.weakens()).count();
                 cells.push(
                     Cell::from(if weakened == 0 {
                         "-".to_string()
@@ -597,8 +598,8 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
                 // Declared checks, with unusable lines called out. A count
                 // alone would let "3 custom checks" and "3 custom checks, two
                 // of which have never run" render identically.
-                let broken = r.declared.iter().filter(|d| d.is_unusable()).count();
-                let text = match (r.declared.len(), broken) {
+                let broken = repo.declared.iter().filter(|d| d.is_unusable()).count();
+                let text = match (repo.declared.len(), broken) {
                     (0, _) => "-".to_string(),
                     (n, 0) => n.to_string(),
                     (n, b) => format!("{n}!{b}"),
@@ -608,7 +609,7 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
                     if broken > 0 { Color::Red } else { Color::Reset },
                 )));
             }
-            let word = state_word(r);
+            let word = state_word(repo);
             let colour = if word.starts_with('x') {
                 Color::Red
             } else if word.starts_with('!') {
@@ -660,58 +661,58 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
 fn applies_here(r: &Repo, check: &str) -> bool {
     crate::checks::rollup(std::slice::from_ref(r))
         .into_iter()
-        .find(|c| c.name == check)
-        .map(|c| c.applicable > 0)
+        .find(|rollup| rollup.name == check)
+        .map(|rollup| rollup.applicable > 0)
         .unwrap_or(false)
 }
 
 fn detail(f: &mut Frame, area: Rect, app: &App) {
     let rows = app.rows();
-    let Some(r) = rows.get(app.selected) else {
+    let Some(repo) = rows.get(app.selected) else {
         return;
     };
     let mut lines = vec![
-        Line::from(r.path.to_string_lossy().into_owned()),
+        Line::from(repo.path.to_string_lossy().into_owned()),
         Line::from(format!(
             "{} · {} · bake {}",
-            if r.managed { "managed" } else { "unmanaged" },
-            if r.languages.is_empty() {
+            if repo.managed { "managed" } else { "unmanaged" },
+            if repo.languages.is_empty() {
                 "no manifest".to_string()
             } else {
-                r.languages.join(" ")
+                repo.languages.join(" ")
             },
-            bake_word(&r.baked)
+            bake_word(&repo.baked)
         )),
         Line::from(""),
         Line::from("DISPATCHERS").style(tint(app.color, ACCENT)),
     ];
     for (i, n) in DISPATCHERS.iter().enumerate() {
-        let s = match r.shims.get(i) {
+        let s = match repo.shims.get(i) {
             Some(ShimState::Ok { baked }) => format!("ok       -> {baked}"),
             Some(ShimState::Drifted) => "DRIFTED  does not match the template".into(),
             _ => "MISSING".to_string(),
         };
         lines.push(Line::from(format!("  {n:<20} {s}")));
     }
-    if !r.stale_ours.is_empty() || !r.foreign_subs.is_empty() || r.hook_pkgjson {
+    if !repo.stale_ours.is_empty() || !repo.foreign_subs.is_empty() || repo.hook_pkgjson {
         lines.push(Line::from(""));
         lines.push(
             Line::from("LEFTOVERS (nothing dispatches these)").style(tint(app.color, ACCENT)),
         );
-        for n in r.stale_ours.iter().chain(r.foreign_subs.iter()) {
-            lines.push(Line::from(format!("  {n}")));
+        for name in repo.stale_ours.iter().chain(repo.foreign_subs.iter()) {
+            lines.push(Line::from(format!("  {name}")));
         }
-        if r.hook_pkgjson {
+        if repo.hook_pkgjson {
             lines.push(Line::from("  package.json (node era)"));
         }
     }
-    if !r.skips.is_empty() {
+    if !repo.skips.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from("hook.skip").style(tint(app.color, ACCENT)));
-        for e in &r.skips {
+        for skip in &repo.skips {
             // What it COSTS, not what it says. A value is a substring pattern,
             // and its reach is invisible from the config line itself.
-            let scope = match &e.scope {
+            let scope = match &skip.scope {
                 crate::skips::Scope::Local => "local",
                 crate::skips::Scope::Global => "global",
                 crate::skips::Scope::Other { .. } => "other",
@@ -720,29 +721,29 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
             // warning past the right edge of the terminal for exactly the
             // values that needed it — nineteen check names is a long line, and
             // the alarm was the first thing truncated.
-            let head = match e.suppresses.len() {
+            let head = match skip.suppresses.len() {
                 0 => "suppresses nothing — matches no check".to_string(),
-                1 => e.suppresses[0].to_string(),
-                n if e.is_over_broad() => format!("! {n} checks — probably not intended"),
+                1 => skip.suppresses[0].to_string(),
+                n if skip.is_over_broad() => format!("! {n} checks — probably not intended"),
                 n => format!("{n} checks"),
             };
             lines.push(Line::from(format!(
                 "  {:<22} {scope:<7} -> {head}",
-                e.value
+                skip.value
             )));
             // Names on their own line, where truncation costs detail rather
             // than the warning.
-            if e.suppresses.len() > 1 {
+            if skip.suppresses.len() > 1 {
                 lines.push(Line::from(format!(
                     "  {:<22} {:<7}    {}",
                     "",
                     "",
-                    e.suppresses.join(", ")
+                    skip.suppresses.join(", ")
                 )));
             }
             // A fragment reaches one check today and is a bet on every future
             // name, so offer the correction rather than only the diagnosis.
-            if let Some(c) = e.canonical() {
+            if let Some(c) = skip.canonical() {
                 lines.push(Line::from(format!(
                     "  {:<22} {:<7}    did you mean {c}?",
                     "", ""
@@ -750,18 +751,18 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
             }
         }
     }
-    if !r.severities.is_empty() {
+    if !repo.severities.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from("githooks.severity").style(tint(app.color, ACCENT)));
-        for e in &r.severities {
-            let scope = match &e.scope {
+        for entry in &repo.severities {
+            let scope = match &entry.scope {
                 crate::skips::Scope::Local => "local",
                 crate::skips::Scope::Global => "global",
                 crate::skips::Scope::Other { .. } => "other",
             };
             // Three outcomes worth telling apart, and only one of them is what
             // the author probably thought they were writing.
-            let head = if e.shadowed() {
+            let head = if entry.shadowed() {
                 // Configured, and overridden by a later entry. Saying "does NOT
                 // block" here would be the dashboard contradicting the
                 // dispatcher, which is the one thing this block must not do.
@@ -769,40 +770,40 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
                 // include can beat a local. The other row for this check is the
                 // one that applies, and it is listed right here.
                 "overridden — another entry for this check is the one git applies".to_string()
-            } else if e.is_inert() {
+            } else if entry.is_inert() {
                 // Silent no-op. Git accepts any key and any value here, so a
                 // typo leaves a line in the config that looks like policy and
                 // enforces the default.
                 "! changes nothing — unknown check or value".to_string()
-            } else if e.weakens() {
+            } else if entry.weakens() {
                 "runs and reports, does NOT block".to_string()
             } else {
                 "blocks (the default, written out)".to_string()
             };
             lines.push(Line::from(format!(
                 "  {:<22} {:<7} {:<6} -> {head}",
-                e.check, scope, e.value
+                entry.check, scope, entry.value
             )));
         }
     }
-    if !r.declared.is_empty() {
+    if !repo.declared.is_empty() {
         lines.push(Line::from(""));
         lines.push(
             Line::from(format!("{DECLARED_FILE} (declared here)")).style(tint(app.color, ACCENT)),
         );
-        for d in &r.declared {
-            match &d.state {
+        for declared in &repo.declared {
+            match &declared.state {
                 // The verdict first, as in the hook.skip block: a long command
                 // must not push the reason it never runs off the right edge.
                 crate::scan::DeclaredState::Unusable { why } => lines.push(
-                    Line::from(format!("  {:<18} ! {why}", d.name))
+                    Line::from(format!("  {:<18} ! {why}", declared.name))
                         .style(tint(app.color, Color::Red)),
                 ),
                 crate::scan::DeclaredState::Usable { exts, command, .. } => {
                     lines.push(Line::from(format!(
                         "  {:<18} {:<6} {:<10} {}",
-                        d.name,
-                        d.stage,
+                        declared.name,
+                        declared.stage,
                         scope_of(exts),
                         command
                     )))
@@ -826,22 +827,22 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
         .check_selected
         .saturating_sub(room / 2)
         .min(all.len().saturating_sub(room));
-    for (i, c) in all.iter().copied().enumerate().skip(first).take(room) {
-        let skipped = r
+    for (i, check) in all.iter().copied().enumerate().skip(first).take(room) {
+        let skipped = repo
             .skips
             .iter()
-            .any(|e| githooks_runtime::skip_suppresses(c, &e.value));
+            .any(|skip| githooks_runtime::skip_suppresses(check, &skip.value));
         // Three states, three glyphs, three words. A check that is correctly
         // silent must never look like a broken one.
         let (glyph, word) = if skipped {
             ('⊘', "skipped")
-        } else if applies_here(r, c) {
+        } else if applies_here(repo, check) {
             ('●', "runs")
         } else {
             ('○', "inert")
         };
         let cursor = if i == app.check_selected { '>' } else { ' ' };
-        lines.push(Line::from(format!("{cursor} {glyph} {c:<28} {word}")));
+        lines.push(Line::from(format!("{cursor} {glyph} {check:<28} {word}")));
     }
     lines.push(Line::from(
         "  ● runs here   ○ inert (no matching manifest)   ⊘ skipped via hook.skip",
@@ -1108,7 +1109,7 @@ mod tests {
     }
 
     fn scan_with_repos(rs: Vec<Repo>) -> FleetScan {
-        let managed = rs.iter().filter(|r| r.managed).count();
+        let managed = rs.iter().filter(|repo| repo.managed).count();
         FleetScan {
             root: PathBuf::from("/root"),
             depth: 6,
