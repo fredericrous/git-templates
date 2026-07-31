@@ -73,6 +73,13 @@ They run alongside the built-ins and obey the same `hook.skip` and
 `githooks.severity.<name>` controls. `githooks list` shows what would run here.
 Full reference: [docs/custom-checks.md](docs/custom-checks.md).
 
+Design notes live in `docs/`:
+[hook-architecture.md](docs/hook-architecture.md) (the `Check` trait, shipped),
+[index-fidelity-and-run-modes.md](docs/index-fidelity-and-run-modes.md) (what
+`pre-commit`, `lefthook` and `husky` are worth taking from — specification),
+[fleet-dashboard.md](docs/fleet-dashboard.md) and
+[hook-skip-management.md](docs/hook-skip-management.md).
+
 ## Windows
 
 Everything works, with one setup difference: there is no symlink.
