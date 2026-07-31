@@ -29,15 +29,24 @@
 use std::sync::Mutex;
 
 use crate::check::{Check, Outcome, Severity, Stage, Verdict};
+use crate::configured_skips;
 use crate::registry::{all_stage_checks, Ctx, Overrides};
 use crate::ui::{highlight, warning_sign};
-use crate::{cherry_pick_in_progress, configured_skips};
 
 /// The checks for a stage, minus anything `hook.skip` filters out. `hook.skip`
 /// yields substrings and matches by CONTAINS, exactly as it did against paths,
 /// so existing config keeps working: `git config hook.skip ruff` still skips
 /// `pre-commit-ruff`.
 fn selected(stage: Stage) -> Vec<&'static dyn Check> {
+    selected_during(stage, &[])
+}
+
+/// The checks for a stage, minus `hook.skip` and minus anything that declares
+/// it does not run during an operation currently in progress.
+fn selected_during(
+    stage: Stage,
+    in_progress: &[crate::check::GitState],
+) -> Vec<&'static dyn Check> {
     let skips = configured_skips();
     // Externals are included here, so `hook.skip` and the severity override
     // govern a declared command exactly as they govern a built-in. A repository
@@ -48,6 +57,35 @@ fn selected(stage: Stage) -> Vec<&'static dyn Check> {
         .partition(|c| !skips.iter().any(|s| crate::skip_suppresses(c.name(), s)));
     let names: Vec<&str> = dropped.iter().map(|c| c.name()).collect();
     announce_skips(&names);
+
+    // Announced separately from `hook.skip`, and with the operation named: "not
+    // during a rebase" is a property of the moment and will be true again in a
+    // minute, which is a different thing to tell a reader than "you disabled
+    // this".
+    let (kept, paused): (Vec<_>, Vec<_>) = kept.into_iter().partition(|check| {
+        !check
+            .scope()
+            .not_during
+            .iter()
+            .any(|state| in_progress.contains(state))
+    });
+    if !paused.is_empty() {
+        let what = in_progress
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(" and ");
+        println!(
+            "{} {} check(s) paused during {what}: {}",
+            warning_sign(),
+            paused.len(),
+            paused
+                .iter()
+                .map(|c| c.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     kept
 }
 
@@ -124,10 +162,12 @@ where
 }
 
 pub fn pre_commit(ctx: &Ctx) -> Verdict {
-    if cherry_pick_in_progress(ctx.hooks_dir) {
-        return Verdict::Proceed;
-    }
-    run_stage(&selected(Stage::PreCommit), ctx, &Overrides::read())
+    let in_progress = crate::git_states_in_progress(ctx.hooks_dir);
+    run_stage(
+        &selected_during(Stage::PreCommit, &in_progress),
+        ctx,
+        &Overrides::read(),
+    )
 }
 
 /// The pre-commit body, over the checks it is GIVEN.
@@ -260,7 +300,11 @@ pub fn run_all(ctx: &Ctx, all_files: bool) -> Verdict {
 pub fn pre_push(ctx: &Ctx) -> Verdict {
     // NB: no CHERRY_PICK_HEAD check here — the zsh pre-push had none either.
     let severities = Overrides::read();
-    for check in selected(Stage::PrePush) {
+    // pre-push had NO state guard at all, with a comment admitting it existed
+    // only because the zsh version had none. Now it asks the same question
+    // pre-commit does and each check answers for itself.
+    let in_progress = crate::git_states_in_progress(ctx.hooks_dir);
+    for check in selected_during(Stage::PrePush, &in_progress) {
         let sub = Ctx {
             name: check.name(),
             args: ctx.args,
