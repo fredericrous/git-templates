@@ -32,9 +32,15 @@ chmod +x templates/hooks/*
 Setup your gitconfig
 
 ```sh
-git config --global init.templatedir ~/.config/git/git-templates/templates
 git config --global commit.template ~/.config/git/git-templates/message
 ```
+
+> **On `init.templateDir`.** Earlier versions of this README told you to set it,
+> which makes every future clone on the machine run hooks automatically —
+> including hooks a cloned repository declares for itself in `.githooks.conf`.
+> See [docs/index-fidelity-and-run-modes.md](docs/index-fidelity-and-run-modes.md) §0.
+> Activation is moving to an explicit `githooks install`; until that lands, know
+> what setting that key grants.
 
 Copy the hooks to existing repositories
 

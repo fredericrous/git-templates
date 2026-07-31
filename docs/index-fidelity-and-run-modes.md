@@ -43,47 +43,135 @@ convenience. §2 of this document then proposes `stage_fixed`, which upgrades th
 primitive from *run a command* to *run a command that rewrites my files and
 stages the result*, and that must not ship into an untrusted manifest.
 
-### The design
+### Where the exposure actually comes from
 
-`direnv` is the precedent worth copying, because it solved exactly this: a
-committed file that executes, in a directory you may have just cloned.
+Not from the manifest, and not from the shims. From one line in our own README:
 
-A manifest is **inert until trusted**. Trust records the path and a hash of the
-file, so any edit re-arms it:
-
-```
-$ githooks trust          # shows the manifest, records its hash
-$ githooks trust --show   # what is trusted here, and what changed since
+```sh
+git config --global init.templatedir ~/.config/git/git-templates/templates
 ```
 
-Recorded per repository in git config (`githooks.trusted.<hash>`), so it is
-local, never committed, and visible to the fleet dashboard like every other
-policy we already surface.
+We never set that key in code — `githooks install` writes files and touches no
+config. The README asks the user to make *every future clone on the machine*
+managed, and that ambient grant is what turns a committed manifest into a
+drive-by.
 
-An untrusted manifest is not silently skipped — that is the failure mode this
-whole codebase is arranged against. It reports as `Unavailable` with a reason,
-which is a shape we already have:
+It also quietly undermines the fleet's own model. `managed` vs `unmanaged` is
+supposed to be a decision the dashboard reports; with `init.templateDir` set,
+everything cloned since is managed and "unmanaged" means "cloned before I
+configured this". A category that records the date you ran a `git config`
+command is not a category.
+
+### The design: activation is the boundary
+
+**Drop the template directory as the activation mechanism.** Hooks run where
+somebody put them, and nowhere else:
+
+```
+githooks install              # this repo
+githooks uninstall            # this repo — remove shims, leave the binary
+githooks-fleet install        # every managed-eligible repo under a root
+githooks-fleet uninstall
+```
+
+`githooks install` already does the per-repo half. `githooks-fleet` has `scan`,
+`fix` and `tui`, with `--apply` behind `fix` — bulk activation exists but is
+named after repair rather than intent, which is why nobody reaches for it when
+they mean "set this up".
+
+A clone is then inert until asked. The drive-by case is gone, not mitigated:
+there is no hook to run.
+
+### It is necessary and not sufficient
+
+Worth being precise, because it is tempting to stop here.
+
+Explicit installation removes the case where you clone something to read it.
+It does not remove the case that matters most in open source: you clone a
+stranger's repository **because you intend to contribute**, you run
+`githooks install` because you want your own checks while you work, and their
+`.githooks.conf` runs on your first commit.
+
+`githooks install` means *I want my hooks here*. It does not mean *I have read
+this repository's committed commands and accept them*. Those are two different
+grants and only one of them was made.
+
+### So: one prompt, at the moment of the deliberate act
+
+Which is where activation-as-the-boundary improves on the `direnv` design rather
+than replacing it. direnv must prompt lazily, on `cd`, because there is no
+install step to hang the question from. We have one:
+
+```
+$ githooks install
+  ✓ installed /Users/me/.local/bin/githooks
+  ✓ baked 4 shims into .git/hooks
+
+  ⚠ .githooks.conf declares 2 checks that would run on your commits:
+      shellcheck  pre-commit  *.sh  block  scripts/lint-shell.sh
+      smoke       pre-push    *     warn   make smoke
+    Trust them? [y/N]
+```
+
+One question, asked once, at a moment the user is already thinking about this
+repository. Declining still installs the built-ins — the manifest simply stays
+untrusted, and reports as `Unavailable` with a reason rather than being silently
+skipped:
 
 ```
 ⚠ .githooks.conf declares 2 checks and is not trusted here — `githooks trust`
 ⚠ 2 check(s) could not run: shellcheck, smoke
 ```
 
-### What this does not fix
+Trust records a hash of the file in git config, so a later edit re-arms it —
+`manifest changed since you trusted it` — and a `git pull` that adds a command
+cannot inherit the consent given to the file before it.
+
+### What none of this fixes
 
 A built-in check still runs tool binaries the repository can influence:
 `resolve_tool` prefers `<root>/node_modules/.bin/<tool>`, so a hostile
-`node_modules` is executed by prettier or eslint without any manifest at all.
-That is inherent to running a repository's own toolchain and is the same
-exposure `npm install` already carries — but it means trust for manifests is a
-floor, not a ceiling, and the README should say so rather than implying the
-manifest was the only door.
+`node_modules` is executed by prettier or eslint with no manifest involved and
+no trust prompt to decline. That is inherent to running a repository's own
+toolchain — the same exposure `npm install` already carries — but it means both
+halves above are a floor, not a ceiling, and the README should say so rather
+than implying the manifest was the only door.
+
+### The cost, and why the fleet absorbs it
+
+Dropping `init.templateDir` means a fresh clone has **no checks at all** until
+somebody installs them. For a codebase whose whole argument is *do not look
+protected when you are not*, that deserves stating rather than burying: the
+failure mode moves from "a hostile repo ran code" to "my repo was never
+covered", and the second is quieter.
+
+It is also the failure the fleet dashboard already exists to catch. Today its
+`unmanaged` column is close to noise, because `init.templateDir` manages
+everything automatically. Under this design it becomes the point of the tool:
+the thing that tells you which of your ninety-six repositories are not covered,
+and `githooks-fleet install` is the fix. That is a better shape than the one we
+have — the safety net stops being incidental.
+
+### `uninstall`, which is missing regardless
+
+We can disable a check (`hook.skip`), downgrade one (`githooks.severity`) and
+install everything. There is no supported way to take it off — a user who wants
+out deletes four files by hand and leaves a stale binary in `~/.local/bin`.
+
+`uninstall` at both levels, and it must be honest about what it removes: shims
+yes, the binary only when asked, `hook.skip`/severity config never, since those
+are the user's statements about their own repository and not our artefacts.
 
 ### Ordering
 
 This lands **before** `stage_fixed`, and arguably before anything else here. It
 is the only item on the list that is a security property rather than a
 correctness or ergonomics one.
+
+The two halves can ship separately and in this order: activation and
+`uninstall` first, which is a README change plus two verbs and closes the
+drive-by case on its own; then the trust prompt, which needs the install flow to
+hang from and is much smaller once it exists.
 
 ---
 
@@ -449,8 +537,14 @@ pipeline rather than from here.
 
 ## Order
 
-**PR 0 — the trust model (§0).** First, because it is the only security property
-on the list and because `stage_fixed` must not ship into an untrusted manifest.
+**PR 0a — activation and `uninstall` (§0).** Drop `init.templateDir` from the
+README, name bulk activation `githooks-fleet install` rather than hiding it
+behind `fix --apply`, and add `uninstall` at both levels. Closes the drive-by
+case on its own and makes the fleet's `unmanaged` column mean something.
+
+**PR 0b — the trust prompt (§0).** Small once 0a exists, because it hangs off
+the install flow. Must precede `stage_fixed`, which cannot ship into an
+untrusted manifest.
 
 **PR 1 — `githooks run [--all-files]`.** Small, useful immediately, no risk, and
 it gives the later work a way to be exercised over a whole repository.
