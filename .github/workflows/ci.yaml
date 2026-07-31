@@ -163,6 +163,50 @@ jobs:
             && { echo "::error::gitmoji prefix missing — hook did not rewrite"; exit 1; }
           echo "windows end-to-end OK"
 
+      # The case the baked run above cannot see. `make install` puts the binary
+      # in ~/.local/bin, and a repo created from a template dir that IS the
+      # checkout keeps the __GITHOOKS_BIN__ placeholder — so the shim has to
+      # resolve the binary itself, with PATH deliberately emptied because that
+      # is what a GUI git client hands a hook.
+      #
+      # Windows builds githooks.exe, and `[ -x .../githooks ]` is false for it,
+      # so this path fell through to PATH — the one thing the test removes. That
+      # is the bug this step exists to keep fixed.
+      - name: An UNBAKED shim resolves the binary without PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN_SRC="$PWD/target/release/githooks.exe"
+          [ -f "$BIN_SRC" ] || BIN_SRC="$PWD/target/release/githooks"
+          mkdir -p "$HOME/.local/bin"
+          cp "$BIN_SRC" "$HOME/.local/bin/$(basename "$BIN_SRC")"
+
+          mkdir -p "$RUNNER_TEMP/unbaked" && cd "$RUNNER_TEMP/unbaked"
+          git init -q --template= .
+          git config user.email ci@example.com
+          git config user.name "windows ci"
+
+          mkdir -p .git/hooks
+          cp "$GITHUB_WORKSPACE/templates/hooks/pre-commit" .git/hooks/pre-commit
+          chmod +x .git/hooks/pre-commit
+          # Unbaked on purpose — this is what git init from the checkout gives.
+          grep -q '__GITHOOKS_BIN__' .git/hooks/pre-commit \
+            || { echo "::error::fixture was baked; the test proves nothing"; exit 1; }
+
+          echo "hello" > a.txt && git add a.txt
+          # Empty PATH except what git itself needs to run the hook at all.
+          env PATH="/usr/bin:/bin" git commit -q --no-verify -m "chore: seed" \
+            > /dev/null 2>&1 || true
+          echo "again" > a.txt && git add a.txt
+          out=$(env PATH="/usr/bin:/bin" git commit -m "feat: unbaked shim resolves" 2>&1) \
+            || { echo "$out"; echo "::error::unbaked shim could not find the binary"; exit 1; }
+          echo "$out"
+          case "$out" in
+            *"githooks binary not found"*)
+              echo "::error::shim fell through every fallback"; exit 1 ;;
+          esac
+          echo "windows unbaked-shim OK"
+
   test:
     name: hooks (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
