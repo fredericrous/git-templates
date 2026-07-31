@@ -24,6 +24,7 @@ pub mod git;
 pub mod hooks;
 pub mod install;
 pub mod manifest;
+pub mod pushed_tree;
 pub mod pushrefs;
 pub mod registry;
 pub mod staged_only;

@@ -115,6 +115,20 @@ They run alongside the built-ins and obey the same `hook.skip` and
 `githooks.severity.<name>` controls. `githooks list` shows what would run here.
 Full reference: [docs/custom-checks.md](docs/custom-checks.md).
 
+## What a push actually tests
+
+By default `pre-push` runs your suite against the **working tree**, and now says
+so. That is fast and usually what you want, but it is not what you are pushing:
+an uncommitted fix makes a broken commit look green.
+
+```sh
+git config githooks.testPushedTree true
+```
+
+turns on the accurate answer — the suite runs in a throwaway checkout of the
+commits being pushed, and your tree is not touched. It costs a second checkout
+and a build that cannot reuse your `target/` cache, which is why it is opt-in.
+
 ## Running the checks yourself
 
 ```sh

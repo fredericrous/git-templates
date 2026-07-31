@@ -225,6 +225,17 @@ pub fn test(refs: &[crate::pushrefs::PushRef]) -> Outcome {
     if roots.is_empty() {
         return Outcome::Passed;
     }
+    // Where the suite runs decides what it is answering about. `_guard` owns
+    // the checkout for the length of the run; dropping it removes the worktree.
+    let (where_, _guard) = crate::pushed_tree::where_to_run(refs, &root);
+    let roots: Vec<PathBuf> = roots
+        .iter()
+        .map(|r| {
+            r.strip_prefix(&root)
+                .map(|rel| where_.join(rel))
+                .unwrap_or_else(|_| r.clone())
+        })
+        .collect();
     match each_root(
         &roots,
         None,
