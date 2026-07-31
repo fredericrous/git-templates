@@ -215,6 +215,40 @@ pub fn run(root: &str, argv: &[String], extra: &[String]) -> bool {
     cmd.status().map(|s| s.success()).unwrap_or(false)
 }
 
+/// Whether the user asked for checks to repair what they find.
+///
+/// OFF by default. `git config githooks.fix true` turns it on, per repository,
+/// because a hook that edits your files without being asked is a larger
+/// surprise than one that complains — and because with index fidelity in place
+/// the repair lands in the commit you are making, which is a bigger claim to
+/// make on somebody's behalf than printing an error.
+pub fn fixing_enabled() -> bool {
+    matches!(
+        git::stdout(&["config", "--get", "githooks.fix"]).as_deref(),
+        Some("true") | Some("1") | Some("yes")
+    )
+}
+
+/// Re-stage exactly the paths a fixer rewrote, and say whether anything moved.
+///
+/// Safe ONLY because the pre-commit stage holds unstaged changes aside: the
+/// tree contains the staged content and nothing else, so anything a formatter
+/// touched is by definition part of this commit. Without that, re-staging would
+/// sweep in work the author deliberately kept back.
+pub fn restage(paths: &[String]) -> bool {
+    let changed: Vec<String> = paths
+        .iter()
+        .filter(|p| !git::succeeds(&["diff", "--quiet", "--", p]))
+        .cloned()
+        .collect();
+    if changed.is_empty() {
+        return false;
+    }
+    let mut args = vec!["add", "--"];
+    args.extend(changed.iter().map(String::as_str));
+    git::succeeds(&args)
+}
+
 pub fn ok(msg: &str) {
     println!("{} {msg}", valid_sign());
 }

@@ -41,7 +41,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-use crate::check::{Check, Outcome, Scope, Severity, Stage};
+use crate::check::{Check, Fix, Outcome, Scope, Severity, Stage};
 use crate::registry::{Ctx, CHECKS, ENTRYPOINTS};
 
 pub const MANIFEST: &str = ".githooks.conf";
@@ -63,6 +63,14 @@ pub enum ParseError {
     BadStage(String),
     BadScope(String),
     BadSeverity(String),
+    /// A `pre-push` line asked to rewrite files.
+    ///
+    /// Refused HERE, beside `NameTaken` and `Duplicate`, rather than as a
+    /// runtime "contract violation" at push time: same fact, discovered
+    /// earlier, by more people, at the moment it is cheapest to fix. A pre-push
+    /// hook must not modify the worktree or index — the pushed commit would
+    /// then differ from the tree the developer is looking at.
+    FixOnPrePush,
 }
 
 impl std::fmt::Display for ParseError {
@@ -78,6 +86,10 @@ impl std::fmt::Display for ParseError {
                 write!(f, "stage {t:?} must be `pre-commit` or `pre-push`")
             }
             ParseError::BadScope(t) => write!(f, "scope {t:?} must be `*` or `*.<ext>`"),
+            ParseError::FixOnPrePush => write!(
+                f,
+                "`fix` is only for pre-commit — a pre-push hook must not rewrite files"
+            ),
             ParseError::BadSeverity(t) => {
                 write!(f, "severity {t:?} must be `block` or `warn`")
             }
@@ -92,6 +104,8 @@ impl std::fmt::Display for ParseError {
 /// `split_first` guard that can only ever be dead code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Declared {
+    /// `Fix::Rewrite` when the command column began `fix `.
+    pub fix: Fix,
     pub name: String,
     pub stage: Stage,
     pub severity: Severity,
@@ -191,6 +205,7 @@ pub enum Kind {
         severity: Severity,
         program: String,
         args: Vec<String>,
+        fix: Fix,
     },
     Unusable {
         why: String,
@@ -223,13 +238,14 @@ impl Check for External {
     }
 
     fn run(&self, ctx: &Ctx) -> Outcome {
-        let (scope, program, args) = match &self.kind {
+        let (scope, program, args, fix) = match &self.kind {
             Kind::Runnable {
                 scope,
                 program,
                 args,
+                fix,
                 ..
-            } => (scope, program, args),
+            } => (scope, program, args, *fix),
             Kind::Unusable { why } => {
                 crate::hooks::common::warn(&format!(
                     "{MANIFEST}: {} — {why}",
@@ -247,14 +263,21 @@ impl Check for External {
         // Which files to test against depends on the stage: what is staged for
         // a commit, what is being pushed for a push. `*` short-circuits before
         // either is computed, which is the common case.
-        if !scope.files.is_empty() {
-            let paths = match self.stage {
-                Stage::PreCommit => crate::hooks::common::staged_files(&[]),
-                Stage::PrePush => crate::pushrefs::changed_files(ctx.push.get()),
-            };
-            if !scope.matches(&paths) {
-                return Outcome::Passed;
-            }
+        // A check whose whole job is to rewrite has nothing to say when nobody
+        // asked for rewriting — so it does not RUN, rather than running and
+        // having its result discarded. Gating only the re-staging let the
+        // command edit files with `githooks.fix` off, which is precisely the
+        // surprise the gate exists to prevent.
+        if fix == Fix::Rewrite && !crate::hooks::common::fixing_enabled() {
+            return Outcome::Passed;
+        }
+
+        let in_scope = match self.stage {
+            Stage::PreCommit => crate::hooks::common::staged_files(&[]),
+            Stage::PrePush => crate::pushrefs::changed_files(ctx.push.get()),
+        };
+        if !scope.files.is_empty() && !scope.matches(&in_scope) {
+            return Outcome::Passed;
         }
         let root = crate::hooks::common::repo_root();
         let mut cmd = Command::new(program);
@@ -273,7 +296,22 @@ impl Check for External {
                 ));
                 Outcome::Unavailable
             }
-            Ok(s) if s.success() => Outcome::Passed,
+            Ok(s) if s.success() => {
+                // A declared fixer that ran clean may still have rewritten
+                // something; re-stage exactly what moved. Only its own scope,
+                // so it cannot stage a file it never looked at.
+                if fix == Fix::Rewrite
+                    && crate::hooks::common::fixing_enabled()
+                    && crate::hooks::common::restage(&scoped(scope, &in_scope))
+                {
+                    crate::hooks::common::ok(&format!(
+                        "{} fixed and re-staged",
+                        crate::ui::highlight(&self.name)
+                    ));
+                    return Outcome::Fixed;
+                }
+                Outcome::Passed
+            }
             Ok(_) => {
                 crate::hooks::common::fail(&format!(
                     "{} failed (output above)",
@@ -283,6 +321,18 @@ impl Check for External {
             }
         }
     }
+}
+
+/// The paths this check's scope actually covers.
+fn scoped(scope: &Scope, paths: &[String]) -> Vec<String> {
+    if scope.files.is_empty() {
+        return paths.to_vec();
+    }
+    paths
+        .iter()
+        .filter(|p| scope.files.iter().any(|e| p.ends_with(e)))
+        .cloned()
+        .collect()
 }
 
 /// `Scope` holds `&'static` slices so a built-in can be a `const`. A parsed
@@ -422,12 +472,22 @@ fn parse_line(lineno: usize, line: &str, earlier: &[Line]) -> Line {
     let Some(severity) = Severity::parse(severity_tok) else {
         return fail(ParseError::BadSeverity(severity_tok.to_string()));
     };
+    // `fix` is a trailing marker on the command column rather than a sixth
+    // field, so every manifest written before this still parses.
+    let (command, wants_fix) = match command.strip_prefix("fix ") {
+        Some(rest) => (rest.trim(), true),
+        None => (command, false),
+    };
+    if wants_fix && stage == Stage::PrePush {
+        return fail(ParseError::FixOnPrePush);
+    }
     // `tokenise` guarantees a non-empty command, so the split cannot fail.
     let mut argv = command.split_whitespace().map(str::to_owned);
     let Some(program) = argv.next() else {
         return fail(ParseError::MissingFields);
     };
     Line::Usable(Declared {
+        fix: if wants_fix { Fix::Rewrite } else { Fix::None },
         name: declared.to_string(),
         stage,
         severity,
@@ -467,6 +527,7 @@ impl From<Line> for External {
                 severity: d.severity,
                 program: d.program,
                 args: d.args,
+                fix: d.fix,
             },
             Err(why) => Kind::Unusable { why },
         };
@@ -627,6 +688,32 @@ mod tests {
         let said = l.broken().expect("broken");
         assert!(said.contains("line 1"), "{said}");
         assert!(said.contains("severity"), "{said}");
+    }
+
+    /// `fix` on a pre-push line is refused where every other bad declaration is
+    /// refused — on every commit, named and located — rather than as a runtime
+    /// "contract violation" discovered later at push time by fewer people.
+    #[test]
+    fn fix_is_refused_on_a_pre_push_line() {
+        assert_eq!(
+            why(&one("pre-push  smoke  *  block  fix make smoke\n")),
+            ParseError::FixOnPrePush
+        );
+        // …and accepted on pre-commit.
+        let line = one("pre-commit  fmt  *  block  fix make format\n");
+        let declared = usable(&line);
+        assert_eq!(declared.fix, Fix::Rewrite);
+        assert_eq!(declared.program, "make");
+        assert_eq!(declared.args, ["format"]);
+    }
+
+    /// Every manifest written before `fix` existed must still parse the same.
+    #[test]
+    fn a_command_that_merely_starts_with_fix_is_not_a_marker() {
+        let line = one("pre-commit  x  *  block  fixup-tool --check\n");
+        let declared = usable(&line);
+        assert_eq!(declared.fix, Fix::None);
+        assert_eq!(declared.program, "fixup-tool");
     }
 
     /// A gap with no name cannot be reported, and a line this broken has none.

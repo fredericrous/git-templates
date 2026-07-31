@@ -130,6 +130,32 @@ repository's own toolchain: `prettier` and `eslint` are taken from
 `node_modules/.bin` when present, so a hostile `node_modules` needs no manifest
 at all. That is the same exposure `npm install` already carries.
 
+## Letting a check fix what it finds
+
+Prefix the command with `fix ` and the check may rewrite files, with whatever it
+changed re-staged:
+
+```
+pre-commit  format  *.js  block  fix npx prettier --write
+```
+
+Two conditions, both deliberate:
+
+- **Off unless you ask.** `git config githooks.fix true`, per repository. A hook
+  that edits your files without being asked is a larger surprise than one that
+  complains.
+- **pre-commit only.** `fix` on a `pre-push` line is a parse error, reported on
+  every commit like any other bad line. A pre-push hook must not modify the
+  worktree or index: the pushed commit would then differ from the tree you are
+  looking at.
+
+Re-staging is safe because the pre-commit stage holds your unstaged changes
+aside first, so the tree contains what you staged and nothing else — anything a
+formatter touches is by definition part of this commit. Work you deliberately
+kept back is never swept in.
+
+The built-in `prettier` check does this too, under the same `githooks.fix` gate.
+
 ## Turning one off
 
 Exactly as for a built-in:
