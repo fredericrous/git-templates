@@ -35,12 +35,39 @@ Setup your gitconfig
 git config --global commit.template ~/.config/git/git-templates/message
 ```
 
-> **On `init.templateDir`.** Earlier versions of this README told you to set it,
-> which makes every future clone on the machine run hooks automatically —
-> including hooks a cloned repository declares for itself in `.githooks.conf`.
-> See [docs/index-fidelity-and-run-modes.md](docs/index-fidelity-and-run-modes.md) §0.
-> Activation is moving to an explicit `githooks install`; until that lands, know
-> what setting that key grants.
+### Two ways to turn hooks on
+
+**Per repository** — the default. Nothing runs anywhere you did not ask:
+
+```sh
+cd <your-repo> && githooks install
+githooks-fleet install --root ~/Developer   # or in bulk
+```
+
+**Everywhere, forever** — an opt-in, and a real one:
+
+```sh
+git config --global init.templateDir ~/.config/git/git-templates/templates
+```
+
+Git copies that directory into `.git/hooks` on every `init` **and every clone**,
+so from then on every repository you clone runs these hooks without being asked
+again. That is the convenience, and it is worth having: you never forget to
+install, and `githooks-fleet` never shows you an uncovered repo.
+
+It is also a standing grant, so it is worth stating what you granted. A cloned
+repository can declare its own checks in `.githooks.conf`, and with this key set
+those run on your first commit in it — a repository you may have cloned only to
+read. If you set this, **trust the manifest deliberately** rather than relying on
+installation to be the moment you decided:
+
+```sh
+githooks trust          # show what this repo declares, and accept it
+githooks trust --show   # what is trusted here
+```
+
+Full reasoning in
+[docs/index-fidelity-and-run-modes.md](docs/index-fidelity-and-run-modes.md) §0.
 
 Copy the hooks to existing repositories
 
