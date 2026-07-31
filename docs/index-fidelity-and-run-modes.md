@@ -2,9 +2,88 @@
 
 Status: **specification**. Nothing here is built.
 
-Read against `pre-commit`, `lefthook` and `husky`. Four of their ideas are worth
-taking, one is worth refusing on the record, and the first is not a missing
-feature at all — it is a correctness gap we have been describing as a trade-off.
+Read against `pre-commit`, `lefthook` and `husky`, then re-read as somebody who
+would have to get this through an adoption review. Four of their ideas are worth
+taking, one is worth refusing on the record, the first is not a missing feature
+at all — it is a correctness gap we have been describing as a trade-off — and
+before any of them there is a trust problem that has nothing to do with the
+three tools and everything to do with a decision we already shipped.
+
+The last two sections are the ones an adoption review reads first: *What we are
+not taking* and *What this does not solve*. The second is a list of honest
+noes — pinned tool versions, CI enforcement, DCO — and it is deliberately not a
+backlog.
+
+---
+
+## 0. A cloned repository can run its own commands
+
+`.githooks.conf` is committed, which is the point: a team shares a check by
+committing it. The consequence had not been written down.
+
+`git clone` seeds `.git/hooks` from `init.templateDir`, so a fresh clone arrives
+with our shims already installed. The manifest is then read from that repository
+and its commands are executed. No prompt, no trust decision:
+
+```
+$ git clone hostile victim && cd victim
+  hooks present after clone: commit-msg pre-commit pre-push prepare-commit-msg
+$ git commit -m "feat: an innocent commit"
+  >>> arbitrary code from the cloned repo <<<
+```
+
+Cloning a repository and committing to it is not an act of trust that anyone
+performs deliberately. Reviewing a diff before running it is; nothing here asks
+for that.
+
+`pre-commit` has the same property. That is not a defence — it is a decade-old
+known quantity with an ecosystem that has argued about it in public, and ours is
+undocumented. `docs/custom-checks.md` presents externals purely as a
+convenience. §2 of this document then proposes `stage_fixed`, which upgrades the
+primitive from *run a command* to *run a command that rewrites my files and
+stages the result*, and that must not ship into an untrusted manifest.
+
+### The design
+
+`direnv` is the precedent worth copying, because it solved exactly this: a
+committed file that executes, in a directory you may have just cloned.
+
+A manifest is **inert until trusted**. Trust records the path and a hash of the
+file, so any edit re-arms it:
+
+```
+$ githooks trust          # shows the manifest, records its hash
+$ githooks trust --show   # what is trusted here, and what changed since
+```
+
+Recorded per repository in git config (`githooks.trusted.<hash>`), so it is
+local, never committed, and visible to the fleet dashboard like every other
+policy we already surface.
+
+An untrusted manifest is not silently skipped — that is the failure mode this
+whole codebase is arranged against. It reports as `Unavailable` with a reason,
+which is a shape we already have:
+
+```
+⚠ .githooks.conf declares 2 checks and is not trusted here — `githooks trust`
+⚠ 2 check(s) could not run: shellcheck, smoke
+```
+
+### What this does not fix
+
+A built-in check still runs tool binaries the repository can influence:
+`resolve_tool` prefers `<root>/node_modules/.bin/<tool>`, so a hostile
+`node_modules` is executed by prettier or eslint without any manifest at all.
+That is inherent to running a repository's own toolchain and is the same
+exposure `npm install` already carries — but it means trust for manifests is a
+floor, not a ceiling, and the README should say so rather than implying the
+manifest was the only door.
+
+### Ordering
+
+This lands **before** `stage_fixed`, and arguably before anything else here. It
+is the only item on the list that is a security property rather than a
+correctness or ergonomics one.
 
 ---
 
@@ -50,6 +129,29 @@ kustomization directory around it, and ruff needs the file to sit where its
 The stash puts the right content at the right path, which is the only fix that
 serves all eleven.
 
+### pre-push has the same bug, from the other end
+
+`pre-push` has no index at all, so this looks like a pre-commit problem. It is
+not. `rust_tools::test` and `run_tests::run` compute the changed file set from
+the **pushed refs** — correct, that is what is being pushed — and then run the
+suite with `current_dir(dir)`, i.e. **against the working tree**:
+
+```rust
+let changed = crate::pushrefs::changed_files(refs);   // what you are pushing
+let roots = cargo_roots(&root, changed.iter()…);      // where to run
+each_root(&roots, None, &["test", …])                 // runs in the WORKING TREE
+```
+
+So the suite can pass on an uncommitted fix, or fail on an uncommitted
+experiment, and in neither case has it tested the commits being pushed.
+
+The fix is not the same one. Stashing is wrong here: a push is not a staging
+operation, and the honest question is "does the pushed tree pass", which means
+running against the pushed commit — a worktree or `git archive` of the tip
+rather than the developer's tree. That is more expensive and wants its own
+decision, which is why it is named here and scheduled separately rather than
+folded into the stash work.
+
 `rust_tools.rs:149` calls it out and then accepts it:
 
 > Note this inspects the WORKING TREE, not the index, so a partially-staged file
@@ -93,6 +195,15 @@ Rules, all of which want tests:
 - **Nothing to stash → do nothing.** The common case must not touch the tree.
 - **Restore in `Drop`**, so a panicking check (which we now catch — #64) and an
   early return both restore. `Drop` runs on unwind.
+- **`Drop` does not run on a signal, and that is the likely case.** Ctrl-C
+  during a slow pre-commit — eslint over a large tree, a cold `cargo fmt` — kills
+  the process without unwinding, and the stash is orphaned. There is no signal
+  handling anywhere in this codebase today. Against the paragraph above, an
+  interrupt is the most probable route to losing work, not the least, so
+  `StagedOnly` needs a `SIGINT`/`SIGTERM` handler that restores before exiting.
+- **A recovery path for when even that fails**: `githooks restore` re-applies the
+  stash this tool took. Belt and braces, because the handler can itself be
+  interrupted.
 - **Restore failure is fatal and loud**: print the stash ref, do not swallow it,
   block the commit. A silent failure here is unrecoverable; a noisy one leaves
   `git stash list` holding the work.
@@ -113,11 +224,15 @@ $ githooks pre-commit
 
 The commit that was about to be made is valid. The hook blocked it anyway.
 
-### Open question
+### Decision
 
-Whether `cargo fmt` joins this. Its scope is a crate, not a file list, so
-stashing fixes it for free — but it is also the check whose comment claimed the
-trade-off was inherent, and that claim should be deleted either way.
+`cargo fmt` joins staged-only mode. Its scope is a crate, not a file list, but
+that is exactly why the stage-level guard is the right fix: once unstaged
+changes are stashed, `cargo fmt --check` sees staged content at the normal crate
+paths and still resolves the manifest, edition and rustfmt config the same way
+it does today. The misleading comment in `rust_tools.rs` should be deleted when
+this lands; the trade-off was an implementation gap, not an inherent cargo
+constraint.
 
 ---
 
@@ -135,7 +250,12 @@ Three of our checks currently print an instruction and stop:
 You then run the command yourself and commit again. lefthook's users run
 `prettier --write` in the hook and get the result staged.
 
-**This depends on §1 and must not ship before it.** Without the stash, "re-stage
+**This depends on §0 and §1, and must not ship before either.** An untrusted
+manifest that can rewrite files and stage the result is a worse primitive than
+one that can only run a command, so the trust model is a hard precondition, not
+an ordering preference.
+
+On §1: Without the stash, "re-stage
 what the formatter touched" re-stages unstaged work the author deliberately kept
 back. With the stash in place, the tree contains exactly the staged content, so
 anything the formatter changed is by definition part of this commit.
@@ -293,7 +413,44 @@ shape nobody has asked for.
 
 ---
 
+## What this does not solve
+
+Named because an adoption review asks these first, and an honest "no" is worth
+more than silence.
+
+**Tool versions are not pinned.** §1 fixes *which content* is checked and leaves
+*which tool* open. `resolve_tool` prefers `<root>/node_modules/.bin/<tool>` and
+falls back to `PATH`, so two developers and CI can run three prettier versions
+and disagree about the same commit. `pre-commit` solves this with `rev` pinning
+per hook repository, which is dismissed above as "distribution to strangers" —
+that is its mechanism, not its value. Its value is determinism, and we do not
+have that. Fixing content fidelity while leaving tool fidelity open is half a
+reproducibility story, and the half we have is the less visible one.
+
+**Nothing here enforces anything.** Hooks are advisory by construction:
+`--no-verify` and `hook.skip` are each one command away, deliberately. So the
+question "what stops an unformatted commit reaching the default branch" has no
+answer in this document, and `--all-files` naming CI parity as a use case is not
+one. That wants a documented exit-code contract and machine-readable output —
+SARIF would let the same checks feed code scanning, JUnit would let them feed a
+test report — and `githooks run --all-files` is where it belongs.
+
+**No DCO / `Signed-off-by` check.** `commit-msg` enforces a gitmoji prefix and
+length rules, which are house style. Any project that requires a Developer
+Certificate of Origin needs a different check, and today it would have to be an
+external — which lands it squarely in §0. It is a good candidate for a built-in
+precisely because it is a policy many organisations cannot adopt the tool
+without.
+
+**musl is untested.** CI covers ubuntu, macOS and Windows. A glibc-dynamic
+binary does not start in the Alpine containers a lot of pipelines use. Probably
+a one-line target addition; worth knowing before somebody finds out from a
+pipeline rather than from here.
+
 ## Order
+
+**PR 0 — the trust model (§0).** First, because it is the only security property
+on the list and because `stage_fixed` must not ship into an untrusted manifest.
 
 **PR 1 — `githooks run [--all-files]`.** Small, useful immediately, no risk, and
 it gives the later work a way to be exercised over a whole repository.
@@ -308,13 +465,52 @@ predicate.
 is the first feature that would write to someone's index, and it should not be
 the change that also introduces the stash.
 
-Shebang detection is unscheduled.
+**PR 5 — pre-push runs against the pushed commits**, not the working tree. Its
+own decision: a worktree or `git archive` of the tip is more expensive than
+anything else here, and the cost is the whole question.
 
-## Open decisions
+Shebang detection is unscheduled. So is everything under *What this does not
+solve*, which is a list of known gaps rather than a backlog.
 
-1. Does `--all-files` imply `--no-stash`, or is it an error to combine them?
-2. Should `Outcome::Fixed` block a `pre-push`? It cannot occur there today, but
-   the type would permit it.
-3. Does index fidelity apply to `commit-msg` and `prepare-commit-msg`? They read
-   a message file, not the tree, so probably not — but "probably" is how the
-   pre-push cherry-pick gap started.
+## Decisions
+
+1. `--all-files` implies no stash. There is no staged/unstaged distinction to
+   protect when the input set is `git ls-files`, so taking a stash would be
+   surprising extra mutation with no correctness upside. If a future explicit
+   `--no-stash` flag exists for diagnostics, `githooks run --all-files
+   --no-stash` should be accepted as redundant rather than rejected.
+
+   **Corollary, stated because it is the inverse of §1**: on a dirty tree,
+   `--all-files` reports on content that is not committed and may never be. That
+   is correct — the question it answers is "does my working tree pass", not
+   "would my commit pass" — but §1 spends a page arguing that judging unstaged
+   content is a bug, and a reader who meets this without warning is entitled to
+   think one of the two is wrong. They are different questions; the mode's help
+   text should say which one it answers.
+2. `Outcome::Fixed` is invalid in `pre-push`. A pre-push hook must not modify
+   the worktree or index: silently proceeding after a write would make the
+   pushed commit differ from the tree the developer is now looking at.
+
+   **Refused where every other bad declaration is refused**, rather than at push
+   time. A `pre-push` line declaring a fix is a `ParseError`, alongside
+   `NameTaken` and `Duplicate` — reported on every commit, named, located, and
+   visible in the dashboard's `DECL` column. A "hook contract violation" raised
+   at push time would be the same fact discovered later, by fewer people, in the
+   one place where blocking is most expensive.
+
+   A built-in cannot express it at all: `Fix::Rewrite` is reachable only from a
+   `Stage::PreCommit` declaration, which the compiler enforces.
+3. The **stash** applies to the `pre-commit` check stage only. `commit-msg`
+   reads and rewrites the message file Git passes as `$1`; `prepare-commit-msg`
+   appends to that same message file based on the branch name and commit
+   source. Neither hook selects paths from the index or asks tools to read
+   repository files, so wrapping them in `StagedOnly` would add stash risk
+   without fixing a real fidelity problem.
+
+   **`pre-push` is excluded from the stash and NOT from the problem.** It has
+   the same bug by a different route (§1) — the pushed refs choose the files and
+   the working tree supplies the content. Stashing is the wrong instrument
+   there, so it gets its own item rather than an exemption. Saying "pre-commit
+   only" and stopping is precisely the move §3 criticises: pre-push has no
+   cherry-pick guard today because the zsh version had none, and nobody wrote
+   down that it was a choice.
