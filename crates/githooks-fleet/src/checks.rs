@@ -114,6 +114,7 @@ mod tests {
             skips: skips.iter().map(|s| crate::skips::for_test(s)).collect(),
             severities: Vec::new(),
             declared: Vec::new(),
+            trusted: None,
         }
     }
 
@@ -148,6 +149,7 @@ mod tests {
             skips: skips.iter().map(|s| crate::skips::for_test(s)).collect(),
             severities: Vec::new(),
             declared: Vec::new(),
+            trusted: None,
         }
     }
 

@@ -65,29 +65,6 @@ pub fn classify(staged: &[String], lock_exists: impl Fn(&str) -> bool) -> Verdic
 /// Ask on the terminal, when there is one. Never crash without it: the old
 /// `read < /dev/tty` aborted non-interactive commits with "device not
 /// configured". Headless callers bypass with `git -c hook.skip=package-lock`.
-#[cfg(unix)]
-fn confirm() -> bool {
-    use std::io::{BufRead, BufReader};
-    let Ok(tty) = std::fs::File::open("/dev/tty") else {
-        return false;
-    };
-    print!("  Commit anyway? (y/N) ");
-    use std::io::Write;
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    if BufReader::new(tty).read_line(&mut line).is_err() {
-        return false;
-    }
-    matches!(line.trim_start().chars().next(), Some('y') | Some('Y'))
-}
-
-/// Windows has no /dev/tty; treat it as non-interactive rather than inventing
-/// a console API for a confirmation prompt.
-#[cfg(not(unix))]
-fn confirm() -> bool {
-    false
-}
-
 pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
     let staged = staged_files(&[]);
     let root = repo_root();
@@ -112,7 +89,7 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
     // `Warned`, not `Passed`: the lockfile really is out of sync and the commit
     // goes through anyway. The human waived it, which is not the same as there
     // being nothing to waive.
-    if v.orphan_lock.is_empty() && confirm() {
+    if v.orphan_lock.is_empty() && crate::trust::confirm("  Commit anyway? (y/N) ") {
         return Outcome::Warned;
     }
     fail(&format!(

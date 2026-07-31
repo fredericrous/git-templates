@@ -234,6 +234,7 @@ mod tests {
             skips: Vec::new(),
             severities: Vec::new(),
             declared: Vec::new(),
+            trusted: None,
         }
     }
 

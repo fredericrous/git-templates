@@ -96,6 +96,40 @@ appending is the only arrangement in which it cannot. On `pre-push`, which stops
 at the first blocking failure, that means a built-in failure means your check
 does not get a turn.
 
+## A manifest is inert until you trust it
+
+A repository you cloned can declare checks, and running them is a decision you
+make — not one `git clone` makes for you. So nothing in `.githooks.conf` runs
+until somebody accepts it here:
+
+```sh
+githooks trust            # shows what it declares, then records it
+githooks trust --show     # what it declares, and whether it is trusted
+githooks trust --revoke
+```
+
+`githooks install` asks once, with the declarations in view. Declining still
+installs the built-ins.
+
+Until then the checks are **reported, not dropped** — the point is that you can
+see there is a decision waiting:
+
+```
+⚠ .githooks.conf: shellcheck — declared in an untrusted .githooks.conf …
+⚠ 1 check(s) could not run: shellcheck
+```
+
+Acceptance is recorded against the file's CONTENT (`git hash-object`, which you
+can run yourself), so a `git pull` that adds a command does not inherit the
+trust you gave the file before it. When that happens the message says so —
+`changed since it was trusted` — because "somebody edited this" is a different
+thing to be told than "you have not looked at this yet".
+
+**This is a floor, not a ceiling.** A built-in check still runs your
+repository's own toolchain: `prettier` and `eslint` are taken from
+`node_modules/.bin` when present, so a hostile `node_modules` needs no manifest
+at all. That is the same exposure `npm install` already carries.
+
 ## Turning one off
 
 Exactly as for a built-in:

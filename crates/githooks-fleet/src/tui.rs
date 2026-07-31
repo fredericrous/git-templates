@@ -788,9 +788,24 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
     }
     if !repo.declared.is_empty() {
         lines.push(Line::from(""));
-        lines.push(
-            Line::from(format!("{DECLARED_FILE} (declared here)")).style(tint(app.color, ACCENT)),
-        );
+        // Trust state goes in the HEADING, not beside each check: it is a
+        // property of the file, and repeating it per row would read as though
+        // some of them were running.
+        let heading = match repo.trusted {
+            Some(true) => format!("{DECLARED_FILE} (declared here, trusted)"),
+            Some(false) => {
+                format!("{DECLARED_FILE} (declared here — NOT TRUSTED, none of these run)")
+            }
+            None => format!("{DECLARED_FILE} (declared here)"),
+        };
+        lines.push(Line::from(heading).style(tint(
+            app.color,
+            if repo.trusted == Some(false) {
+                Color::Red
+            } else {
+                ACCENT
+            },
+        )));
         for declared in &repo.declared {
             match &declared.state {
                 // The verdict first, as in the hook.skip block: a long command
@@ -1105,6 +1120,7 @@ mod tests {
             skips: Vec::new(),
             severities: Vec::new(),
             declared: Vec::new(),
+            trusted: None,
         }
     }
 
