@@ -11,30 +11,45 @@
 use crate::git;
 use crate::ui::{error_sign, highlight, valid_sign, warning_sign};
 
-/// `ahead[[:space:]]+[0-9]+,[[:space:]]*behind` over `git status -sb`.
+/// `ahead[[:space:]]+N,[[:space:]]*behind[[:space:]]+M` over `git status -sb`.
+///
 /// Both counts present means the branch and its upstream have diverged, and an
-/// automatic rebase is exactly the wrong move.
-pub fn looks_diverged(status: &str) -> bool {
+/// automatic rebase is exactly the wrong move. The COUNTS come back too, not
+/// just the fact: "how far apart" is the first thing anyone wants to know, and
+/// the predicate used to throw it away.
+pub fn divergence(status: &str) -> Option<(u64, u64)> {
+    fn count_after(s: &str, word: &str) -> Option<(u64, usize)> {
+        let i = s.find(word)?;
+        let after = &s[i + word.len()..];
+        let trimmed = after.trim_start_matches([' ', '\t']);
+        if trimmed.len() == after.len() {
+            return None; // `word` must be followed by whitespace
+        }
+        let digits: String = trimmed.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty() {
+            return None;
+        }
+        let consumed = i + word.len() + (after.len() - trimmed.len()) + digits.len();
+        Some((digits.parse().ok()?, consumed))
+    }
+
     for line in status.lines() {
         let mut rest = line;
-        while let Some(i) = rest.find("ahead") {
-            let after = &rest[i + "ahead".len()..];
-            let trimmed = after.trim_start_matches([' ', '\t']);
-            if trimmed.len() < after.len() {
-                let digits: String = trimmed.chars().take_while(char::is_ascii_digit).collect();
-                if !digits.is_empty() {
-                    let tail = &trimmed[digits.len()..];
-                    if let Some(t) = tail.strip_prefix(',') {
-                        if t.trim_start_matches([' ', '\t']).starts_with("behind") {
-                            return true;
-                        }
+        while let Some((ahead, used)) = count_after(rest, "ahead") {
+            let tail = &rest[used..];
+            if let Some(t) = tail.strip_prefix(',') {
+                if let Some((behind, _)) = count_after(t, "behind") {
+                    // `behind` must be the NEXT token, not merely present later
+                    // on the line.
+                    if t.trim_start_matches([' ', '\t']).starts_with("behind") {
+                        return Some((ahead, behind));
                     }
                 }
             }
-            rest = &rest[i + "ahead".len()..];
+            rest = tail;
         }
     }
-    false
+    None
 }
 
 /// `^[[:space:]*]+<name>$` over `git branch` output — the indentation git
@@ -90,13 +105,26 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
     // 3. Diverged → warn and DO NOT rebase, but carry on to the default-branch
     //    check below (the shell fell through here too).
     let status = git::stdout(&["status", "-sb"]).unwrap_or_default();
-    if looks_diverged(&status) {
+    if let Some((ahead, behind)) = divergence(&status) {
+        // Divergence has two causes and they want OPPOSITE actions, so this
+        // says what it saw and lets you pick. The old copy prescribed
+        // `git pull --rebase` unconditionally, which after a local rebase or
+        // amend is the one command that undoes the work you are pushing — it
+        // replays the upstream commits you just rewrote.
+        //
+        // The hook cannot tell the two apart: git does not tell a pre-push hook
+        // whether `--force` was passed, and both cases are non-fast-forward.
+        // Guessing wrong here costs someone their rebase, so it does not guess.
         println!(
-            "{} Branch diverged from its upstream — skip auto pull-rebase.",
+            "{} Branch and upstream have diverged ({ahead} ahead, {behind} behind) — not auto-rebasing.",
             warning_sign()
         );
         println!(
-            "    Reconcile manually: {} (or {})",
+            "    Rebased or amended locally? That is expected — push with {}.",
+            highlight("git push --force-with-lease")
+        );
+        println!(
+            "    Someone else pushed here? Reconcile first with {} (or {}).",
             highlight("git pull --rebase"),
             highlight("git merge")
         );
@@ -148,19 +176,46 @@ pub fn run(_args: &[std::ffi::OsString]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ahead_count, lists_branch, looks_diverged};
+    use super::{ahead_count, divergence, lists_branch};
 
     #[test]
     fn detects_divergence_only_when_both_counts_are_present() {
-        assert!(looks_diverged(
-            "## feat/x...origin/feat/x [ahead 1, behind 2]"
-        ));
-        assert!(looks_diverged("## a...b [ahead 12,  behind 3]"));
+        assert!(divergence("## feat/x...origin/feat/x [ahead 1, behind 2]").is_some());
+        assert!(divergence("## a...b [ahead 12,  behind 3]").is_some());
         // ahead only, or behind only, is NOT divergence — a rebase is fine
-        assert!(!looks_diverged("## feat/x...origin/feat/x [ahead 3]"));
-        assert!(!looks_diverged("## feat/x...origin/feat/x [behind 2]"));
-        assert!(!looks_diverged("## feat/x...origin/feat/x"));
-        assert!(!looks_diverged("## ahead-of-time...origin/x"));
+        assert!(divergence("## feat/x...origin/feat/x [ahead 3]").is_none());
+        assert!(divergence("## feat/x...origin/feat/x [behind 2]").is_none());
+        assert!(divergence("## feat/x...origin/feat/x").is_none());
+        assert!(divergence("## ahead-of-time...origin/x").is_none());
+    }
+
+    /// The counts are the message now, so a wrong one is a wrong message.
+    /// Two digits especially: this file already carries a bug where a count of
+    /// 12 printed as 1.
+    #[test]
+    fn reports_how_far_apart_the_two_are() {
+        assert_eq!(
+            divergence("## feat/x...origin/feat/x [ahead 1, behind 2]"),
+            Some((1, 2))
+        );
+        assert_eq!(
+            divergence("## a...b [ahead 12,  behind 34]"),
+            Some((12, 34))
+        );
+    }
+
+    /// A branch legitimately named `ahead-of-behind` must not be parsed as a
+    /// pair of counts, and `behind` has to be the token straight after the
+    /// comma rather than merely somewhere on the line.
+    #[test]
+    fn branch_names_are_not_mistaken_for_counts() {
+        assert!(divergence("## ahead 3...origin/behind 4").is_none());
+        // The word has to be followed by a SPACE, so a branch whose name runs
+        // straight into digits is not read as a count.
+        assert!(divergence("## a...b [ahead3, behind4]").is_none());
+        assert!(divergence("## ahead12...origin/behind34").is_none());
+        assert!(divergence("## a...b [ahead 3, xbehind 4]").is_none());
+        assert!(divergence("## ahead-of/behind...origin/ahead-of/behind").is_none());
     }
 
     #[test]

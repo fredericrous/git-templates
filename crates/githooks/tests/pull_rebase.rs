@@ -64,6 +64,50 @@ fn passes_when_in_sync_with_its_own_upstream() {
     assert!(run.says("in sync"));
 }
 
+/// The state a local rebase or amend leaves behind, and the reason this copy
+/// was rewritten: the hook used to prescribe `git pull --rebase` as THE fix,
+/// which after a rebase replays the upstream commits you just rewrote — the one
+/// command that undoes the work you are pushing.
+#[test]
+fn divergence_offers_both_readings_and_prescribes_neither() {
+    let r = with_origin();
+    r.git(&["checkout", "-q", "-b", "feat/diverged"]);
+    r.git(&["push", "-q", "--no-verify", "-u", "origin", "feat/diverged"]);
+
+    // One commit pushed, then rewritten locally: 1 ahead, 1 behind.
+    r.stage("a.txt", "one\n");
+    r.commit("first");
+    r.git(&["push", "-q", "--no-verify", "origin", "feat/diverged"]);
+    r.git(&["reset", "-q", "--hard", "HEAD~1"]);
+    r.stage("a.txt", "one, rewritten\n");
+    r.commit("first, amended");
+
+    let run = r.hook("pre-push-pull-rebase", &[]);
+    assert!(
+        run.passed(),
+        "divergence never blocked a push:\n{}",
+        run.output()
+    );
+    assert!(run.says("diverged"), "{}", run.output());
+    // How far apart, which the predicate used to compute and discard.
+    assert!(
+        run.says("1 ahead, 1 behind"),
+        "the counts must be in the message:\n{}",
+        run.output()
+    );
+    // Both readings offered, so neither is prescribed.
+    assert!(
+        run.says("--force-with-lease"),
+        "the rebase reading is missing:\n{}",
+        run.output()
+    );
+    assert!(
+        run.says("pull --rebase"),
+        "the someone-else-pushed reading is missing:\n{}",
+        run.output()
+    );
+}
+
 /// The normal state right after a PR squash-merges with delete-on-merge: the
 /// upstream is configured locally but gone on the remote. `git pull --rebase`
 /// would fail on the missing ref and read as a conflict, wrongly blocking.
