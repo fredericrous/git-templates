@@ -211,12 +211,6 @@ impl Drop for StagedOnly {
     }
 }
 
-fn has_unstaged_changes() -> bool {
-    // Tracked files only: `--include-untracked` is not used, so an untracked
-    // file is not a reason to stash.
-    !crate::git::succeeds(&["diff", "--quiet"])
-}
-
 /// Put back files this tool parked, from a later invocation.
 ///
 /// For when even the signal handler was interrupted.
