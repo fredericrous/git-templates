@@ -100,20 +100,41 @@ impl StagedOnly {
                     return Err(held_nothing(&store));
                 }
             }
-            match std::fs::read(&from) {
-                // Modified: keep the bytes.
-                Ok(bytes) => {
-                    if std::fs::write(&to, bytes).is_err() {
-                        return Err(held_nothing(&store));
+            // A symlink must be read as a link, not opened: `fs::read` follows
+            // it, which copies the TARGET's bytes instead of the link, and
+            // silently mistakes a dangling link (a normal mid-edit state) for
+            // a deleted file — the absent-marker branch below would then
+            // delete the link on restore rather than put it back.
+            match std::fs::symlink_metadata(&from) {
+                Ok(meta) if meta.file_type().is_symlink() => match std::fs::read_link(&from) {
+                    Ok(link_target) => {
+                        if std::fs::write(
+                            to.with_extension("githooks-symlink"),
+                            link_target.to_string_lossy().as_bytes(),
+                        )
+                        .is_err()
+                        {
+                            return Err(held_nothing(&store));
+                        }
                     }
-                }
-                // Deleted in the tree but not staged: record the absence, so
-                // the restore deletes it again rather than resurrecting it.
-                Err(_) => {
-                    if std::fs::write(to.with_extension("githooks-absent"), b"").is_err() {
-                        return Err(held_nothing(&store));
+                    Err(_) => return Err(held_nothing(&store)),
+                },
+                _ => match std::fs::read(&from) {
+                    // Modified: keep the bytes.
+                    Ok(bytes) => {
+                        if std::fs::write(&to, bytes).is_err() {
+                            return Err(held_nothing(&store));
+                        }
                     }
-                }
+                    // Deleted in the tree but not staged: record the absence,
+                    // so the restore deletes it again rather than
+                    // resurrecting it.
+                    Err(_) => {
+                        if std::fs::write(to.with_extension("githooks-absent"), b"").is_err() {
+                            return Err(held_nothing(&store));
+                        }
+                    }
+                },
             }
         }
 
@@ -177,6 +198,15 @@ fn put_back(store: &Path, root: &Path) -> std::io::Result<()> {
             let _ = std::fs::remove_file(root.join(original));
             continue;
         }
+        if let Some(original) = rel_str.strip_suffix(".githooks-symlink") {
+            let link_target = std::fs::read_to_string(&entry)?;
+            let link_path = root.join(original);
+            // `checkout` put the staged symlink there; replace it, don't
+            // merge with it.
+            let _ = std::fs::remove_file(&link_path);
+            create_symlink(&link_target, &link_path)?;
+            continue;
+        }
         let target = root.join(&rel);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
@@ -184,6 +214,36 @@ fn put_back(store: &Path, root: &Path) -> std::io::Result<()> {
         std::fs::write(&target, std::fs::read(&entry)?)?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &str, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// Windows distinguishes file and directory symlinks at creation time. The
+/// target usually still exists (it was the staged content `checkout` left
+/// behind, untouched by this whole dance), so ask it; a dangling link falls
+/// back to `symlink_file`, the more common case.
+#[cfg(windows)]
+fn create_symlink(target: &str, link: &Path) -> std::io::Result<()> {
+    let resolved = link
+        .parent()
+        .map(|parent| parent.join(target))
+        .unwrap_or_else(|| Path::new(target).to_path_buf());
+    if resolved.is_dir() {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_symlink(target: &str, link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::other(format!(
+        "no symlink support on this platform: {} -> {target}",
+        link.display()
+    )))
 }
 
 fn walk(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {

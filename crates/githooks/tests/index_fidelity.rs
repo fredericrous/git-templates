@@ -179,3 +179,92 @@ fn restore_with_nothing_parked_is_fine() {
         .expect("githooks restore");
     assert!(out.status.success());
 }
+
+/// A symlink is a link, not a file with those bytes in it. `fs::read` follows
+/// it — copying the TARGET's content as the "backup" — so a naive park-and-
+/// restore quietly turns the link into a plain file. `link` must still be a
+/// link afterward, pointing where the author unstaged-left it.
+#[test]
+fn an_unstaged_symlink_retarget_survives_the_hook() {
+    let r = Repo::new();
+    seed(&r);
+    if !try_symlink("x.json", &r.path("link")) {
+        println!("  ! symlinks unavailable — skipping");
+        return;
+    }
+    r.git(&["add", "link"]);
+    r.commit("chore: add a symlink");
+
+    // Unstaged: repoint the tracked link elsewhere.
+    std::fs::remove_file(r.path("link")).expect("remove the old link");
+    assert!(
+        try_symlink("unstaged-target", &r.path("link")),
+        "fixture: retarget failed after the capability check passed"
+    );
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "{}", run.output());
+
+    let meta = std::fs::symlink_metadata(r.path("link")).expect("link must still exist");
+    assert!(
+        meta.file_type().is_symlink(),
+        "the symlink was replaced with a regular file"
+    );
+    assert_eq!(
+        std::fs::read_link(r.path("link")).expect("read link"),
+        std::path::Path::new("unstaged-target"),
+        "the unstaged retarget was not restored"
+    );
+}
+
+/// A symlink mid-retarget commonly points at nothing for a moment. `fs::read`
+/// on a dangling link fails exactly like it does on a deleted file, so this
+/// must not be mistaken for one — that reads the working tree, decides the
+/// link was deleted, and deletes it again on restore.
+#[test]
+fn a_dangling_unstaged_symlink_is_not_deleted() {
+    let r = Repo::new();
+    seed(&r);
+    if !try_symlink("x.json", &r.path("link")) {
+        println!("  ! symlinks unavailable — skipping");
+        return;
+    }
+    r.git(&["add", "link"]);
+    r.commit("chore: add a symlink");
+
+    std::fs::remove_file(r.path("link")).expect("remove the old link");
+    assert!(
+        try_symlink("does-not-exist", &r.path("link")),
+        "fixture: retarget failed after the capability check passed"
+    );
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "{}", run.output());
+
+    let meta = std::fs::symlink_metadata(r.path("link"))
+        .expect("a dangling symlink was deleted instead of restored");
+    assert!(meta.file_type().is_symlink());
+    assert_eq!(
+        std::fs::read_link(r.path("link")).expect("read link"),
+        std::path::Path::new("does-not-exist"),
+    );
+}
+
+/// `None` on a platform/runner that cannot create the link at all (Windows
+/// without `SeCreateSymbolicLinkPrivilege`), so the two tests above skip
+/// instead of failing on a capability the environment never had.
+fn try_symlink(target: &str, link: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(target, link).is_ok()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, link);
+        false
+    }
+}
