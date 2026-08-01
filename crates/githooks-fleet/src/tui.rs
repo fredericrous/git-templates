@@ -819,7 +819,11 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
             ('○', "inert")
         };
         let cursor = if i == app.check_selected { '>' } else { ' ' };
-        lines.push(Line::from(format!("{cursor} {glyph} {check:<28} {word}")));
+        lines.push(Line::from(format!(
+            "{cursor} {glyph} {:<22} {:<11} {word}",
+            githooks_runtime::short_name(check),
+            crate::checks::trigger_of(check),
+        )));
     }
     lines.push(Line::from(
         "  ● runs here   ○ inert (no matching manifest)   ⊘ skipped via hook.skip",
@@ -844,7 +848,13 @@ fn hooks_view(f: &mut Frame, area: Rect, app: &App) {
             // misconfigured, and that is invisible in a plain list.
             let flag = if r.applicable == 0 { "  <- never" } else { "" };
             Row::new(vec![
-                Cell::from(format!("{}{flag}", r.name)),
+                // The SHORT name, with the trigger beside it. Repeating
+                // `pre-commit-` down twenty rows spends eleven columns saying
+                // nothing, and the thing it hides — that two rows can be the
+                // same check on different triggers — is exactly what the
+                // reader needs to see.
+                Cell::from(format!("{}{flag}", githooks_runtime::short_name(r.name))),
+                Cell::from(r.trigger),
                 Cell::from(format!("{}/{managed}", r.applicable)),
                 Cell::from(r.active.to_string()),
                 Cell::from(r.skipped.to_string()),
@@ -856,7 +866,8 @@ fn hooks_view(f: &mut Frame, area: Rect, app: &App) {
         Table::new(
             body,
             [
-                Constraint::Min(30),
+                Constraint::Min(22),
+                Constraint::Length(11),
                 Constraint::Length(12),
                 Constraint::Length(8),
                 Constraint::Length(9),
@@ -864,8 +875,15 @@ fn hooks_view(f: &mut Frame, area: Rect, app: &App) {
             ],
         )
         .header(
-            Row::new(vec!["CHECK", "APPLICABLE", "ACTIVE", "SKIPPED", "INERT"])
-                .style(tint(app.color, ACCENT)),
+            Row::new(vec![
+                "CHECK",
+                "TRIGGER",
+                "APPLICABLE",
+                "ACTIVE",
+                "SKIPPED",
+                "INERT",
+            ])
+            .style(tint(app.color, ACCENT)),
         ),
         area,
     );
@@ -1652,8 +1670,67 @@ mod tests {
         let out = render(&app, 110, 30);
         assert!(out.contains("APPLICABLE"), "{out}");
         assert!(out.contains("INERT"), "inert must be its own column: {out}");
-        assert!(out.contains("pre-commit-clippy"), "{out}");
         assert!(out.contains("2/2"), "counts carry the managed total: {out}");
+    }
+
+    /// The detail view's CHECKS panel gets the same treatment, and its trigger
+    /// comes from the registry rather than from the front of the id. Reading it
+    /// off the string would work today and would be a second opinion about a
+    /// check's stage — the moment the two disagreed, this panel would be the one
+    /// that was wrong.
+    #[test]
+    fn the_checks_panel_names_each_trigger() {
+        let mut app = App::new(scan_with_repos(vec![repo("a", true)]));
+        app.mode = Mode::Detail;
+        let out = render(&app, 100, 40);
+        let row = |name: &str| {
+            out.lines()
+                .find(|l| l.contains(name))
+                .unwrap_or("")
+                .to_string()
+        };
+        assert!(row("clippy").contains("pre-commit"), "{}", row("clippy"));
+        assert!(
+            row("branch-protect").contains("pre-push"),
+            "a pre-push check must not be labelled pre-commit: {}",
+            row("branch-protect")
+        );
+        assert!(
+            !row("clippy").contains("pre-commit-clippy"),
+            "the column already says it: {}",
+            row("clippy")
+        );
+    }
+
+    /// The trigger is a COLUMN, not eleven characters repeated down the CHECK
+    /// column. Two checks can share a short name — one on each trigger — and
+    /// this column is the only thing that tells those rows apart.
+    #[test]
+    fn the_hook_view_gives_the_trigger_its_own_column() {
+        let mut app = App::new(scan_with_repos(vec![repo("a", true)]));
+        app.mode = Mode::HookView;
+        let out = render(&app, 110, 30);
+        assert!(out.contains("TRIGGER"), "{out}");
+        assert!(out.contains("clippy"), "{out}");
+        assert!(
+            !out.contains("pre-commit-clippy"),
+            "the trigger column already says it: {out}"
+        );
+
+        // Both triggers reach the table, so the column is doing work rather
+        // than printing one constant.
+        let row = |name: &str| {
+            out.lines()
+                .find(|l| l.contains(name))
+                .unwrap_or("")
+                .to_string()
+        };
+        assert!(row("clippy").contains("pre-commit"), "{}", row("clippy"));
+        assert!(
+            row("branch-protect").contains("pre-push"),
+            "{}",
+            row("branch-protect")
+        );
     }
 
     /// A check that applies nowhere is called out, because "0 everywhere" is

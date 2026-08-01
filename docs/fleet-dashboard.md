@@ -8,9 +8,11 @@ and the `:` command palette. Both are useful, neither is load-bearing, and a
 named gap is better than a half-built one.
 
 The skip toggle is specified separately in
-[`hook-skip-management.md`](hook-skip-management.md) — it turned out to be a
-safety feature rather than an ergonomic one, since `hook.skip` matches by
-SUBSTRING and `hook.skip = e` silently disables all 20 checks.
+[`hook-skip-management.md`](hook-skip-management.md) — it was specified as a
+safety feature rather than an ergonomic one, back when `hook.skip` matched by
+SUBSTRING and `hook.skip = e` silently disabled all 20 checks. Matching is exact
+now: a value names a check by its full id, its trigger, or its short name, and
+`e` reaches nothing.
 
 ## Why this exists
 

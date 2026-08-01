@@ -112,8 +112,38 @@ pre-push      smoke       *       warn      make smoke
 ```
 
 They run alongside the built-ins and obey the same `hook.skip` and
-`githooks.severity.<name>` controls. `githooks list` shows what would run here.
+`githooks.severity.<key>` controls, addressed the same three ways: by full id
+(`pre-commit-shellcheck`), by trigger (`pre-commit`), or by short name
+(`shellcheck`). `githooks list` shows what would run here.
 Full reference: [docs/custom-checks.md](docs/custom-checks.md).
+
+## Naming a check, to turn it off or down
+
+Every check has an id, `<trigger>-<name>` — `pre-commit-clippy`. Three things
+name it, and both config surfaces read all three the same way:
+
+```sh
+git config --add hook.skip pre-commit-clippy   # that one check
+git config --add hook.skip clippy              # that check, on either trigger
+git config --add hook.skip pre-commit          # every pre-commit check
+```
+
+`githooks.severity.<key>` takes the same three:
+
+```sh
+git config githooks.severity.clippy warn       # runs, reports, does not block
+git config githooks.severity.pre-commit warn   # the whole trigger
+```
+
+Where several keys reach one check the most specific wins — full id, then short
+name, then trigger — so you can downgrade a trigger and exempt one check from it.
+Nothing matches by substring: `hook.skip e` reaches nothing at all, and skipping
+`lint-js` leaves `lint-json-yaml` alone.
+
+A skipped check is announced on every commit, so a config line nobody remembers
+writing cannot go on silently disabling things. `githooks list` shows the current
+state of a repo; `githooks-fleet` shows it across all of them, with `TRIGGER` as
+its own column.
 
 ## What a push actually tests
 

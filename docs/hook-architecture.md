@@ -126,7 +126,8 @@ anything.
 **A severity override is a better escape hatch than `hook.skip`.**
 `git config githooks.severity.<check> warn` downgrades a check instead of
 disabling it. `hook.skip` is all-or-nothing and, as measured, invisible enough
-that `hook.skip = e` silently disables everything. A downgrade keeps the signal
+that a one-line config edit could disable everything unnoticed. A downgrade keeps
+the signal
 and removes only the block, which is what people usually want when they reach
 for `--no-verify`. I would ship this alongside, and expect it to become the
 common case.
@@ -228,7 +229,9 @@ committed text file should be able to do to a hook chain:
 - **A built-in's name is refused.** An external calling itself
   `pre-push-branch-protect` would either shadow the built-in or silently lose to
   it.
-- **A duplicate name is refused.** It could be addressed by neither `hook.skip`
+- **A duplicate ID is refused** — the same name on two triggers is two checks
+  and both run; the same name twice on one trigger is the clash. It could be
+  addressed by neither `hook.skip`
   nor a severity override, so it would run anonymously.
 - **A line that cannot be parsed is not skipped.** It becomes a check that runs
   to `Unavailable` and says which line and why, appearing in the same "could not
