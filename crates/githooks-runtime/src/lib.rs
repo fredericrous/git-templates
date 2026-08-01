@@ -135,7 +135,7 @@ pub fn list_checks() {
     let broken: std::collections::BTreeMap<&str, &str> = manifest::externals()
         .iter()
         .filter_map(|external| match &external.kind {
-            manifest::Kind::Unusable { why } => Some((external.name.as_str(), why.as_str())),
+            manifest::Kind::Unusable { why } => Some((external.id.as_str(), why.as_str())),
             manifest::Kind::Runnable { .. } => None,
         })
         .collect();
@@ -182,7 +182,7 @@ pub fn list_checks() {
 fn is_external(name: &str) -> bool {
     manifest::externals()
         .iter()
-        .any(|external| external.name == name)
+        .any(|external| external.id == name)
 }
 
 fn describe(s: crate::check::Scope) -> String {

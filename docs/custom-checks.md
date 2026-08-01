@@ -27,8 +27,24 @@ pull`, and is visible in the fleet dashboard.
 
 **stage** — `pre-commit` or `pre-push`.
 
-**name** — how you refer to the check in `hook.skip` and in a severity override.
-It may not be the name of a built-in; see *What a repository cannot do*.
+**name** — the short name. Together with the stage it forms the check's **id**,
+`<stage>-<name>`, exactly as a built-in has: a line reading
+`pre-commit  shellcheck  …` declares `pre-commit-shellcheck`.
+
+That id is what `githooks list` and the dashboard show, and either the id or the
+short name addresses it in `hook.skip` and in a severity override — the same
+three-way vocabulary the built-ins take:
+
+```sh
+git config hook.skip pre-commit-shellcheck   # that check
+git config hook.skip shellcheck              # that check, on either stage
+git config hook.skip pre-commit              # every pre-commit check, declared ones included
+```
+
+The **same name on both stages is two checks**, and that is allowed:
+`show-unicorn` on `pre-commit` and on `pre-push` gives you
+`pre-commit-show-unicorn` and `pre-push-show-unicorn`, each separately skippable
+and separately downgradable. See *What a repository cannot do* for the limits.
 
 **scope** — `*` for every change, or a comma-separated list of `*.<ext>`.
 Evaluated against the files staged for a commit, or against the range being
@@ -83,12 +99,20 @@ run once and nothing ever said so.
 
 ## What a repository cannot do
 
-**Take a built-in's name.** The line is refused. An external that could call
-itself `pre-push-branch-protect` would either shadow the built-in or silently
-lose to it, and a text file should not be able to do either.
+**Take a built-in's id.** `pre-push  branch-protect  …` is refused: it would
+either shadow `pre-push-branch-protect` or silently lose to it, and a text file
+should not be able to do either. The same name on the *other* stage is fine —
+`pre-commit  branch-protect  …` is a different check and shadows nothing.
 
-**Declare the same name twice.** The second is refused: it could not be addressed
-by `hook.skip` or by a severity override, so it would run anonymously.
+**Write the stage into the name.** `pre-commit  pre-commit-clippy  …` is refused.
+It would declare a check whose short name is another check's full id, so a single
+`hook.skip pre-commit-clippy` would silence both and no rule could pick between
+them. So is a name that simply *is* a stage. The stage column already says which
+one this is.
+
+**Declare the same id twice.** The second is refused: it could not be addressed
+by `hook.skip` or by a severity override, so it would run anonymously. Two lines
+with the same name on *different* stages are two ids, and both run.
 
 **Run before the built-ins.** Externals are appended to each stage, always. A
 third-party command must not be able to delay `pre-push-branch-protect`, and
