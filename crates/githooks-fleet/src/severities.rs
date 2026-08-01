@@ -89,10 +89,7 @@ impl SeverityOverride {
     /// went on to write `githooks.severity.clippy warn` and got silence. One
     /// rule now answers both.
     pub fn covers(&self) -> Vec<&'static str> {
-        all_checks()
-            .into_iter()
-            .filter(|c| githooks_runtime::names_check(c, &self.check).is_some())
-            .collect()
+        covers(&self.check)
     }
 
     /// True when the key names no check this binary knows, or carries a value
@@ -140,17 +137,27 @@ pub fn read(repo: &Path) -> Vec<SeverityOverride> {
 
 /// Turn raw entries into resolved ones by asking which value git applies.
 ///
-/// A MAP, not a mutation. `parse` used to return `SeverityOverride`s whose
-/// `effective` field was `true` for everything until this corrected it — a
-/// value that was simply wrong for as long as it existed, and observably so:
-/// tests calling `parse` directly got entries claiming to be effective without
-/// anyone having asked.
+/// Two separate questions, both answered by the RUNTIME rather than
+/// re-derived here — config precedence is git's (system, then global, then
+/// local, then includes), and a reimplementation would be a second opinion
+/// about the one thing this column must not get wrong:
 ///
-/// The question is answered by the RUNTIME — the same call the dispatcher makes
-/// — rather than by re-deriving precedence here. Config precedence is git's
-/// (system, then global, then local, then includes), and a reimplementation
-/// would be a second opinion about the one thing this column must not get
-/// wrong.
+/// - **Which VALUE wins on this literal key**, when the same key is written
+///   more than once (`--get`'s job). A MAP, not a mutation — `parse` used to
+///   return `SeverityOverride`s whose `effective` field was `true` for
+///   everything until this corrected it, a value that was simply wrong for as
+///   long as it existed, and observably so: tests calling `parse` directly
+///   got entries claiming to be effective without anyone having asked.
+///
+/// - **Which KEY wins for a given check**, when two keys of different shapes
+///   both name it (full id beats short name beats trigger — `Overrides`'s
+///   job, the same one the dispatcher calls). Settling only the first
+///   question left two entries on *different* keys — say `pre-commit warn`
+///   and `clippy block` — both marked effective, because each was the only
+///   line on its own key. `clippy` is more specific and is what the
+///   dispatcher actually applies to `pre-commit-clippy`; the WARN column
+///   counting `pre-commit warn` as covering that check anyway was reporting a
+///   downgrade nothing enforces.
 fn resolve(repo: &Path, raws: Vec<RawEntry>) -> Vec<SeverityOverride> {
     let mut applied: BTreeMap<&str, Option<String>> = BTreeMap::new();
     for raw in &raws {
@@ -166,18 +173,53 @@ fn resolve(repo: &Path, raws: Vec<RawEntry>) -> Vec<SeverityOverride> {
             applied.insert(raw.check.as_str(), v);
         }
     }
+
+    // The same lines `read` already fetched, re-fed to the runtime's own
+    // fold — not a second `git config` sweep, and not a local guess at what
+    // "precedence order" means.
+    let config_text: String = raws
+        .iter()
+        .map(|r| format!("githooks.severity.{} {}\n", r.check, r.value))
+        .collect();
+    let overrides = githooks_runtime::registry::Overrides::from_config(Some(config_text));
+
     raws.iter()
-        .map(|r| SeverityOverride {
+        .map(|r| {
             // A duplicate of the winning VALUE is indistinguishable from the
             // winner and is treated as effective too. That errs toward showing
             // a downgrade rather than hiding one, the safe direction here.
-            effective: applied.get(r.check.as_str()).and_then(|v| v.as_deref())
-                == Some(r.value.as_str()),
-            check: r.check.clone(),
-            level: Level::of(&r.value),
-            value: r.value.clone(),
-            scope: r.scope.clone(),
+            let wins_own_key =
+                applied.get(r.check.as_str()).and_then(|v| v.as_deref()) == Some(r.value.as_str());
+            let level = Level::of(&r.value);
+            // A value the runtime cannot even parse never enters the
+            // specificity race at all — `Overrides` drops it rather than
+            // letting it win by default, so there is no key here for it to
+            // have won. `is_inert` already reports that case on its own
+            // terms; this must not additionally call it "overridden".
+            let effective = wins_own_key
+                && (level == Level::Unrecognised
+                    || covers(&r.check).iter().any(|check| {
+                        overrides
+                            .applied_to(check)
+                            .is_some_and(|(winning_key, _)| winning_key == r.check)
+                    }));
+            SeverityOverride {
+                effective,
+                check: r.check.clone(),
+                level,
+                value: r.value.clone(),
+                scope: r.scope.clone(),
+            }
         })
+        .collect()
+}
+
+/// Every check `pattern` reaches — the same vocabulary `hook.skip` takes: a
+/// full id, a trigger, or a short name.
+fn covers(pattern: &str) -> Vec<&'static str> {
+    all_checks()
+        .into_iter()
+        .filter(|c| githooks_runtime::names_check(c, pattern).is_some())
         .collect()
 }
 
@@ -371,6 +413,85 @@ mod tests {
         assert!(
             !warn.weakens(),
             "the WARN column would report a downgrade the dispatcher does not apply"
+        );
+    }
+
+    /// Two DIFFERENT keys naming the same check, not two lines on one key —
+    /// the case `the_entry_git_applies_is_the_one_marked_effective` does not
+    /// cover. Each is the only line on its own key, so `--get` on either key
+    /// alone answers "yes, effective" — the bug this test pins: a full id
+    /// must still beat a short name that was configured LOCALLY too, even
+    /// though per-key `--get` cannot see the short name losing at all.
+    #[test]
+    fn a_full_id_beats_a_short_name_on_a_different_key() {
+        let d = std::env::temp_dir().join(format!("sev-crosskey-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&d)
+                .output()
+                .expect("git");
+        };
+        git(&["init", "-q", "--template=", "."]);
+        git(&["config", "githooks.severity.clippy", "warn"]);
+        git(&["config", "githooks.severity.pre-commit-clippy", "block"]);
+
+        let got = read(&d);
+        let _ = std::fs::remove_dir_all(&d);
+
+        assert_eq!(got.len(), 2, "{got:?}");
+        let short = got
+            .iter()
+            .find(|e| e.check == "clippy")
+            .expect("the short name");
+        let full = got
+            .iter()
+            .find(|e| e.check == "pre-commit-clippy")
+            .expect("the full id");
+        assert!(
+            !short.effective,
+            "the full id is more specific and is what the dispatcher applies: {got:?}"
+        );
+        assert!(full.effective);
+        assert!(
+            !short.weakens(),
+            "the WARN column must not count a downgrade the dispatcher never applies"
+        );
+    }
+
+    /// The other half of the same rule: a trigger exempted for ONE check is
+    /// still effective for every other check it names — `docs/hook-skip-
+    /// management.md`'s "the trigger still governs every check it did not
+    /// exempt". A trigger-wide `warn` must not be marked shadowed just
+    /// because a more specific key wins for one of the many checks it covers.
+    #[test]
+    fn a_trigger_still_weakens_what_it_was_not_exempted_from() {
+        let d = std::env::temp_dir().join(format!("sev-partial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&d)
+                .output()
+                .expect("git");
+        };
+        git(&["init", "-q", "--template=", "."]);
+        git(&["config", "githooks.severity.pre-commit", "warn"]);
+        git(&["config", "githooks.severity.clippy", "block"]);
+
+        let got = read(&d);
+        let _ = std::fs::remove_dir_all(&d);
+
+        let trigger = got
+            .iter()
+            .find(|e| e.check == "pre-commit")
+            .expect("the trigger");
+        assert!(
+            trigger.weakens(),
+            "pre-commit-prettier and the rest were never exempted: {got:?}"
         );
     }
 
