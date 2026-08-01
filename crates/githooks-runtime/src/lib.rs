@@ -36,21 +36,79 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// `git config --get-all hook.skip`, or empty when unset/unavailable.
+/// The two triggers a check can be attached to, as they are spelled in config.
+///
+/// Deliberately the same strings as `Stage::as_str`, and
+/// `every_id_agrees_with_its_declared_stage` keeps them that way.
+pub const TRIGGERS: [&str; 2] = ["pre-commit", "pre-push"];
+
+/// How specifically a configured value names a check.
+///
+/// Ordered, so that when several keys match one check the most specific wins —
+/// which only matters for `githooks.severity`, since a skip is a boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Match {
+    /// `pre-commit` — every check on that trigger.
+    Trigger,
+    /// `clippy` — that check, whichever trigger it is on.
+    ShortName,
+    /// `pre-commit-clippy` — this check and no other.
+    FullId,
+}
+
+/// Does `pattern`, as written in `hook.skip` or `githooks.severity.<pattern>`,
+/// name `check`?
+///
+/// A check's id is `<trigger>-<name>`, and exactly three things name it:
+///
+/// | written | means |
+/// |---|---|
+/// | `pre-commit-clippy` | that one check |
+/// | `pre-commit`        | every check on that trigger |
+/// | `clippy`            | that check, on any trigger |
+///
+/// Three exact comparisons. **No substring.** The previous rule was
+/// `check.contains(skip)`, which made `hook.skip = clippy` work by accident of
+/// reach — and `hook.skip = e` disable all twenty checks by the same accident,
+/// and `lint-js` silently also suppress `lint-json-yaml`. Naming the three
+/// things a user actually means keeps every useful case and removes every
+/// sharp edge, including the one the old doc comment called "not a bug".
+///
+/// This reads the trigger out of the ID, which is not the same as deriving a
+/// check's stage: `Stage` remains a declared field and is what the dispatcher
+/// obeys. Here we are parsing an identifier a human typed.
+///
+/// Defined ONCE because four callers need it — the dispatcher decides what
+/// runs, the severity resolver decides what blocks, the fleet view reports
+/// where a check applies, and the skip resolver computes reach. A
+/// reimplementation that disagreed would have the dashboard claim a check is
+/// active while the dispatcher skips it.
+pub fn names_check(check: &str, pattern: &str) -> Option<Match> {
+    if check == pattern {
+        return Some(Match::FullId);
+    }
+    for trigger in TRIGGERS {
+        let Some(short) = check
+            .strip_prefix(trigger)
+            .and_then(|rest| rest.strip_prefix('-'))
+        else {
+            continue;
+        };
+        // An id carries one trigger, so the first that matches is the answer.
+        if pattern == trigger {
+            return Some(Match::Trigger);
+        }
+        if pattern == short {
+            return Some(Match::ShortName);
+        }
+        return None;
+    }
+    None
+}
+
 /// Does `skip`, as configured in `hook.skip`, suppress `check`?
-///
-/// SUBSTRING, not equality — `hook.skip = clippy` disables
-/// `pre-commit-clippy`, which is what makes the config usable by hand. It is
-/// also why `hook.skip = e` disables everything: every check name contains an
-/// `e`. That is a sharp edge, not a bug, and the dispatcher announces the
-/// consequence on every commit.
-///
-/// Defined ONCE because three callers need it and a fourth is coming: the
-/// dispatcher decides what runs, the fleet view reports where a check applies,
-/// and the skip resolver computes blast radius. A reimplementation that
-/// disagreed would have the dashboard claim a check is active while the
-/// dispatcher skips it — a difference nobody would notice until it mattered.
 pub fn skip_suppresses(check: &str, skip: &str) -> bool {
-    check.contains(skip)
+    names_check(check, skip).is_some()
 }
 
 /// Print every check: stage, scope, and whether it would fire in this
@@ -193,4 +251,109 @@ pub fn cherry_pick_in_progress(hooks_dir: &Path) -> bool {
         .parent()
         .map(|d| d.join("CHERRY_PICK_HEAD").exists())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod naming {
+    use super::*;
+
+    /// The three things a user can write, and what each reaches.
+    #[test]
+    fn three_ways_to_name_a_check() {
+        assert_eq!(
+            names_check("pre-commit-clippy", "pre-commit-clippy"),
+            Some(Match::FullId)
+        );
+        assert_eq!(
+            names_check("pre-commit-clippy", "pre-commit"),
+            Some(Match::Trigger)
+        );
+        assert_eq!(
+            names_check("pre-commit-clippy", "clippy"),
+            Some(Match::ShortName)
+        );
+    }
+
+    /// The hazards the old substring rule created, all gone by construction.
+    #[test]
+    fn nothing_matches_by_accident() {
+        // `hook.skip = e` disabled all twenty checks. It now reaches nothing.
+        for pattern in ["e", "t", "i", ""] {
+            assert_eq!(
+                names_check("pre-commit-clippy", pattern),
+                None,
+                "{pattern:?}"
+            );
+        }
+        // A partial word is not a name.
+        assert_eq!(names_check("pre-commit-clippy", "clip"), None);
+        assert_eq!(names_check("pre-commit-clippy", "lint"), None);
+        // The wrong trigger reaches nothing.
+        assert_eq!(names_check("pre-commit-clippy", "pre-push"), None);
+        // And the empty string names nothing, rather than everything — git
+        // stores `hook.skip` with no value as exactly this.
+        assert_eq!(names_check("pre-commit-clippy", ""), None);
+    }
+
+    /// The coupling `docs/hook-skip-management.md` warned about: `lint-js` is a
+    /// substring of `lint-json-yaml`, so skipping one used to skip both.
+    #[test]
+    fn a_short_name_does_not_reach_a_longer_one() {
+        assert!(names_check("pre-commit-lint-json-yaml", "lint-js").is_none());
+        assert_eq!(
+            names_check("pre-commit-lint-js", "lint-js"),
+            Some(Match::ShortName)
+        );
+        assert_eq!(
+            names_check("pre-commit-lint-json-yaml", "lint-json-yaml"),
+            Some(Match::ShortName)
+        );
+    }
+
+    /// The one value that exists in the real fleet.
+    #[test]
+    fn the_fleets_only_skip_still_resolves() {
+        assert_eq!(
+            names_check("pre-push-run-tests-js", "run-tests-js"),
+            Some(Match::ShortName)
+        );
+    }
+
+    /// A trigger reaches every check on it and none on the other.
+    #[test]
+    fn a_trigger_reaches_its_own_stage_only() {
+        let pre_commit = registry::CHECKS
+            .iter()
+            .filter(|c| names_check(c.name, "pre-commit").is_some())
+            .count();
+        let pre_push = registry::CHECKS
+            .iter()
+            .filter(|c| names_check(c.name, "pre-push").is_some())
+            .count();
+        assert_eq!(pre_commit + pre_push, registry::CHECKS.len());
+        assert!(pre_commit > 0 && pre_push > 0);
+    }
+
+    /// Specificity ordering, which decides severity when several keys apply.
+    #[test]
+    fn a_full_id_outranks_a_short_name_outranks_a_trigger() {
+        assert!(Match::FullId > Match::ShortName);
+        assert!(Match::ShortName > Match::Trigger);
+    }
+
+    /// The resolver reads the trigger out of the ID. That is only sound while
+    /// every ID agrees with the stage its check actually declares — so it is
+    /// checked rather than assumed.
+    #[test]
+    fn every_id_agrees_with_its_declared_stage() {
+        for check in registry::CHECKS {
+            assert_eq!(
+                names_check(check.name, check.stage.as_str()),
+                Some(Match::Trigger),
+                "{} declares {:?} but its id says otherwise",
+                check.name,
+                check.stage
+            );
+        }
+    }
 }

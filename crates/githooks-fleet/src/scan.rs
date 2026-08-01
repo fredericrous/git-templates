@@ -107,8 +107,9 @@ pub struct Repo {
     /// a fourth copy of that rule was what `LANGUAGES` used to be.
     pub applicable: Vec<String>,
     /// `hook.skip` entries, resolved: what each one suppresses and where it
-    /// came from. Bare strings hid both — a value is a SUBSTRING pattern, not a
-    /// check name, and local/global are indistinguishable once merged.
+    /// came from. Bare strings hid both — a value need not be a check id (a
+    /// trigger silences fifteen), and local/global are indistinguishable once
+    /// merged.
     pub skips: Vec<SkipEntry>,
     /// `githooks.severity.*` entries. A downgraded check still runs and still
     /// prints its failure, so unlike a skip it leaves no trace on screen — a

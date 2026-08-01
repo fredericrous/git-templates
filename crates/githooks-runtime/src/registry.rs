@@ -340,12 +340,84 @@ impl Overrides {
         Overrides(map)
     }
 
+    /// The configured key that applies to `check`, and what it says.
+    ///
+    /// Several keys can name one check — `pre-commit` and `clippy` and
+    /// `pre-commit-clippy` all reach `pre-commit-clippy`. The most specific
+    /// wins, which is the rule anybody would guess and the only one that lets
+    /// you downgrade a whole trigger and then exempt one check from it.
+    pub fn applied_to(&self, check: &str) -> Option<(&str, Severity)> {
+        self.0
+            .iter()
+            .filter_map(|(pattern, severity)| {
+                crate::names_check(check, pattern).map(|m| (m, pattern.as_str(), *severity))
+            })
+            .max_by_key(|(m, _, _)| *m)
+            .map(|(_, pattern, severity)| (pattern, severity))
+    }
+
     /// The severity to apply to `check`, override or declared.
     pub fn of(&self, check: &dyn Check) -> Severity {
-        self.0
-            .get(check.name())
-            .copied()
+        self.applied_to(check.name())
+            .map(|(_, severity)| severity)
             .unwrap_or_else(|| check.severity())
+    }
+}
+
+#[cfg(test)]
+mod precedence {
+    use super::{Overrides, Severity};
+
+    fn overrides(lines: &[&str]) -> Overrides {
+        let text = lines
+            .iter()
+            .map(|l| format!("githooks.severity.{l}\n"))
+            .collect::<String>();
+        Overrides::from_config(Some(text))
+    }
+
+    /// The whole reason triggers and short names are allowed as keys: downgrade
+    /// a trigger wholesale, then say something different about one check. If the
+    /// broader key won instead, the exemption would be unwritable.
+    #[test]
+    fn the_more_specific_key_wins() {
+        let both = overrides(&["pre-commit warn", "pre-commit-clippy block"]);
+        assert_eq!(
+            both.applied_to("pre-commit-clippy"),
+            Some(("pre-commit-clippy", Severity::Block)),
+            "a full id beats its trigger"
+        );
+        assert_eq!(
+            both.applied_to("pre-commit-shellcheck"),
+            Some(("pre-commit", Severity::Warn)),
+            "and the trigger still governs every check it did not exempt"
+        );
+    }
+
+    /// Full id > short name > trigger, all three at once, so the ordering is
+    /// pinned end to end rather than one pair at a time.
+    #[test]
+    fn the_three_ways_to_name_a_check_are_ranked() {
+        let all = overrides(&["pre-commit warn", "clippy block", "pre-commit-clippy warn"]);
+        assert_eq!(
+            all.applied_to("pre-commit-clippy"),
+            Some(("pre-commit-clippy", Severity::Warn))
+        );
+
+        let no_full = overrides(&["pre-commit warn", "clippy block"]);
+        assert_eq!(
+            no_full.applied_to("pre-commit-clippy"),
+            Some(("clippy", Severity::Block)),
+            "a short name beats a trigger"
+        );
+    }
+
+    /// A key naming nothing must not become the answer by being the only one
+    /// there — that is how a repo believes it downgraded a check it never named.
+    #[test]
+    fn a_key_that_names_no_check_applies_to_nothing() {
+        let typo = overrides(&["clipy warn", "e warn", " warn"]);
+        assert_eq!(typo.applied_to("pre-commit-clippy"), None);
     }
 }
 
@@ -359,12 +431,26 @@ impl Overrides {
 ///
 /// `repo` is `None` for the current directory, which is where a hook runs.
 pub fn effective_override(repo: Option<&Path>, check: &str) -> Option<Severity> {
-    let key = severity_key(check);
-    let value = match repo {
-        None => crate::git::stdout(&["config", "--get", &key]),
-        Some(dir) => crate::git::stdout_in(dir, &["config", "--get", &key]),
-    }?;
-    Severity::parse(&value)
+    overrides_in(repo).applied_to(check).map(|(_, s)| s)
+}
+
+/// Which configured KEY applies to `check` here, if any.
+///
+/// The dashboard needs the key rather than the value: with three ways to name a
+/// check, "which of these lines is the one doing something" is the question a
+/// reader actually has.
+pub fn effective_key(repo: Option<&Path>, check: &str) -> Option<String> {
+    overrides_in(repo)
+        .applied_to(check)
+        .map(|(pattern, _)| pattern.to_string())
+}
+
+fn overrides_in(repo: Option<&Path>) -> Overrides {
+    let args = ["config", "--get-regexp", r"^githooks\.severity\."];
+    Overrides::from_config(match repo {
+        None => crate::git::stdout(&args),
+        Some(dir) => crate::git::stdout_in(dir, &args),
+    })
 }
 
 /// Built-in checks for one stage, in declared order.

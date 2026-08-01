@@ -35,8 +35,6 @@ pub enum Mode {
     HookView,
     /// Typing into the filter. The row list narrows as you type.
     Filter,
-    /// Typing a check name to confirm a skip that reaches more than one check.
-    Confirm,
 }
 
 /// A keystroke, named. The previous signature was
@@ -98,8 +96,6 @@ pub struct App {
     /// Which check the detail view has highlighted.
     pub check_selected: usize,
     /// The pending toggle, awaiting a typed confirmation.
-    pub pending: Option<crate::skips::SkipPlan>,
-    pub confirm: LineEdit,
     /// What just happened, and how to take it back.
     pub notice: Option<String>,
     pub undo: Option<crate::skips::SkipPlan>,
@@ -122,8 +118,6 @@ impl App {
             prev_mode: Mode::Browse,
             filter: LineEdit::default(),
             check_selected: 0,
-            pending: None,
-            confirm: LineEdit::default(),
             notice: None,
             undo: None,
             scanning: false,
@@ -152,7 +146,6 @@ impl App {
     pub fn on_key(&mut self, key: Key) {
         match self.mode {
             Mode::Filter => self.filter_key(key),
-            Mode::Confirm => self.confirm_key(key),
             Mode::Detail => self.detail_key(key),
             _ => self.browse_key(key),
         }
@@ -187,35 +180,6 @@ impl App {
         }
     }
 
-    /// Typing the check name is what confirms a skip reaching more than one
-    /// check. A keypress can be muscle memory; a name cannot.
-    fn confirm_key(&mut self, key: Key) {
-        match key {
-            Key::Esc => {
-                self.pending = None;
-                self.confirm.clear();
-                self.mode = Mode::Detail;
-            }
-            Key::Enter => {
-                let matches = self
-                    .pending
-                    .as_ref()
-                    .is_some_and(|p| p.check == self.confirm.as_str());
-                if matches {
-                    let plan = self.pending.take().expect("checked");
-                    self.commit_toggle(plan);
-                }
-                self.confirm.clear();
-                if self.pending.is_none() {
-                    self.mode = Mode::Detail;
-                }
-            }
-            Key::Backspace => self.confirm.backspace(),
-            Key::Char(c) => self.confirm.insert(c),
-            _ => {}
-        }
-    }
-
     fn selected_repo_path(&self) -> Option<std::path::PathBuf> {
         let rows = self.rows();
         let r = rows.get(self.selected)?;
@@ -237,14 +201,11 @@ impl App {
             self.notice = Some(format!("refused: {r}"));
             return;
         }
-        if plan.is_over_broad() {
-            // Deliberate friction, and only here.
-            self.pending = Some(plan);
-            self.confirm.clear();
-            self.mode = Mode::Confirm;
-        } else {
-            self.commit_toggle(plan);
-        }
+        // No confirmation step: a check id names exactly one check, so a
+        // toggle can no longer suppress anything the user did not point at.
+        // The type-the-name friction existed because substring matching could
+        // silently take four checks when you asked for one.
+        self.commit_toggle(plan);
     }
 
     /// Write, then record how to reverse it. An undo helps when the user was
@@ -710,8 +671,9 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(""));
         lines.push(Line::from("hook.skip").style(tint(app.color, ACCENT)));
         for skip in &repo.skips {
-            // What it COSTS, not what it says. A value is a substring pattern,
-            // and its reach is invisible from the config line itself.
+            // What it COSTS, not what it says: a trigger silences fifteen and
+            // a typo silences none, and the config line looks the same either
+            // way.
             let scope = match &skip.scope {
                 crate::skips::Scope::Local => "local",
                 crate::skips::Scope::Global => "global",
@@ -721,11 +683,19 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
             // warning past the right edge of the terminal for exactly the
             // values that needed it — nineteen check names is a long line, and
             // the alarm was the first thing truncated.
-            let head = match skip.suppresses.len() {
-                0 => "suppresses nothing — matches no check".to_string(),
-                1 => skip.suppresses[0].to_string(),
-                n if skip.is_over_broad() => format!("! {n} checks — probably not intended"),
-                n => format!("{n} checks"),
+            let head = if skip.is_inert() {
+                // The shape a mistake takes now that naming is exact. Under
+                // substring matching almost any string hit something, so this
+                // case was rare; it is the common one for a typo.
+                "! names no check".to_string()
+            } else if skip.is_trigger() {
+                format!(
+                    "the whole {} trigger — {} checks",
+                    skip.value,
+                    skip.suppresses.len()
+                )
+            } else {
+                skip.suppresses.join(", ")
             };
             lines.push(Line::from(format!(
                 "  {:<22} {scope:<7} -> {head}",
@@ -739,14 +709,6 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
                     "",
                     "",
                     skip.suppresses.join(", ")
-                )));
-            }
-            // A fragment reaches one check today and is a bet on every future
-            // name, so offer the correction rather than only the diagnosis.
-            if let Some(c) = skip.canonical() {
-                lines.push(Line::from(format!(
-                    "  {:<22} {:<7}    did you mean {c}?",
-                    "", ""
                 )));
             }
         }
@@ -921,23 +883,6 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         // is legible as "the filter excluded everything", not as "nothing here".
         format!("{rows} of {total} rows match {:?}", app.filter.as_str())
     };
-    if app.mode == Mode::Confirm {
-        if let Some(p) = &app.pending {
-            let line = format!(
-                "skipping {} also suppresses {} — type the name to confirm: {}",
-                p.check,
-                p.suppresses
-                    .iter()
-                    .filter(|c| **c != p.check)
-                    .copied()
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                app.confirm.as_str()
-            );
-            f.render_widget(Paragraph::new(Line::from(line)), area);
-            return;
-        }
-    }
     if let Some(n) = &app.notice {
         f.render_widget(Paragraph::new(Line::from(n.clone())), area);
         return;
@@ -1344,22 +1289,36 @@ mod tests {
         }
     }
 
-    /// The preview half of the skip work: a config line says `t`, and what
-    /// matters is that `t` costs nineteen checks. The detail view must show the
-    /// cost, not the value.
+    /// A trigger is the only way a single value reaches many checks now, and
+    /// the detail view names it as such — the cost, not just the value.
+    ///
+    /// This used to be `t`, which cost nineteen checks by accident of substring
+    /// reach and had to be flagged "probably not intended". A trigger IS
+    /// intended, so it is reported rather than alarmed about.
     #[test]
     fn detail_shows_what_each_skip_actually_suppresses() {
+        let mut r = repo("a", true);
+        r.skips = vec![crate::skips::for_test("pre-commit")];
+        let mut app = App::new(scan_with_repos(vec![r]));
+        app.mode = Mode::Detail;
+        let out = render(&app, 120, 30);
+        assert!(out.contains("hook.skip"), "{out}");
+        assert!(
+            out.contains("the whole pre-commit trigger"),
+            "must name what it covers: {out}"
+        );
+        assert!(out.contains("15 checks"), "and how many: {out}");
+    }
+
+    /// The shape a mistake takes now: a value that names nothing at all.
+    #[test]
+    fn detail_flags_a_skip_that_names_nothing() {
         let mut r = repo("a", true);
         r.skips = vec![crate::skips::for_test("t")];
         let mut app = App::new(scan_with_repos(vec![r]));
         app.mode = Mode::Detail;
         let out = render(&app, 120, 30);
-        assert!(out.contains("hook.skip"), "{out}");
-        assert!(out.contains("19 checks"), "expected the count: {out}");
-        assert!(
-            out.contains("probably not intended"),
-            "an over-broad skip must be flagged: {out}"
-        );
+        assert!(out.contains("names no check"), "{out}");
     }
 
     /// A downgraded check is the case the dashboard was blind to: it runs, it
@@ -1580,19 +1539,18 @@ mod tests {
         assert!(!out.contains("did you mean"), "nothing to correct: {out}");
     }
 
-    /// And a fragment gets the correction offered, not just a diagnosis. This
-    /// is the one that exists in the fleet today.
+    /// A short name is a first-class way to name a check now, not an
+    /// imprecision to be corrected. The dashboard used to answer it with
+    /// "did you mean pre-push-run-tests-js?"; there is nothing to correct.
     #[test]
-    fn a_fragment_skip_is_offered_its_canonical_name() {
+    fn a_short_name_is_reported_as_the_check_it_names() {
         let mut r = repo("a", true);
         r.skips = vec![crate::skips::for_test("run-tests-js")];
         let mut app = App::new(scan_with_repos(vec![r]));
         app.mode = Mode::Detail;
         let out = render(&app, 120, 30);
-        assert!(
-            out.contains("did you mean pre-push-run-tests-js"),
-            "expected the correction: {out}"
-        );
+        assert!(out.contains("pre-push-run-tests-js"), "{out}");
+        assert!(!out.contains("did you mean"), "nothing to correct: {out}");
     }
 
     /// A real repo on disk, because the toggle writes git config and a mocked
@@ -1624,8 +1582,28 @@ mod tests {
             .expect("check")
     }
 
-    /// One check → write immediately and offer undo. A confirmation for the
-    /// common case only interrupts when the user was right.
+    /// A toggle now writes immediately: there is nothing to confirm, because a
+    /// check id names exactly one check. The type-the-name step existed only
+    /// because substring matching could silently take four when you asked for
+    /// one — see `a_name_that_prefixes_another_reaches_only_itself` in `skips`.
+    #[test]
+    fn a_toggle_needs_no_confirmation_step() {
+        let root = repo_on_disk("no-confirm");
+        let mut app = app_on(&root);
+        app.check_selected = index_of("pre-commit-lint-js");
+        app.on_key(Key::Char('s'));
+        assert_eq!(app.mode, Mode::Detail, "it should just write");
+        assert_eq!(
+            crate::skips::read(&root.join("r"))
+                .iter()
+                .map(|e| e.value.clone())
+                .collect::<Vec<_>>(),
+            vec!["pre-commit-lint-js"],
+            "and take only the check that was pointed at"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn s_skips_a_single_check_and_u_takes_it_back() {
         let root = repo_on_disk("single");
@@ -1648,76 +1626,6 @@ mod tests {
             crate::skips::read(&root.join("r")).is_empty(),
             "undo restores"
         );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// More than one check → typing the name is required. `pre-commit-lint-js`
-    /// is a PREFIX of `pre-commit-lint-json-yaml`, so even a full check name
-    /// can reach two, and substring matching cannot express "this one only".
-    #[test]
-    fn an_over_broad_skip_demands_the_name_typed() {
-        let root = repo_on_disk("broad");
-        let mut app = app_on(&root);
-        app.check_selected = index_of("pre-commit-lint-js");
-
-        app.on_key(Key::Char('s'));
-        assert_eq!(app.mode, Mode::Confirm, "must not write on one keypress");
-        assert!(
-            crate::skips::read(&root.join("r")).is_empty(),
-            "nothing yet"
-        );
-
-        // A wrong name is rejected.
-        for c in "clippy".chars() {
-            app.on_key(Key::Char(c));
-        }
-        app.on_key(Key::Enter);
-        assert!(
-            crate::skips::read(&root.join("r")).is_empty(),
-            "still nothing"
-        );
-
-        for c in "pre-commit-lint-js".chars() {
-            app.on_key(Key::Char(c));
-        }
-        app.on_key(Key::Enter);
-        assert_eq!(
-            crate::skips::read(&root.join("r"))
-                .into_iter()
-                .map(|e| e.value)
-                .collect::<Vec<_>>(),
-            vec!["pre-commit-lint-js"]
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn esc_abandons_a_pending_confirmation() {
-        let root = repo_on_disk("abandon");
-        let mut app = app_on(&root);
-        app.check_selected = index_of("pre-commit-lint-js");
-        app.on_key(Key::Char('s'));
-        app.on_key(Key::Esc);
-        assert_eq!(app.mode, Mode::Detail);
-        assert!(app.pending.is_none());
-        assert!(crate::skips::read(&root.join("r")).is_empty());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// The confirm prompt names what ELSE would be suppressed — the fact that
-    /// makes the friction worth accepting.
-    #[test]
-    fn the_confirm_prompt_names_the_collateral() {
-        let root = repo_on_disk("prompt");
-        let mut app = app_on(&root);
-        app.check_selected = index_of("pre-commit-lint-js");
-        app.on_key(Key::Char('s'));
-        let out = render(&app, 120, 40);
-        assert!(
-            out.contains("pre-commit-lint-json-yaml"),
-            "must name the collateral: {out}"
-        );
-        assert!(out.contains("type the name"), "{out}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

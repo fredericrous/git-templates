@@ -5,9 +5,9 @@
 //!
 //! Two facts drive the whole module.
 //!
-//! `hook.skip` matches by SUBSTRING, so a value is not a check name — it is a
-//! pattern whose reach has to be computed. `clippy` costs one check and `e`
-//! costs all twenty, and neither is visible from the config line itself.
+//! A value need not name one check. It can be a full id, a trigger, or a short
+//! name, so its reach has to be computed rather than read: `pre-commit` costs
+//! fifteen checks and `clipy` costs none, and the config line says neither.
 //!
 //! And `git config --get-all` merges local, global and system entries with no
 //! indication of origin. A developer who deletes the line from `.git/config`
@@ -44,27 +44,24 @@ pub struct SkipEntry {
 }
 
 impl SkipEntry {
-    /// More than one is already a surprise if you meant one. The threshold is
-    /// not a percentage: `lint` costing five checks is as much of a shock as
-    /// `e` costing twenty, relative to what was intended.
-    pub fn is_over_broad(&self) -> bool {
-        self.suppresses.len() > 1
+    /// Whether this value silences a whole trigger.
+    ///
+    /// It used to mean "reaches more than one check", which under substring
+    /// matching happened by ACCIDENT — `e` cost twenty and `lint` cost five,
+    /// and the UI had to shout about it. A value can now only reach several
+    /// checks by naming their trigger, which is a thing somebody meant to do.
+    /// Still worth showing; no longer worth alarm.
+    pub fn is_trigger(&self) -> bool {
+        githooks_runtime::TRIGGERS.contains(&self.value.as_str())
     }
 
-    /// True when the value is not itself a check name — the form a human writes
-    /// by hand, and the one the UI must never produce. The single skip in the
-    /// fleet today (`run-tests-js`) is exactly this.
-    pub fn is_fragment(&self) -> bool {
-        !all_checks().contains(&self.value.as_str())
-    }
-
-    /// The check name this fragment most likely meant, when it means only one.
-    /// Offered as a correction rather than only a diagnosis.
-    pub fn canonical(&self) -> Option<&'static str> {
-        match self.suppresses.as_slice() {
-            [only] if self.is_fragment() => Some(only),
-            _ => None,
-        }
+    /// Reaches nothing at all — a typo, or a name that no longer exists.
+    ///
+    /// This is the case that deserves attention now: under the old rule almost
+    /// any string hit something, so "matches nothing" was rare. Under exact
+    /// naming it is the normal shape of a mistake.
+    pub fn is_inert(&self) -> bool {
+        self.suppresses.is_empty()
     }
 }
 
@@ -151,21 +148,26 @@ mod tests {
         }
     }
 
-    /// The numbers that justify this whole feature, computed rather than quoted.
+    /// What each shape of value actually reaches, computed rather than quoted.
     #[test]
-    fn blast_radius_is_computed_from_the_registry() {
+    fn reach_is_computed_from_the_registry() {
         let total = all_checks().len();
-        assert_eq!(suppressed_by("pre-commit-clippy").len(), 1);
-        assert_eq!(suppressed_by("clippy").len(), 1);
-        assert_eq!(suppressed_by("cargo").len(), 2);
-        assert!(suppressed_by("lint").len() >= 4, "several, not one");
-        // The case the announcement exists for.
-        assert_eq!(
-            suppressed_by("e").len(),
-            total,
-            "a one-letter skip disables everything"
-        );
-        assert!(suppressed_by("t").len() >= total - 1);
+        assert_eq!(suppressed_by("pre-commit-clippy").len(), 1, "a full id");
+        assert_eq!(suppressed_by("clippy").len(), 1, "a short name");
+
+        let pre_commit = suppressed_by("pre-commit").len();
+        let pre_push = suppressed_by("pre-push").len();
+        assert_eq!(pre_commit + pre_push, total, "a trigger reaches its stage");
+        assert!(pre_commit > 1 && pre_push > 1);
+
+        // Everything the old substring rule reached by accident now reaches
+        // nothing: one letter, a partial word, a shared fragment.
+        for nothing in ["e", "t", "cargo", "lint", "clip"] {
+            assert!(
+                suppressed_by(nothing).is_empty(),
+                "{nothing:?} should name no check"
+            );
+        }
     }
 
     #[test]
@@ -175,35 +177,46 @@ mod tests {
         assert!(suppressed_by("").is_empty());
     }
 
+    /// Three shapes a configured value can have, and they are different
+    /// questions: one check, a whole trigger, or nothing at all.
     #[test]
-    fn over_broad_and_fragment_are_different_questions() {
+    fn a_trigger_and_a_typo_are_different_questions() {
         let exact = SkipEntry {
             value: "pre-commit-clippy".into(),
             scope: Scope::Local,
             suppresses: suppressed_by("pre-commit-clippy"),
         };
-        assert!(!exact.is_over_broad());
-        assert!(!exact.is_fragment());
-        assert_eq!(exact.canonical(), None);
+        assert!(!exact.is_trigger());
+        assert!(!exact.is_inert());
 
-        // The one that exists in the fleet today: harmless reach, but not a
-        // check name, so a future rename could silently widen it.
+        // The one that exists in the fleet today. Its own comment used to warn
+        // that it was "not a check name, so a future rename could silently
+        // widen it" — under exact naming it IS a name, and cannot widen.
         let fragment = SkipEntry {
             value: "run-tests-js".into(),
             scope: Scope::Local,
             suppresses: suppressed_by("run-tests-js"),
         };
-        assert!(!fragment.is_over_broad(), "it reaches exactly one check");
-        assert!(fragment.is_fragment());
-        assert_eq!(fragment.canonical(), Some("pre-push-run-tests-js"));
+        assert!(!fragment.is_trigger(), "a short name is not a trigger");
+        assert!(!fragment.is_inert(), "and it does reach its check");
 
+        // A trigger: several checks, deliberately.
         let broad = SkipEntry {
+            value: "pre-commit".into(),
+            scope: Scope::Local,
+            suppresses: suppressed_by("pre-commit"),
+        };
+        assert!(broad.is_trigger());
+        assert!(broad.suppresses.len() > 1);
+
+        // A typo: the shape a mistake takes now.
+        let typo = SkipEntry {
             value: "e".into(),
             scope: Scope::Local,
             suppresses: suppressed_by("e"),
         };
-        assert!(broad.is_over_broad());
-        assert_eq!(broad.canonical(), None, "no single correction to offer");
+        assert!(typo.is_inert(), "`e` names nothing");
+        assert!(!typo.is_trigger());
     }
 
     #[test]
@@ -232,7 +245,7 @@ mod tests {
         };
         git(&["init", "-q", "--template=", "."]);
         git(&["config", "--add", "hook.skip", "pre-commit-clippy"]);
-        git(&["config", "--add", "hook.skip", "lint"]);
+        git(&["config", "--add", "hook.skip", "pre-push"]);
 
         let entries = read(&dir);
         assert_eq!(entries.len(), 2, "{entries:?}");
@@ -240,12 +253,13 @@ mod tests {
         assert_eq!(entries[0].scope, Scope::Local);
         assert_eq!(entries[0].suppresses, vec!["pre-commit-clippy"]);
 
-        assert_eq!(entries[1].value, "lint");
+        assert_eq!(entries[1].value, "pre-push");
         assert!(
-            entries[1].is_over_broad(),
-            "lint reaches several checks: {:?}",
+            entries[1].is_trigger(),
+            "a trigger reaches its whole stage: {:?}",
             entries[1].suppresses
         );
+        assert!(entries[1].suppresses.len() > 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -285,13 +299,6 @@ pub struct SkipPlan {
 pub enum Action {
     Add,
     Remove,
-}
-
-impl SkipPlan {
-    /// More than the check you asked for. Requires deliberate confirmation.
-    pub fn is_over_broad(&self) -> bool {
-        self.action == Action::Add && self.suppresses.len() > 1
-    }
 }
 
 /// Plan a toggle for `check` in `repo`. Never writes.
@@ -519,18 +526,17 @@ mod write_tests {
     /// a prefix of `pre-commit-lint-json-yaml`, and substring matching cannot
     /// express "this one only". The plan must say so rather than assume one.
     #[test]
-    fn a_full_name_can_still_be_over_broad() {
+    /// `pre-commit-lint-js` is a prefix of `pre-commit-lint-json-yaml`, so under
+    /// substring matching skipping one silently skipped both — and the UI had
+    /// to demand the name be typed out to confirm collateral nobody asked for.
+    /// Naming is exact now, so there is no collateral.
+    fn a_name_that_prefixes_another_reaches_only_itself() {
         let d = repo_at("prefix");
         let p = plan(&d, "pre-commit-lint-js");
-        assert_eq!(
-            p.suppresses,
-            vec!["pre-commit-lint-js", "pre-commit-lint-json-yaml"]
-        );
-        assert!(p.is_over_broad(), "must require deliberate confirmation");
+        assert_eq!(p.suppresses, vec!["pre-commit-lint-js"]);
 
-        let q = plan(&d, "pre-commit-clippy");
-        assert_eq!(q.suppresses.len(), 1);
-        assert!(!q.is_over_broad());
+        let q = plan(&d, "pre-commit-lint-json-yaml");
+        assert_eq!(q.suppresses, vec!["pre-commit-lint-json-yaml"]);
         let _ = std::fs::remove_dir_all(&d);
     }
 

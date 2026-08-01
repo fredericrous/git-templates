@@ -81,13 +81,25 @@ pub struct SeverityOverride {
 }
 
 impl SeverityOverride {
-    /// True when the key names no check this binary knows. Unlike `hook.skip`,
-    /// which matches by substring and so at least reaches SOMETHING, a severity
-    /// key is an exact name: misspell it and it is inert. Nothing in git says
-    /// so, which is how a repo ends up believing a check was downgraded when it
-    /// was never touched.
+    /// Every check this key downgrades — the same vocabulary `hook.skip` takes:
+    /// a full id, a trigger, or a short name.
+    ///
+    /// The two surfaces used to disagree. `hook.skip` matched by substring and
+    /// this key was an exact name, so a repo that learned `hook.skip clippy`
+    /// went on to write `githooks.severity.clippy warn` and got silence. One
+    /// rule now answers both.
+    pub fn covers(&self) -> Vec<&'static str> {
+        all_checks()
+            .into_iter()
+            .filter(|c| githooks_runtime::names_check(c, &self.check).is_some())
+            .collect()
+    }
+
+    /// True when the key names no check this binary knows, or carries a value
+    /// git will not read as a severity. Nothing in git says so, which is how a
+    /// repo ends up believing a check was downgraded when it was never touched.
     pub fn is_inert(&self) -> bool {
-        !all_checks().contains(&self.check.as_str()) || self.level == Level::Unrecognised
+        self.covers().is_empty() || self.level == Level::Unrecognised
     }
 
     /// The downgrade itself — a check that runs, reports, and does not block.
@@ -95,7 +107,7 @@ impl SeverityOverride {
     /// Only when this entry is the one git applies: a shadowed `warn` weakens
     /// nothing.
     pub fn weakens(&self) -> bool {
-        self.effective && self.level == Level::Warn && all_checks().contains(&self.check.as_str())
+        self.effective && self.level == Level::Warn && !self.covers().is_empty()
     }
 
     /// Configured, but overridden by a later entry. Not damage — but not
@@ -253,13 +265,23 @@ mod tests {
         assert!(!bad_value.weakens());
     }
 
-    /// `hook.skip` takes substrings; this key does not. A value that would be a
-    /// perfectly good skip pattern is an inert severity key, and the dashboard
-    /// has to say so rather than quietly resolving it.
+    /// The bug this vocabulary exists to kill: `hook.skip clippy` reached the
+    /// check and `githooks.severity.clippy` did not, so the second thing anyone
+    /// tried after the first one worked was silence. Whatever a skip resolves
+    /// to, a severity key of the same text resolves to as well.
     #[test]
-    fn a_fragment_is_not_resolved_the_way_a_skip_would_be() {
-        assert!(!crate::skips::suppressed_by("clippy").is_empty());
-        assert!(for_test("clippy", "warn").is_inert());
+    fn both_surfaces_resolve_a_name_the_same_way() {
+        for name in ["pre-commit-clippy", "clippy", "pre-commit"] {
+            assert_eq!(
+                for_test(name, "warn").covers(),
+                crate::skips::suppressed_by(name),
+                "`{name}` must reach the same checks on both surfaces"
+            );
+            assert!(!for_test(name, "warn").is_inert(), "`{name}` names checks");
+        }
+        // And a trigger key downgrades the whole trigger, which is the point of
+        // admitting triggers into the vocabulary at all.
+        assert!(for_test("pre-commit", "warn").covers().len() > 1);
     }
 
     /// A real repo, because the whole module is a parse of `git config

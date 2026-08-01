@@ -33,10 +33,9 @@ use crate::configured_skips;
 use crate::registry::{all_stage_checks, Ctx, Overrides};
 use crate::ui::{highlight, valid_sign, warning_sign};
 
-/// The checks for a stage, minus anything `hook.skip` filters out. `hook.skip`
-/// yields substrings and matches by CONTAINS, exactly as it did against paths,
-/// so existing config keeps working: `git config hook.skip ruff` still skips
-/// `pre-commit-ruff`.
+/// The checks for a stage, minus anything `hook.skip` filters out. Resolution
+/// goes through `names_check`, the one rule this and the severity lookup share:
+/// `git config hook.skip ruff` skips `pre-commit-ruff` by short name.
 fn selected(stage: Stage) -> Vec<&'static dyn Check> {
     selected_during(stage, &[])
 }
@@ -96,11 +95,11 @@ fn selected_during(
 /// hint that a seventh check had been disabled — the developer sees a clean run
 /// and concludes they are covered.
 ///
-/// It is worse than it sounds, because `hook.skip` matches by SUBSTRING.
-/// `hook.skip = e` suppresses all twenty checks, and `t` suppresses nineteen;
-/// both are plausible shorthand rather than adversarial input. Without this
-/// line, a commit under either looks indistinguishable from a commit that had
-/// nothing to report.
+/// It is worse than it sounds, because one value can silence a whole stage:
+/// `hook.skip = pre-commit` suppresses all fifteen. That is now something
+/// somebody meant rather than the accident it once was — `e` used to cost
+/// twenty by substring reach — but a commit under it still looks exactly like a
+/// commit that had nothing to report.
 ///
 /// One line, only when something was actually skipped, so a normal commit is
 /// unchanged. This reaches every skip however it was created — hand-edited
@@ -597,15 +596,17 @@ mod tests {
         assert_eq!(out, vec![0, 7, 0], "results keep the input order");
     }
 
-    /// `hook.skip` matches by substring, as it did when it filtered paths.
+    /// The filter calls the shared resolver rather than restating it. This test
+    /// used to inline `n.contains(s)` — its own copy of the rule — and so went
+    /// on passing after the rule changed underneath it.
     #[test]
-    fn skips_match_by_substring() {
+    fn skips_are_filtered_by_the_shared_resolver() {
         let all = ["pre-commit-ruff", "pre-commit-prettier"];
         let skips = ["ruff".to_string()];
         let kept: Vec<_> = all
             .iter()
             .copied()
-            .filter(|n| !skips.iter().any(|s| n.contains(s.as_str())))
+            .filter(|n| !skips.iter().any(|s| crate::skip_suppresses(n, s)))
             .collect();
         assert_eq!(kept, vec!["pre-commit-prettier"]);
     }
