@@ -12,6 +12,16 @@ SRC_CTRL_HOOKS     := $(MAKEFILE_DIR)templates/hooks/*
 # `cargo build` above it, when the file exists to be detected.
 EXE                 = $(shell [ -f "$(MAKEFILE_DIR)target/release/githooks.exe" ] \
                         || [ -f "$(MAKEFILE_DIR)target/debug/githooks.exe" ] && echo .exe)
+# Where installed binaries go. Mirrors `install::bin_dir()` in the runtime,
+# which honours $GITHOOKS_BIN_DIR and falls back to ~/.local/bin — so `make
+# install-fleet` lands beside whatever `githooks install` wrote.
+#
+# This was dropped in #62 when installation moved into the binary and the
+# Makefile's own install recipe went with it. `install-fleet` still referenced
+# it, so it expanded to nothing and the recipe ran `install … /githooks-fleet`
+# — an attempt to write to the filesystem root.
+INSTALL_BIN_DIR    ?= $(if $(GITHOOKS_BIN_DIR),$(GITHOOKS_BIN_DIR),$(HOME)/.local/bin)
+
 DEBUG_BIN           = $(MAKEFILE_DIR)target/debug/githooks$(EXE)
 RELEASE_BIN         = $(MAKEFILE_DIR)target/release/githooks$(EXE)
 
