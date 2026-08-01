@@ -55,13 +55,25 @@ pub fn apply(plan: &FixPlan) -> Outcome {
         return Outcome::Unchanged;
     }
 
-    // Re-check tracked-ness at the moment of action. The preview may be old,
-    // and this is the guard that failed open twice before.
+    // Re-check tracked-ness at the moment of action, for a REMOVE and a
+    // WRITE alike. The preview may be old, and this is the guard that failed
+    // open twice before — both times on a delete, but a write that landed on
+    // tracked source (a repo whose `core.hooksPath`, say, points somewhere
+    // `is_tracked` did not expect when the plan was built) would overwrite
+    // it exactly as destructively, just without `rm` in the name.
     for r in &plan.remove {
         if is_tracked(&r.path) {
             return Outcome::Failed {
                 error: "path is tracked by git".into(),
                 at: r.path.display().to_string(),
+            };
+        }
+    }
+    for w in &plan.write {
+        if is_tracked(&w.path) {
+            return Outcome::Failed {
+                error: "path is tracked by git".into(),
+                at: w.path.display().to_string(),
             };
         }
     }
@@ -113,7 +125,7 @@ fn write_executable(path: &Path, body: &str) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::fix::Intent;
-    use crate::fix::{plan, Refusal};
+    use crate::fix::{plan, FixPlan, Refusal, WriteShim};
     use crate::scan;
     use std::path::PathBuf;
 
@@ -274,5 +286,56 @@ mod tests {
             "git will not run a non-executable hook"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The write-side counterpart to the re-check `apply` already does for a
+    /// `remove`. Built by hand rather than through `plan()` — `plan()`
+    /// already refuses a write like this at PLAN time, so going through it
+    /// would only prove the two layers agree, not that `apply` refuses on
+    /// its own the way its own module doc says every action here must.
+    #[test]
+    fn a_write_that_became_tracked_is_refused_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!("apply-tracked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .expect("git");
+        };
+        git(&["init", "-q", "--template=", "."]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        let target = dir.join("tracked-shim");
+        std::fs::write(&target, "original\n").unwrap();
+        git(&["add", "tracked-shim"]);
+        git(&["commit", "-q", "--no-verify", "-m", "chore: seed"]);
+
+        let p = FixPlan {
+            repo: PathBuf::from("r"),
+            refuse: Vec::new(),
+            remove: Vec::new(),
+            write: vec![WriteShim {
+                path: target.clone(),
+                baked: "/bin/gh".to_string(),
+                changes: true,
+            }],
+        };
+
+        assert_eq!(
+            apply(&p),
+            Outcome::Failed {
+                error: "path is tracked by git".into(),
+                at: target.display().to_string(),
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "original\n",
+            "a tracked file must never be overwritten by apply"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
