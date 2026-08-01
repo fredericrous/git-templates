@@ -38,9 +38,34 @@ pub fn all_checks() -> Vec<&'static str> {
     registry::CHECKS.iter().map(|c| c.name).collect()
 }
 
+/// Which trigger runs `check` — read from the registry, not parsed back out of
+/// the id.
+///
+/// The id happens to begin with the trigger, and reading it off the string
+/// would work today. It would also be a second opinion about a check's stage,
+/// and the moment the two disagreed the dashboard would be the one that was
+/// wrong. `Stage` is a declared field; this asks it.
+pub fn trigger_of(check: &str) -> &'static str {
+    registry::CHECKS
+        .iter()
+        .find(|c| c.name == check)
+        .map(|c| c.stage.as_str())
+        .unwrap_or("")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CheckRollup {
+    /// The full id — `pre-commit-clippy`. What `hook.skip` and the severity
+    /// keys resolve against, so it is what the rollup is keyed by.
     pub name: &'static str,
+    /// Which trigger runs it. Its own field rather than something the reader
+    /// parses back out of `name`: two checks can share a short name, and the
+    /// trigger is the column that tells them apart.
+    ///
+    /// A string, not `Stage`. `Stage` lives in the dependency-free runtime and
+    /// so cannot be `Serialize`, and `"pre-commit"` is a better thing to hand a
+    /// JSON consumer than a Rust variant name anyway.
+    pub trigger: &'static str,
     /// Managed repos where this check could ever fire.
     pub applicable: usize,
     /// Applicable and not suppressed.
@@ -77,6 +102,7 @@ pub fn rollup(repos: &[Repo]) -> Vec<CheckRollup> {
             }
             CheckRollup {
                 name: check.name,
+                trigger: check.stage.as_str(),
                 applicable,
                 active: applicable - skipped,
                 skipped,

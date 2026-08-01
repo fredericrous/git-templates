@@ -56,6 +56,25 @@ pub enum Match {
     FullId,
 }
 
+/// A check's id without its trigger — `pre-commit-clippy` → `clippy`.
+///
+/// For DISPLAY only, wherever the trigger is already established by a heading
+/// or a neighbouring column. Under a `pre-commit` heading, printing
+/// `pre-commit-clippy` on every row spends eleven columns restating what the
+/// heading said. Never write this to config or compare against it: two checks
+/// can share a short name, and telling them apart is what the id is for.
+pub fn short_name(check: &str) -> &str {
+    for trigger in TRIGGERS {
+        if let Some(short) = check
+            .strip_prefix(trigger)
+            .and_then(|rest| rest.strip_prefix('-'))
+        {
+            return short;
+        }
+    }
+    check
+}
+
 /// Does `pattern`, as written in `hook.skip` or `githooks.severity.<pattern>`,
 /// name `check`?
 ///
@@ -164,15 +183,20 @@ pub fn list_checks() {
                     format!("inert here — needs {}", describe(check.scope())),
                 )
             };
+            // The SHORT name: this loop is already inside a `pre-commit` /
+            // `pre-push` heading, so printing the trigger on all twenty rows
+            // restates the heading twenty times and pushes the reason — the
+            // part that differs per row — eleven columns to the right.
+            //
             // Where a check CAME FROM belongs next to its name, not appended
             // after a reason that is often empty. A reader scanning this list
             // wants to know which of these their repository added.
             let label = if is_external(name) {
-                format!("{name} (declared)")
+                format!("{} (declared)", short_name(name))
             } else {
-                name.to_string()
+                short_name(name).to_string()
             };
-            println!("  {glyph} {label:<39} {why}");
+            println!("  {glyph} {label:<26} {why}");
         }
     }
     println!();

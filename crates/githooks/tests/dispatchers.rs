@@ -332,16 +332,28 @@ fn list_reports_what_would_run_here() {
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_githooks"))
         .arg("list")
+        // Asserting on the LAYOUT, so ask for it without SGR rather than
+        // matching around escape sequences.
+        .env("NO_COLOR", "1")
         .current_dir(&r.dir)
         .output()
         .expect("run");
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
 
-    assert!(text.contains("pre-commit-clippy"), "{text}");
-    assert!(text.contains("pre-commit-ruff"), "{text}");
-    // A rust repo: clippy runs, ruff is INERT — and inert is not failure.
+    // The trigger is a HEADING, and each row under it is the short name. It
+    // used to be repeated on all twenty rows, which pushed the reason — the one
+    // part that differs per row — eleven columns to the right.
+    assert!(
+        text.lines().any(|l| l == "pre-commit"),
+        "the trigger heads its section: {text}"
+    );
     let clippy = text.lines().find(|l| l.contains("clippy")).unwrap_or("");
     let ruff = text.lines().find(|l| l.contains("ruff")).unwrap_or("");
+    assert!(
+        !clippy.contains("pre-commit-"),
+        "the heading already said the trigger: {clippy}"
+    );
+    // A rust repo: clippy runs, ruff is INERT — and inert is not failure.
     assert!(clippy.contains('●'), "clippy should run here: {clippy}");
     assert!(ruff.contains('○'), "ruff should be inert here: {ruff}");
     assert!(ruff.contains(".py"), "and say what it would need: {ruff}");
