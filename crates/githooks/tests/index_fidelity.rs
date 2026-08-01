@@ -180,6 +180,81 @@ fn restore_with_nothing_parked_is_fine() {
     assert!(out.status.success());
 }
 
+/// SIGINT mid-check must still restore. The handler itself only writes a byte
+/// to a pipe — a plain thread outside signal context does the actual restore
+/// — so this is the one test proving that indirection still ends where the
+/// old, simpler, signal-unsafe handler did: the tree back the way the author
+/// left it, and the process dead by the signal that hit it.
+///
+/// `sleep 5` is the declared check: slow enough that the signal is guaranteed
+/// to land while it is still the thing running, cheap enough not to make a
+/// hung path (a regression back to restoring inline) drag the suite out
+/// waiting on it — `recv_timeout` below bounds that instead.
+#[cfg(unix)]
+#[test]
+fn sigint_mid_check_still_restores() {
+    let r = Repo::new();
+    seed(&r);
+    r.stage("x.json", VALID);
+    r.write("x.json", BROKEN);
+    r.stage(".githooks.conf", "pre-commit  slow  *  block  sleep  5\n");
+    let trusted = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("trust")
+        .current_dir(&r.dir)
+        .output()
+        .expect("githooks trust");
+    assert!(trusted.status.success(), "could not trust the manifest");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("--hooks-dir")
+        .arg(r.path(".git/hooks"))
+        .arg("pre-commit")
+        .current_dir(&r.dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn githooks pre-commit");
+
+    // `enter()` parks before any check starts, so this appears almost
+    // immediately — long before `sleep 5` could finish on its own.
+    let store = r.path(".git/githooks-held");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !store.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture: nothing was ever parked to restore"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let signalled = Command::new("kill")
+        .arg("-INT")
+        .arg(child.id().to_string())
+        .status()
+        .expect("run kill");
+    assert!(signalled.success(), "fixture: could not signal the child");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait());
+    });
+    let status = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect(
+            "githooks did not exit within 10s of SIGINT — \
+             the pipe/thread handoff deadlocked",
+        )
+        .expect("wait on the child");
+    assert!(!status.success(), "SIGINT must not look like a clean pass");
+
+    assert_eq!(
+        tree(&r, "x.json"),
+        BROKEN,
+        "unstaged work was not restored after SIGINT"
+    );
+    assert!(!store.exists(), "held files left behind after SIGINT");
+}
+
 /// A symlink is a link, not a file with those bytes in it. `fs::read` follows
 /// it — copying the TARGET's content as the "backup" — so a naive park-and-
 /// restore quietly turns the link into a plain file. `link` must still be a

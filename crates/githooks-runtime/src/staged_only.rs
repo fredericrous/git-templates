@@ -31,13 +31,29 @@
 //! 6. **`githooks restore`** for when even the handler was interrupted.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::Mutex;
 
 use crate::ui::{error_sign, warning_sign};
 
 /// Whether this process is holding a patch. Global because a signal handler
 /// cannot be handed a reference, and because there is at most one per process.
 static HELD: AtomicBool = AtomicBool::new(false);
+
+/// Guards `checkout` through `HELD.store(true, ..)` in `enter()` against a
+/// `restore()` racing in concurrently from the signal-watcher thread.
+///
+/// Without this, a signal landing mid-`checkout` lets `restore()` read `HELD`
+/// as still `false`, no-op, and kill the process — while `checkout`'s child
+/// keeps running, ORPHANED, and eventually finishes writing the tree anyway.
+/// The parked files are never put back and nothing said so. This is not
+/// hypothetical: it is what running the checkout-then-signal race a dozen
+/// times over actually produced, once `restore()` moved off the interrupted
+/// call stack and onto a thread of its own — see `install_signal_handler`.
+/// `restore()` blocking here until `enter()` finishes is exactly the fix: by
+/// the time it can read `HELD`, `checkout` has definitely either succeeded
+/// (and it restores) or never called (and it no-ops), never "maybe".
+static ENTER_LOCK: Mutex<()> = Mutex::new(());
 
 /// Where the unstaged changes are parked. Inside `$GIT_DIR` so they are never
 /// committed, never seen by a check, and findable by hand.
@@ -138,20 +154,29 @@ impl StagedOnly {
             }
         }
 
-        // Tree := index. Everything staged stays; everything else is in `store`.
-        if !crate::git::succeeds(&["checkout", "--", "."]) {
-            let _ = std::fs::remove_dir_all(&store);
-            return Err(format!(
-                "{} could not set the unstaged changes aside; nothing was changed",
-                error_sign()
-            ));
+        // Tree := index. Everything staged stays; everything else is in
+        // `store`. Locked against a concurrent `restore()` — see `ENTER_LOCK`.
+        {
+            let _guard = ENTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            if !crate::git::succeeds(&["checkout", "--", "."]) {
+                let _ = std::fs::remove_dir_all(&store);
+                return Err(format!(
+                    "{} could not set the unstaged changes aside; nothing was changed",
+                    error_sign()
+                ));
+            }
+            HELD.store(true, Ordering::SeqCst);
         }
-        HELD.store(true, Ordering::SeqCst);
         Ok(StagedOnly { held: true })
     }
 
-    /// Put them back. Idempotent, and safe to call from a signal handler.
+    /// Put them back. Idempotent, and safe to call from the watcher thread
+    /// `install_signal_handler` starts — never from the signal handler itself.
     pub fn restore() {
+        // Blocks until `enter()` has definitely finished its own checkout —
+        // see `ENTER_LOCK`. The common case (no `enter()` active) is
+        // uncontended.
+        let _guard = ENTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         if !HELD.swap(false, Ordering::SeqCst) {
             return;
         }
@@ -293,36 +318,97 @@ pub fn restore_command() -> Result<(), String> {
 /// Restore before dying on a signal.
 ///
 /// `Drop` does not run when the process is killed, and Ctrl-C during a slow
-/// pre-commit is the most likely way to reach an orphaned stash. Installed only
-/// when a stash is actually held.
+/// pre-commit is the most likely way to reach an orphaned stash. Called before
+/// `enter()`, not after it holds anything — a signal arriving in the gap
+/// between `enter()` checking the tree out and this being armed would hit the
+/// default disposition instead, and `restore()` no-ops harmlessly on a signal
+/// that lands before there is anything held.
+///
+/// The handler itself does none of the restoring. `restore()` forks `git` and
+/// allocates — neither is on POSIX's async-signal-safe list — and `pre-commit`
+/// runs checks concurrently on other threads, so a signal delivered while one
+/// of them holds the allocator lock (or is itself mid-`fork`) would deadlock
+/// the handler instead of running it: the one failure mode worse than an
+/// orphaned stash, because it hangs instead of leaving something to recover by
+/// hand.
+///
+/// So the handler does the one thing POSIX actually guarantees is safe here —
+/// `write` one byte naming the signal to a pipe — and a plain thread, started
+/// up front and blocked on `read`, does the rest once it wakes on an ordinary
+/// call stack. It restores, then puts the signal's default disposition back
+/// and raises it on itself, so the process still dies BY that signal — an
+/// observer still sees an honest exit status, just from a thread that was
+/// never inside signal context to begin with.
 #[cfg(unix)]
 pub fn install_signal_handler() {
-    extern "C" fn on_signal(sig: i32) {
-        StagedOnly::restore();
-        // Re-raise with the default handler so the exit status is honest about
-        // having been killed.
-        unsafe {
-            libc_signal(sig, 0); // SIG_DFL
-            libc_raise(sig);
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let mut fds = [-1i32; 2];
+        if unsafe { libc_pipe(fds.as_mut_ptr()) } != 0 {
+            // No pipe, no handler: left uncaught, SIGINT/SIGTERM still kill
+            // the process (the kernel's default disposition), just without
+            // this restore — the same outcome as today if `pipe(2)` ever
+            // fails, which in practice it does not.
+            return;
         }
-    }
-    unsafe {
-        libc_signal(2, on_signal as *const () as usize); // SIGINT
-        libc_signal(15, on_signal as *const () as usize); // SIGTERM
-    }
+        let [read_fd, write_fd] = fds;
+        SIGNAL_PIPE_WRITE.store(write_fd, Ordering::SeqCst);
+
+        std::thread::spawn(move || {
+            let mut byte = [0u8; 1];
+            // Blocks until a handler writes one, or the pipe breaks (only
+            // possible if this thread outlives the process, which it cannot).
+            if unsafe { libc_read(read_fd, byte.as_mut_ptr(), 1) } <= 0 {
+                return;
+            }
+            StagedOnly::restore();
+            let sig = i32::from(byte[0]);
+            unsafe {
+                libc_signal(sig, 0); // SIG_DFL
+                libc_raise(sig);
+            }
+        });
+
+        extern "C" fn on_signal(sig: i32) {
+            let fd = SIGNAL_PIPE_WRITE.load(Ordering::SeqCst);
+            if fd >= 0 {
+                let byte = sig as u8;
+                unsafe {
+                    libc_write(fd, &byte, 1);
+                }
+            }
+        }
+        unsafe {
+            libc_signal(2, on_signal as *const () as usize); // SIGINT
+            libc_signal(15, on_signal as *const () as usize); // SIGTERM
+        }
+    });
 }
 
 #[cfg(not(unix))]
 pub fn install_signal_handler() {}
 
-// One extern rather than a dependency: `scripts/check-no-deps.sh` keeps this
-// binary crate-free, and these are two libc calls with stable signatures.
+/// The pipe's write end, set once by `install_signal_handler` before either
+/// signal is armed. `-1` means "no pipe yet" — reachable only if `pipe(2)`
+/// itself failed, in which case the handler is never armed either and this is
+/// never read.
+#[cfg(unix)]
+static SIGNAL_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
+
+// Raw externs rather than a dependency: `scripts/check-no-deps.sh` keeps this
+// binary crate-free, and these are five libc calls with stable signatures.
 #[cfg(unix)]
 extern "C" {
     #[link_name = "signal"]
     fn libc_signal_raw(sig: i32, handler: usize) -> usize;
     #[link_name = "raise"]
     fn libc_raise_raw(sig: i32) -> i32;
+    #[link_name = "pipe"]
+    fn libc_pipe_raw(fds: *mut i32) -> i32;
+    #[link_name = "read"]
+    fn libc_read_raw(fd: i32, buf: *mut u8, count: usize) -> isize;
+    #[link_name = "write"]
+    fn libc_write_raw(fd: i32, buf: *const u8, count: usize) -> isize;
 }
 
 #[cfg(unix)]
@@ -337,4 +423,22 @@ unsafe fn libc_raise(sig: i32) {
     unsafe {
         libc_raise_raw(sig);
     }
+}
+
+#[cfg(unix)]
+unsafe fn libc_pipe(fds: *mut i32) -> i32 {
+    unsafe { libc_pipe_raw(fds) }
+}
+
+#[cfg(unix)]
+unsafe fn libc_read(fd: i32, buf: *mut u8, count: usize) -> isize {
+    unsafe { libc_read_raw(fd, buf, count) }
+}
+
+/// # Safety
+/// Async-signal-safe: `write(2)` is on POSIX's list, which is the entire
+/// reason this exists rather than a call to `restore()` inline.
+#[cfg(unix)]
+unsafe fn libc_write(fd: i32, buf: *const u8, count: usize) -> isize {
+    unsafe { libc_write_raw(fd, buf, count) }
 }

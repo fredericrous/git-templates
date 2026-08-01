@@ -164,6 +164,13 @@ pub fn pre_commit(ctx: &Ctx) -> Verdict {
     let in_progress = crate::git_states_in_progress(ctx.hooks_dir);
     let checks = selected_during(Stage::PreCommit, &in_progress);
 
+    // BEFORE `enter()`, not after: `enter()` is what checks out the tree and
+    // parks the unstaged half, and a signal landing in the gap between that
+    // and the handler being armed would hit the default disposition — dead
+    // process, tree left checked out, nothing restored. The handler no-ops
+    // harmlessly on a signal that arrives before there is anything held.
+    crate::staged_only::install_signal_handler();
+
     // Around the WHOLE fan-out, not per check: twenty checks run concurrently
     // and would fight over one working tree.
     let held = match crate::staged_only::StagedOnly::enter(ctx.hooks_dir) {
@@ -176,7 +183,6 @@ pub fn pre_commit(ctx: &Ctx) -> Verdict {
             return Verdict::Block;
         }
     };
-    crate::staged_only::install_signal_handler();
 
     let verdict = run_stage(&checks, ctx, &Overrides::read());
     drop(held);
