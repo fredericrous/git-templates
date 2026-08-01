@@ -115,15 +115,26 @@ fn a_cherry_pick_pauses_the_content_checks_but_not_merge_conflict() {
     );
 }
 
-/// `hook.skip` takes SUBSTRINGS, not exact names — it matched paths before and
-/// must keep behaving the same now that it matches check names.
+/// A SHORT NAME names its check. This used to work by substring reach; it now
+/// works because the short name is one of the three things that name a check,
+/// which is the same convenience without the collateral.
 #[test]
-fn hook_skip_is_a_substring_match() {
+fn a_short_name_disables_its_check() {
     let r = Repo::new();
     r.stage("bad.txt", &conflicted());
     assert!(!r.hook("pre-commit", &[]).passed(), "guard");
     r.git(&["config", "--add", "hook.skip", "merge-conflict"]);
     assert!(r.hook("pre-commit", &[]).passed(), "skip should disable it");
+}
+
+/// And the full id names it too, so both spellings a reader might copy out of
+/// the dashboard work.
+#[test]
+fn a_full_id_disables_its_check() {
+    let r = Repo::new();
+    r.stage("bad.txt", &conflicted());
+    r.git(&["config", "--add", "hook.skip", "pre-commit-merge-conflict"]);
+    assert!(r.hook("pre-commit", &[]).passed());
 }
 
 #[test]
@@ -200,19 +211,38 @@ fn no_skips_means_no_extra_output() {
     assert!(!run.says("skipped by"), "{}", run.stdout);
 }
 
-/// The case this exists for. `hook.skip` matches by SUBSTRING, so `e` — a
-/// plausible shorthand, not adversarial input — disables every pre-commit
-/// check. Before this, such a commit was indistinguishable from one with
-/// nothing to report.
+/// A one-letter skip used to disable all twenty checks, because matching was
+/// `check.contains(skip)` and every name contains an `e`. The old doc comment
+/// called that "a sharp edge, not a bug" and the dispatcher announced the
+/// damage on every commit.
+///
+/// It now reaches nothing at all, so there is no damage to announce. A value
+/// names a check only by its full id, its trigger, or its short name.
 #[test]
-fn an_over_broad_skip_reports_the_full_damage() {
+fn a_one_letter_skip_now_reaches_nothing() {
     let r = Repo::new();
     r.stage("a.txt", "x\n");
     r.git(&["config", "--add", "hook.skip", "e"]);
     let run = r.hook("pre-commit", &[]);
     assert!(
+        !run.says("skipped by"),
+        "`e` should suppress nothing at all: {}",
+        run.stdout
+    );
+    assert!(run.says("No merge conflict detected"), "{}", run.stdout);
+}
+
+/// A TRIGGER, though, still disables its whole stage — deliberately now, rather
+/// than by accident of substring reach — and still says exactly what it cost.
+#[test]
+fn a_trigger_skip_disables_its_stage_and_says_so() {
+    let r = Repo::new();
+    r.stage("a.txt", "x\n");
+    r.git(&["config", "--add", "hook.skip", "pre-commit"]);
+    let run = r.hook("pre-commit", &[]);
+    assert!(
         run.says("15 checks skipped"),
-        "a one-letter skip disables everything and must say so: {}",
+        "a trigger disables its stage: {}",
         run.stdout
     );
     // Named, not just counted: a number alone does not tell you what you lost.

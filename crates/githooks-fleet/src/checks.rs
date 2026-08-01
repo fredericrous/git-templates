@@ -51,7 +51,7 @@ pub struct CheckRollup {
     pub inert: usize,
 }
 
-/// `hook.skip` matches by SUBSTRING, exactly as the dispatcher does. Anything
+/// Resolved through the dispatcher's own rule, never a copy of it. Anything
 /// else here would report a check as active while the dispatcher skips it.
 fn is_skipped(repo: &Repo, check: &str) -> bool {
     repo.skips
@@ -188,10 +188,10 @@ mod tests {
         }
     }
 
-    /// `hook.skip` is a substring match in the dispatcher, so it must be one
-    /// here too. Exact matching would show a check as active that never runs.
+    /// Resolved by the dispatcher's rule, so a short name counts. Any other
+    /// answer here would show a check as active that never runs.
     #[test]
-    fn skips_match_by_substring_as_the_dispatcher_does() {
+    fn skips_resolve_as_the_dispatcher_resolves_them() {
         let rs = rollup(&[repo(&["rust"], &["clippy"], true)]);
         let clippy = find(&rs, "pre-commit-clippy");
         assert_eq!(clippy.applicable, 1);

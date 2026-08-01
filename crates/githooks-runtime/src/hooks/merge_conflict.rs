@@ -61,7 +61,7 @@ pub fn run(hook_name: &str, _args: &[std::ffi::OsString]) -> Outcome {
         ));
         return Outcome::Failed;
     }
-    ok("No merge confict detected");
+    ok("No merge conflict detected");
     Outcome::Passed
 }
 
