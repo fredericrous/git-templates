@@ -166,6 +166,39 @@ fn is_ours(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Where `repo`'s hooks actually live — honouring `core.hooksPath` rather
+/// than assuming `.git/hooks`. A repo that redirects hooks elsewhere would
+/// otherwise be scanned (and `fix --apply` would WRITE) at a path git never
+/// reads.
+///
+/// `git rev-parse --git-path hooks` is the authority: relative
+/// `core.hooksPath` resolution, `~` expansion and worktree indirection are
+/// git's rules to get right, not ours to reimplement. But a fleet scan walks
+/// every repo on disk, and spawning git per repo just to ask "did you
+/// customise this" would cost real wall-clock at scale — `core.hooksPath` is
+/// virtually never set, and a config file that does not even mention it
+/// cannot have set it. So this checks `.git/config`'s own bytes first; only a
+/// repo whose config plausibly does pays for the subprocess.
+pub fn hooks_dir_for(repo: &Path) -> PathBuf {
+    let default = repo.join(".git").join("hooks");
+    let mentions_hooks_path = std::fs::read_to_string(repo.join(".git").join("config"))
+        .is_ok_and(|c| c.to_lowercase().contains("hookspath"));
+    if !mentions_hooks_path {
+        return default;
+    }
+    let Some(resolved) =
+        githooks_runtime::git::stdout_in(repo, &["rev-parse", "--git-path", "hooks"])
+    else {
+        return default;
+    };
+    let resolved = PathBuf::from(resolved);
+    if resolved.is_absolute() {
+        resolved
+    } else {
+        repo.join(resolved)
+    }
+}
+
 fn is_managed(hooks: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(hooks) else {
         return false;
@@ -240,7 +273,8 @@ fn walk(
 
         if name == ".git" {
             s.git_dirs_found += 1;
-            let hooks = path.join("hooks");
+            let repo = path.parent().unwrap_or(&path);
+            let hooks = hooks_dir_for(repo);
             if hooks.is_dir() {
                 s.hook_dirs_seen += 1;
             }
@@ -250,7 +284,6 @@ fn walk(
             } else {
                 s.unmanaged_seen += 1;
             }
-            let repo = path.parent().unwrap_or(&path);
             let found = inspect(root, repo, &hooks, managed, installed_binary);
             on(Progress::Found(&found));
             s.repos.push(found);

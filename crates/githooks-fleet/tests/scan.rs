@@ -39,6 +39,31 @@ impl Tree {
         std::fs::write(hooks.join("pre-commit"), "#!/bin/sh\necho mine\n").expect("write");
         self
     }
+    /// A REAL repository (`managed_repo`/`foreign_repo` only fake the
+    /// directory shape) whose `core.hooksPath` points somewhere other than
+    /// `.git/hooks`, with a managed shim living at that redirected location
+    /// and nothing at the default one.
+    fn custom_hooks_path_repo(&self, rel: &str, hooks_rel: &str) -> &Self {
+        let repo = self.0.join(rel);
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .expect("git");
+        };
+        git(&["init", "-q", "--template=", "."]);
+        git(&["config", "core.hooksPath", hooks_rel]);
+        let hooks = repo.join(hooks_rel);
+        std::fs::create_dir_all(&hooks).expect("mkdir");
+        std::fs::write(
+            hooks.join("pre-commit"),
+            "#!/bin/sh\nexec \"$BIN\" --hooks-dir \"$(dirname \"$0\")\" pre-commit \"$@\"\n",
+        )
+        .expect("write");
+        self
+    }
     fn dir(&self, rel: &str) -> &Self {
         std::fs::create_dir_all(self.0.join(rel)).expect("mkdir");
         self
@@ -337,4 +362,21 @@ fn a_repo_without_a_manifest_declares_nothing() {
         "{}",
         v["repos"][0]
     );
+}
+
+/// A repo can point `core.hooksPath` anywhere; the scanner must look there,
+/// not at `.git/hooks`. Otherwise a redirected repo reads as unmanaged (the
+/// shim IS there, just not where this tool assumed) and `fix --apply` would
+/// go on to WRITE at a path git never executes.
+#[test]
+fn core_hooks_path_is_honoured_not_assumed() {
+    let t = Tree::new("hookspath");
+    t.custom_hooks_path_repo("redirected", "tooling/hooks");
+    let v = json(&["--root", t.path().to_str().unwrap()]);
+    let repo = &v["repos"][0];
+    assert_eq!(repo["managed"], true, "{repo}");
+    // The default location was never created — a managed reading here would
+    // mean the scan fell back to `.git/hooks` and got lucky, not that it
+    // resolved `core.hooksPath`.
+    assert!(!t.path().join("redirected/.git/hooks").exists());
 }

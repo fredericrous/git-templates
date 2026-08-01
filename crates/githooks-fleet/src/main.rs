@@ -182,7 +182,7 @@ fn main() -> ExitCode {
         let mut removed = 0usize;
         let mut repos = 0usize;
         for repo in scan.repos.iter().filter(|r| r.managed) {
-            let hooks = args.root.join(&repo.path).join(".git/hooks");
+            let hooks = scan::hooks_dir_for(&args.root.join(&repo.path));
             let mut here = 0usize;
             for name in githooks_runtime::install::DISPATCHERS {
                 let path = hooks.join(name);
