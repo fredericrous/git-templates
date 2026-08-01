@@ -350,6 +350,40 @@ fn a_pre_push_scope_is_judged_against_the_pushed_range() {
     );
 }
 
+/// A file can be touched by an intermediate commit and reverted by a later
+/// one in the SAME push, netting to no difference between the two endpoints
+/// of the range — `diff-tree base..tip` is a straight two-tree comparison,
+/// not a walk, so a scope keyed off that alone would see nothing to gate on
+/// and never fire. The push still carries a commit that touched a `.rs`
+/// file, and the check must still see it.
+#[test]
+fn a_reverted_change_within_the_pushed_range_still_counts() {
+    let r = Repo::new();
+    probe(&r, PROBE, 0);
+    manifest(&r, &format!("pre-push  smoke  *.rs  block  ./{PROBE}\n"));
+    r.commit("init");
+    r.git(&["checkout", "-q", "-b", "feat/z"]);
+    let base = String::from_utf8_lossy(&r.git(&["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+
+    r.stage("src/temp.rs", "fn temp() {}\n");
+    r.commit("add a rust file");
+    r.git(&["rm", "-q", "src/temp.rs"]);
+    r.commit("remove it again");
+    let tip = String::from_utf8_lossy(&r.git(&["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+
+    let (code, out) = push_range(&r, &base, &tip);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("probe-"),
+        "an intermediate commit touched a .rs file even though the push \
+         nets to no .rs change between its endpoints: {out}"
+    );
+}
+
 /// The whole point of the trust gate: a manifest nobody accepted does not run,
 /// and is not silently dropped either.
 #[test]

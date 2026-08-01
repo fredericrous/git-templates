@@ -73,18 +73,60 @@ pub fn changed_files(refs: &[PushRef]) -> Vec<String> {
         if r.local_oid == zero {
             continue; // deleting a ref pushes no code
         }
-        let range = if r.remote_oid == zero {
-            r.local_oid.clone()
-        } else {
-            format!("{}..{}", r.remote_oid, r.local_oid)
-        };
-        if let Some(out) =
-            crate::git::stdout(&["diff-tree", "--no-commit-id", "--name-only", "-r", &range])
-        {
-            changed.extend(out.lines().map(str::trim).map(str::to_owned));
+        if r.remote_oid == zero {
+            // A brand new ref: nothing to walk against, so this is just the
+            // tip commit's own diff, as it always was.
+            if let Some(out) = crate::git::stdout(&[
+                "diff-tree",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                &r.local_oid,
+            ]) {
+                changed.extend(out.lines().map(str::trim).map(str::to_owned));
+            }
+            continue;
         }
+        changed.extend(range_changed_files(&r.remote_oid, &r.local_oid));
     }
     changed.into_iter().collect()
+}
+
+/// Every path touched by ANY commit reachable in `remote..local`, not just
+/// the net difference between the two endpoint trees.
+///
+/// `diff-tree remote..local` looks like the obvious tool, and is wrong: for
+/// `diff`/`diff-tree`, a two-dot range is shorthand for a straight two-tree
+/// comparison (`diff-tree remote local`) — unlike `log`, where the identical
+/// syntax means a commit walk. A file changed by one commit and reverted by
+/// a later one in the same push nets to "unchanged" between the endpoints,
+/// so a scope-gated check never learns the file was touched at all.
+/// `rev-list` walks the commits; `diff-tree --stdin` diffs each one against
+/// its own parent, and the per-commit results are unioned here.
+fn range_changed_files(remote_oid: &str, local_oid: &str) -> Vec<String> {
+    let range = format!("{remote_oid}..{local_oid}");
+    let Some(commits) = crate::git::stdout(&["rev-list", &range]) else {
+        return Vec::new();
+    };
+    if commits.is_empty() {
+        return Vec::new();
+    }
+    // `git::stdout` trims the trailing newline `rev-list` itself always
+    // writes — and `diff-tree --stdin` treats "no newline after this hash"
+    // as "the line isn't finished yet", silently dropping the LAST commit
+    // rather than reading it. Put the newline back before feeding it in.
+    crate::git::stdout_piped(
+        &[
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "--stdin",
+        ],
+        &format!("{commits}\n"),
+    )
+    .map(|out| out.lines().map(str::trim).map(str::to_owned).collect())
+    .unwrap_or_default()
 }
 
 #[cfg(test)]
