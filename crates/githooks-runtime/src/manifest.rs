@@ -58,7 +58,15 @@ pub enum ParseError {
     MissingName,
     /// Names a check compiled into the binary.
     NameTaken(String),
-    /// A second USABLE line claiming a name already claimed.
+    /// The name is a trigger, or carries one as a prefix.
+    ///
+    /// `pre-commit  pre-commit-clippy  …` would declare a check whose SHORT
+    /// name is another check's full id, so `hook.skip pre-commit-clippy` would
+    /// mean two things at once. The stage column supplies the trigger; writing
+    /// it again in the name is the one way to make an id ambiguous.
+    TriggerInName(String),
+    /// A second USABLE line claiming a name already claimed ON THE SAME
+    /// TRIGGER. The same name on both triggers is two checks, not a clash.
     Duplicate(String),
     BadStage(String),
     BadScope(String),
@@ -80,8 +88,12 @@ impl std::fmt::Display for ParseError {
                 write!(f, "expected 5 fields: stage name scope severity command")
             }
             ParseError::MissingName => write!(f, "missing name"),
-            ParseError::NameTaken(n) => write!(f, "{n:?} is a built-in check name"),
-            ParseError::Duplicate(n) => write!(f, "{n:?} is declared twice"),
+            ParseError::NameTaken(n) => write!(f, "{n:?} already names a check"),
+            ParseError::TriggerInName(n) => write!(
+                f,
+                "{n:?} must not be a trigger or start with one — the stage column says which"
+            ),
+            ParseError::Duplicate(n) => write!(f, "{n:?} is declared twice on one trigger"),
             ParseError::BadStage(t) => {
                 write!(f, "stage {t:?} must be `pre-commit` or `pre-push`")
             }
@@ -116,6 +128,16 @@ pub struct Declared {
 }
 
 impl Declared {
+    /// `<trigger>-<name>`, the same shape a built-in has.
+    ///
+    /// This is what `hook.skip` and `githooks.severity.<key>` resolve against,
+    /// so a declared check answers to its trigger and its short name exactly as
+    /// a compiled-in one does. Before it had an id, `hook.skip pre-commit`
+    /// silenced fifteen built-ins and left every declared check running.
+    pub fn id(&self) -> String {
+        format!("{}-{}", self.stage.as_str(), self.name)
+    }
+
     /// The command as written, for display.
     pub fn command(&self) -> String {
         std::iter::once(self.program.as_str())
@@ -172,6 +194,13 @@ impl Line {
         }
     }
 
+    /// `<trigger>-<name>`, matching `Declared::id` and `External::id`. A broken
+    /// line has one too: `hook.skip pre-commit` should silence its nag exactly
+    /// as it silences the checks that do run.
+    pub fn id(&self) -> String {
+        format!("{}-{}", self.stage().as_str(), self.name())
+    }
+
     /// Consume into the identity every line has, and either the declaration or
     /// the reason there is none.
     ///
@@ -192,7 +221,16 @@ impl Line {
 
 /// A check a repository declares, rather than one compiled in.
 pub struct External {
-    pub name: String,
+    /// `<trigger>-<name>` — what `hook.skip` and `githooks.severity.<key>`
+    /// resolve against, and what `Check::name` returns. Built-ins have had this
+    /// shape all along; declared checks answering to a bare name were invisible
+    /// to `hook.skip pre-commit`.
+    pub id: String,
+    /// The name as written in the manifest — the "short name" of the vocabulary
+    /// — used for messages. A line too malformed to name itself falls back to
+    /// its position, and reading `pre-commit-.githooks.conf:3` back to somebody
+    /// helps nobody.
+    pub short_name: String,
     pub stage: Stage,
     pub kind: Kind,
 }
@@ -214,7 +252,7 @@ pub enum Kind {
 
 impl Check for External {
     fn name(&self) -> &str {
-        &self.name
+        &self.id
     }
     fn stage(&self) -> Stage {
         self.stage
@@ -249,7 +287,7 @@ impl Check for External {
             Kind::Unusable { why } => {
                 crate::hooks::common::warn(&format!(
                     "{MANIFEST}: {} — {why}",
-                    crate::ui::highlight(&self.name)
+                    crate::ui::highlight(&self.short_name)
                 ));
                 return Outcome::Unavailable;
             }
@@ -291,7 +329,7 @@ impl Check for External {
             Err(e) => {
                 crate::hooks::common::warn(&format!(
                     "{MANIFEST}: {} could not run {} — {e}",
-                    crate::ui::highlight(&self.name),
+                    crate::ui::highlight(&self.short_name),
                     crate::ui::highlight(program)
                 ));
                 Outcome::Unavailable
@@ -306,7 +344,7 @@ impl Check for External {
                 {
                     crate::hooks::common::ok(&format!(
                         "{} fixed and re-staged",
-                        crate::ui::highlight(&self.name)
+                        crate::ui::highlight(&self.short_name)
                     ));
                     return Outcome::Fixed;
                 }
@@ -315,7 +353,7 @@ impl Check for External {
             Ok(_) => {
                 crate::hooks::common::fail(&format!(
                     "{} failed (output above)",
-                    crate::ui::highlight(&self.name)
+                    crate::ui::highlight(&self.short_name)
                 ));
                 Outcome::Failed
             }
@@ -382,11 +420,29 @@ fn parse_stage(token: &str) -> Option<Stage> {
     }
 }
 
-/// A name already spoken for. An external must not be able to shadow
+/// An identity already spoken for. An external must not be able to shadow
 /// `pre-push-branch-protect` — nor silently lose to it, which is what a
 /// first-match lookup would do without this.
-fn name_is_taken(name: &str) -> bool {
-    CHECKS.iter().any(|c| c.name == name) || ENTRYPOINTS.iter().any(|(n, _)| *n == name)
+///
+/// Judged on the ID, which is why `clippy` on `pre-push` is now legal: it is
+/// `pre-push-clippy`, a different check from `pre-commit-clippy`. Judged on the
+/// bare name, as it was, the two collided and the second was refused.
+///
+fn name_is_taken(id: &str) -> bool {
+    CHECKS.iter().any(|c| c.name == id) || ENTRYPOINTS.iter().any(|(n, _)| *n == id)
+}
+
+/// A short name that says its own trigger — either by being one, or by starting
+/// with one.
+///
+/// Both make an id ambiguous rather than merely ugly. `pre-commit` as a name
+/// gives `hook.skip pre-commit` two readings; `pre-commit-clippy` as a name
+/// gives a check whose SHORT name is the built-in's FULL id, so one skip
+/// silences both. The stage column already says which trigger this is.
+fn name_says_its_trigger(name: &str) -> bool {
+    crate::TRIGGERS
+        .iter()
+        .any(|t| name == *t || name.starts_with(&format!("{t}-")))
 }
 
 /// The four leading tokens and the untouched remainder, or `None` when the line
@@ -453,18 +509,26 @@ fn parse_line(lineno: usize, line: &str, earlier: &[Line]) -> Line {
     if declared.is_empty() {
         return fail(ParseError::MissingName);
     }
-    if name_is_taken(declared) {
+    // The stage is settled BEFORE the name is judged, because the identity
+    // being judged is `<trigger>-<name>` and there is no such thing without a
+    // trigger. Ordered the other way, a line with an unusable stage was refused
+    // for a name clash that could not be assessed yet.
+    let Some(stage) = stage else {
+        return fail(ParseError::BadStage(stage_tok.to_string()));
+    };
+    if name_says_its_trigger(declared) {
+        return fail(ParseError::TriggerInName(declared.to_string()));
+    }
+    let id = format!("{}-{}", stage.as_str(), declared);
+    if name_is_taken(&id) {
         return fail(ParseError::NameTaken(declared.to_string()));
     }
     if earlier
         .iter()
-        .any(|l| matches!(l, Line::Usable(d) if d.name == declared))
+        .any(|l| matches!(l, Line::Usable(d) if d.id() == id))
     {
         return fail(ParseError::Duplicate(declared.to_string()));
     }
-    let Some(stage) = stage else {
-        return fail(ParseError::BadStage(stage_tok.to_string()));
-    };
     let exts = match parse_scope(scope_tok) {
         Ok(e) => e,
         Err(why) => return fail(why),
@@ -531,7 +595,13 @@ impl From<Line> for External {
             },
             Err(why) => Kind::Unusable { why },
         };
-        External { name, stage, kind }
+        let id = format!("{}-{}", stage.as_str(), name);
+        External {
+            id,
+            short_name: name,
+            stage,
+            kind,
+        }
     }
 }
 
@@ -581,11 +651,10 @@ pub(crate) fn externals() -> &'static [External] {
             Some(reason) => declared
                 .into_iter()
                 .map(|external| External {
-                    name: external.name,
-                    stage: external.stage,
                     kind: Kind::Unusable {
                         why: reason.to_string(),
                     },
+                    ..external
                 })
                 .collect(),
         }
@@ -724,33 +793,108 @@ mod tests {
         assert_eq!(why(&l), ParseError::MissingFields);
     }
 
-    /// An external must not be able to take a built-in's name — it would either
+    /// An external must not be able to take a built-in's id — it would either
     /// shadow `pre-push-branch-protect` or silently lose to it, and neither is
     /// something a repository should be able to do by editing a text file.
+    ///
+    /// Judged on the id, so the same declaration is refused on one trigger and
+    /// accepted on the other. That is not a loophole: `pre-push-clippy` is a
+    /// different check from `pre-commit-clippy`, and nothing is shadowed.
     #[test]
-    fn a_built_in_name_is_refused() {
+    fn a_built_in_id_is_refused() {
         assert_eq!(
-            why(&one("pre-commit pre-commit-clippy *.rs block x\n")),
-            ParseError::NameTaken("pre-commit-clippy".into())
+            why(&one("pre-commit clippy *.rs block x\n")),
+            ParseError::NameTaken("clippy".into())
         );
-        // Including the four names git itself invokes.
+        assert!(matches!(
+            one("pre-push clippy *.rs block x\n"),
+            Line::Usable(_)
+        ));
+        // And a pre-push built-in is protected on pre-push, not on pre-commit,
+        // for the same reason.
         assert_eq!(
-            why(&one("pre-commit pre-push * block x\n")),
-            ParseError::NameTaken("pre-push".into())
+            why(&one("pre-push branch-protect * block x\n")),
+            ParseError::NameTaken("branch-protect".into())
         );
+        assert!(matches!(
+            one("pre-commit branch-protect * block x\n"),
+            Line::Usable(_)
+        ));
     }
 
-    /// Two USABLE lines with one name: the second cannot be addressed by
+    /// The stage column says which trigger a line is for. Saying it again in
+    /// the name is the one way to make an id ambiguous: `pre-commit-clippy` as
+    /// a NAME is a check whose short name is the built-in's full id, so one
+    /// `hook.skip` would silence both.
+    #[test]
+    fn a_name_that_says_its_own_trigger_is_refused() {
+        for name in ["pre-commit", "pre-push", "pre-commit-clippy", "pre-push-x"] {
+            assert_eq!(
+                why(&one(&format!("pre-commit {name} * block x\n"))),
+                ParseError::TriggerInName(name.into()),
+                "{name}"
+            );
+        }
+        // A name that merely begins with the same letters is fine — the trigger
+        // has to be followed by the separator to count.
+        assert!(matches!(
+            one("pre-commit pre-commitish * block x\n"),
+            Line::Usable(_)
+        ));
+    }
+
+    /// Two USABLE lines with one ID: the second cannot be addressed by
     /// `hook.skip` or by a severity override, so it is refused.
     #[test]
-    fn a_duplicate_name_is_refused() {
+    fn a_duplicate_id_is_refused() {
         let v = parse_lines(
             "pre-commit smoke * block a\n\
-             pre-push   smoke * block b\n",
+             pre-commit smoke * block b\n",
         );
         assert_eq!(v.len(), 2);
-        assert_eq!(usable(&v[0]).name, "smoke");
+        assert_eq!(usable(&v[0]).id(), "pre-commit-smoke");
         assert_eq!(why(&v[1]), ParseError::Duplicate("smoke".into()));
+    }
+
+    /// The same name on both triggers is TWO checks, and this used to refuse
+    /// the second. Somebody wanting a `show-unicorn` on commit and on push had
+    /// no way to write it, and no way to skip or downgrade one without the
+    /// other — the bare name could not tell them apart.
+    #[test]
+    fn the_same_name_on_two_triggers_is_allowed() {
+        let v = parse_lines(
+            "pre-commit show-unicorn * block a\n\
+             pre-push   show-unicorn * block b\n",
+        );
+        assert_eq!(v.len(), 2);
+        assert_eq!(usable(&v[0]).id(), "pre-commit-show-unicorn");
+        assert_eq!(usable(&v[1]).id(), "pre-push-show-unicorn");
+
+        // And each is separately addressable, while the short name takes both —
+        // which is the whole vocabulary, applied to declared checks.
+        for (id, only) in [
+            ("pre-commit-show-unicorn", "pre-push-show-unicorn"),
+            ("pre-push-show-unicorn", "pre-commit-show-unicorn"),
+        ] {
+            assert!(crate::skip_suppresses(id, id));
+            assert!(!crate::skip_suppresses(only, id));
+        }
+        assert!(crate::skip_suppresses(
+            "pre-commit-show-unicorn",
+            "show-unicorn"
+        ));
+        assert!(crate::skip_suppresses(
+            "pre-push-show-unicorn",
+            "show-unicorn"
+        ));
+        assert!(crate::skip_suppresses(
+            "pre-commit-show-unicorn",
+            "pre-commit"
+        ));
+        assert!(!crate::skip_suppresses(
+            "pre-push-show-unicorn",
+            "pre-commit"
+        ));
     }
 
     /// A line that cannot run does not RESERVE its name.
@@ -836,7 +980,12 @@ mod tests {
         let externals = parse(text);
         assert_eq!(lines.len(), externals.len());
         for (l, e) in lines.iter().zip(&externals) {
-            assert_eq!(l.name(), e.name());
+            assert_eq!(l.id(), e.name(), "the id is what a check answers to");
+            assert_eq!(
+                l.name(),
+                e.short_name,
+                "and the short name is what it is called"
+            );
             assert_eq!(l.stage(), e.stage());
             assert_eq!(
                 l.broken().is_some(),

@@ -488,7 +488,7 @@ pub fn lookup(name: &str) -> Option<HookFn> {
     if CHECKS.iter().any(|check| check.name == name)
         || crate::manifest::externals()
             .iter()
-            .any(|external| external.name == name)
+            .any(|external| external.id == name)
     {
         return Some(|ctx: &Ctx| {
             let check = one_named(ctx.name).expect("checked above");
@@ -510,7 +510,7 @@ pub fn one_named(name: &str) -> Option<&'static dyn Check> {
     }
     crate::manifest::externals()
         .iter()
-        .find(|external| external.name == name)
+        .find(|external| external.id == name)
         .map(|external| external as &dyn Check)
 }
 
