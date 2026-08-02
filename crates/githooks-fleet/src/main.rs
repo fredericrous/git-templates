@@ -231,7 +231,14 @@ fn main() -> ExitCode {
                 let ours = std::fs::read_to_string(&path)
                     .map(|t| githooks_runtime::install::is_our_shim(&t))
                     .unwrap_or(false);
-                if ours && std::fs::remove_file(&path).is_ok() {
+                // AND not tracked: the same guard `fix`/`apply` treat as
+                // mandatory before any removal, for the same reason —
+                // `.git/hooks` reached through a symlinked template dir can
+                // resolve into a tracked checkout, and `is_our_shim` alone
+                // does not know that. This path deletes independently of
+                // `fix::plan`/`apply::apply`, so it must repeat the check
+                // rather than rely on going through them.
+                if ours && !fix::is_tracked(&path) && std::fs::remove_file(&path).is_ok() {
                     here += 1;
                 }
             }
