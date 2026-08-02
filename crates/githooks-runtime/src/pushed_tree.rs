@@ -53,7 +53,7 @@ impl PushedTree {
     /// directory: `set_current_dir` is process-global, so a test that changed
     /// it would race every other test in the binary.
     pub fn create(repo: &Path, tip: &str) -> Option<PushedTree> {
-        let base = std::env::temp_dir().join(format!("githooks-push-{}", std::process::id()));
+        let base = std::env::temp_dir().join(unique_name("githooks-push"));
         let _ = std::fs::remove_dir_all(&base);
         let path = base.clone();
         let ok = crate::git::succeeds(&[
@@ -75,6 +75,30 @@ impl PushedTree {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// `<prefix>-<pid>-<hash>`: the pid stays for a human correlating a leftover
+/// directory with a hung process, but the pid ALONE is what made the old name
+/// guessable — `ps` hands it to anyone on the box — which matters because
+/// this path is `remove_dir_all`'d before it is used. A pre-planted symlink
+/// at a predictable name turns that into a race with whatever the symlink
+/// points at. No dependency for real randomness here (this crate ships
+/// dependency-free), so the tail is a hash of the wall clock and the pid
+/// through `RandomState`'s own OS-seeded key — enough that guessing it in
+/// advance is impractical, not a cryptographic promise.
+fn unique_name(prefix: &str) -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hash, Hasher};
+
+    let pid = std::process::id();
+    let mut hasher = RandomState::new().build_hasher();
+    pid.hash(&mut hasher);
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .hash(&mut hasher);
+    format!("{prefix}-{pid}-{:016x}", hasher.finish())
 }
 
 impl Drop for PushedTree {
@@ -141,6 +165,16 @@ pub fn where_to_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point: two calls must not name the same path, or a
+    /// predictable name is right back to being predictable.
+    #[test]
+    fn unique_name_does_not_repeat() {
+        let a = unique_name("githooks-push");
+        let b = unique_name("githooks-push");
+        assert_ne!(a, b);
+        assert!(a.starts_with("githooks-push-"));
+    }
 
     fn repo(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("pushed-{name}-{}", std::process::id()));
