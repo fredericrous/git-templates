@@ -129,6 +129,48 @@ fn installing_twice_is_idempotent() {
     assert_eq!(first, second, "a second install changed the shim");
 }
 
+/// Hooks are SHARED across every worktree of a repository — git dispatches
+/// them from the common directory, never a linked worktree's own private
+/// gitdir. An install run from inside a linked worktree must bake shims where
+/// git will actually look, not into `.git/worktrees/<name>/hooks`, which git
+/// never reads and which would make the install silently inert.
+#[test]
+fn installing_from_a_linked_worktree_bakes_into_the_shared_hooks_dir() {
+    let s = Sandbox::new("worktree");
+    let repo = s.path("repo");
+    init_repo(&repo);
+    git(&repo, &["commit", "--allow-empty", "-qm", "seed"]);
+    let wt = s.path("repo-wt");
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "add", "-q", "-b", "feature"])
+        .arg(&wt)
+        .output()
+        .expect("git worktree add");
+    assert!(
+        out.status.success(),
+        "git worktree add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let (code, out) = s.install(&wt);
+    assert_eq!(code, 0, "{out}");
+    for name in ["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"] {
+        assert!(
+            repo.join(".git/hooks").join(name).is_file(),
+            "{name} missing from the common hooks dir:\n{out}"
+        );
+    }
+    // The worktree's own PRIVATE gitdir — `wt.join(".git")` is a FILE, not a
+    // directory, so this is where a shim baked at `--git-dir`-plus-"hooks"
+    // would have actually landed: inert, since git never dispatches from here.
+    assert!(
+        !repo.join(".git/worktrees/feature/hooks").exists(),
+        "baked into the worktree-private gitdir instead of the shared one"
+    );
+}
+
 /// The incident, reproduced: the XDG path is a SYMLINK to a checkout, so
 /// "installing" there means overwriting tracked source. It must refuse, and say
 /// so, and leave every tracked file exactly as it was.

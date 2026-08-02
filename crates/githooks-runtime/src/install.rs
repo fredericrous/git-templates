@@ -364,16 +364,28 @@ fn populate_template_dir(binary: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Where git will actually look for hooks in the repository we are standing
+/// in — never `--git-dir` plus `join("hooks")`. For the main worktree the two
+/// agree, but hooks are explicitly SHARED across every worktree, unlike
+/// `MERGE_HEAD` and friends: a linked worktree's `--git-dir` is its own
+/// PRIVATE gitdir, so joining "hooks" onto it names a directory git never
+/// dispatches from, and a shim baked there is inert — installed, and never
+/// run. `--git-path hooks` is the question actually being asked, and git
+/// itself resolves the worktree case correctly.
+fn repo_hooks_dir() -> Option<PathBuf> {
+    crate::git::stdout(&["rev-parse", "--path-format=absolute", "--git-path", "hooks"])
+        .map(PathBuf::from)
+}
+
 /// Bake the shims into the repository we are standing in, if we are in one.
 fn bake_repo_hooks(binary: &str, force: bool) -> Result<(), String> {
-    let Some(git_dir) = crate::git::stdout(&["rev-parse", "--git-dir"]) else {
+    let Some(hooks) = repo_hooks_dir() else {
         println!(
             "{} not inside a git repository — no repo hooks written.",
             warning_sign()
         );
         return Ok(());
     };
-    let hooks = PathBuf::from(git_dir).join("hooks");
     let _ = std::fs::create_dir_all(&hooks);
 
     // Fail closed, and for the whole repository rather than per file: a partial
@@ -408,10 +420,9 @@ fn bake_repo_hooks(binary: &str, force: bool) -> Result<(), String> {
 ///   reinstall should not silently forget that they disabled a check;
 /// - the binary goes only when asked, because other repositories are using it.
 pub fn uninstall(remove_binary: bool) -> Result<(), String> {
-    let Some(git_dir) = crate::git::stdout(&["rev-parse", "--git-dir"]) else {
+    let Some(hooks) = repo_hooks_dir() else {
         return Err("not inside a git repository".to_string());
     };
-    let hooks = PathBuf::from(git_dir).join("hooks");
 
     let mut removed = 0usize;
     let mut foreign: Vec<&str> = Vec::new();
