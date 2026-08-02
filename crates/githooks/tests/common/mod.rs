@@ -36,17 +36,25 @@ impl Repo {
     /// `--template=` (empty) matters: without it `git init` copies the
     /// machine's own hooks in, and a test would exercise those instead of the
     /// binary under test. That bit the Windows smoke before it was noticed.
+    ///
+    /// `--initial-branch=main` at INIT time, not `git config init.defaultBranch`
+    /// afterward — that config key only governs FUTURE `git init`/`git clone`
+    /// calls, so setting it after this repo already exists changes nothing.
+    /// Whatever the runner's own git build defaults to otherwise (still
+    /// `master` on plenty of them) then decides the branch name instead, and a
+    /// test that pushes the literal branch `main` silently pushes a ref that
+    /// does not exist — discovered when the CI job with no global
+    /// `init.defaultBranch` step hit exactly that.
     pub fn new() -> Self {
         let dir = std::env::temp_dir().join(unique());
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp repo");
         let r = Repo { dir };
-        r.git(&["init", "-q", "--template=", "."]);
+        r.git(&["init", "-q", "--template=", "--initial-branch=main", "."]);
         r.git(&["config", "user.email", "test@example.com"]);
         r.git(&["config", "user.name", "test"]);
         // Keep the tests independent of the developer's global config.
         r.git(&["config", "commit.gpgsign", "false"]);
-        r.git(&["config", "init.defaultBranch", "main"]);
         // Git for Windows converts line endings on checkout by default. A test
         // that writes "a\n", stages it and then compares the file byte for byte
         // would be asserting git's newline policy rather than the behaviour

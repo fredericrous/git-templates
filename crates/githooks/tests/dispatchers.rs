@@ -396,13 +396,13 @@ fn list_distinguishes_skipped_from_inert() {
 // ---- list --json ---------------------------------------------------------
 
 fn list_json(r: &Repo, extra: &[&str]) -> serde_json::Value {
-    let out = Command::new(env!("CARGO_BIN_EXE_githooks"))
-        .arg("list")
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_githooks"));
+    cmd.arg("list")
         .arg("--json")
         .args(extra)
-        .current_dir(&r.dir)
-        .output()
-        .expect("run");
+        .current_dir(&r.dir);
+    Repo::strip_git_env_impl(&mut cmd);
+    let out = cmd.output().expect("run");
     serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
         panic!(
             "not valid JSON: {e}\n{}",
