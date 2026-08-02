@@ -159,6 +159,79 @@ fn nothing_is_stashed_mid_merge() {
     assert!(!r.path(".git/githooks-held").exists());
 }
 
+/// Trust a declared manifest non-interactively, the way `external.rs` does —
+/// `githooks trust` performs the decision outright when run directly, unlike
+/// `install`'s offer, which needs a confirming tty.
+#[cfg(unix)]
+fn trust(r: &Repo) {
+    let out = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("trust")
+        .current_dir(&r.dir)
+        .output()
+        .expect("githooks trust");
+    assert!(out.status.success(), "could not trust the manifest");
+}
+
+/// Ctrl-C DURING pre-commit, not after: this is the exact window the signal
+/// handler exists for, and the one a handler that itself runs `git`,
+/// allocates and prints risks deadlocking in — if the interrupted thread
+/// already held the allocator's or stdio's lock, non-async-signal-safe code
+/// running IN the handler would wait on it forever.
+///
+/// A declared `sleep 2` check is the deterministic way to guarantee the child
+/// is still mid-run when the signal arrives: it opens a wide, fixed window
+/// (send SIGINT any time in the first ~1.8s) rather than racing a real check's
+/// unpredictable, sub-millisecond duration.
+#[cfg(unix)]
+#[test]
+fn ctrl_c_mid_run_still_restores_and_dies_by_the_signal() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let r = Repo::new();
+    r.stage(".githooks.conf", "pre-commit  slowpoke  *  warn  sleep 2\n");
+    trust(&r);
+    r.stage("x.json", VALID);
+    r.commit("chore: seed");
+    r.stage("x.json", VALID);
+    r.write("x.json", BROKEN);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("--hooks-dir")
+        .arg(r.path(".git/hooks"))
+        .arg("pre-commit")
+        .current_dir(&r.dir)
+        .spawn()
+        .expect("spawn githooks pre-commit");
+
+    // Comfortably inside the 2s window the declared check guarantees, and
+    // comfortably past the moment `StagedOnly::enter` has already run —
+    // parking the unstaged bytes and installing the handler happens before
+    // any check, declared or built-in, starts.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let status_kill = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .expect("send SIGINT");
+    assert!(status_kill.success(), "could not signal the child");
+
+    let status = child.wait().expect("wait on the signalled child");
+    assert_eq!(
+        status.signal(),
+        Some(2),
+        "must die BY SIGINT (re-raised with the default handler), not exit some other way: {status:?}"
+    );
+    assert_eq!(
+        tree(&r, "x.json"),
+        BROKEN,
+        "unstaged work was not restored after Ctrl-C"
+    );
+    assert!(
+        !r.path(".git/githooks-held").exists(),
+        "held files left behind after the signal-handler restore"
+    );
+}
+
 /// `githooks restore` is the recovery path for when even the signal handler was
 /// interrupted.
 #[test]
