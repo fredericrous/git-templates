@@ -276,11 +276,24 @@ fn no_color_suppresses_every_escape_sequence() {
     let r = Repo::new();
     r.stage("a.txt", "x\n");
 
-    let with_colour = r.hook("pre-commit", &[]);
+    // `r.hook()` inherits this process's environment, and a caller running
+    // with `NO_COLOR=1` set — or `TERM=dumb` — would make the "colour is on
+    // by default" premise below false through no fault of the code under
+    // test. Pin both explicitly rather than trusting whatever the shell that
+    // happens to run `cargo test` left behind.
+    let with_colour = std::process::Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("--hooks-dir")
+        .arg(r.path(".git/hooks"))
+        .arg("pre-commit")
+        .current_dir(&r.dir)
+        .env_remove("NO_COLOR")
+        .env("TERM", "xterm-256color")
+        .output()
+        .expect("run");
+    let with_colour_stdout = String::from_utf8_lossy(&with_colour.stdout).into_owned();
     assert!(
-        with_colour.stdout.contains('\u{1b}'),
-        "colour is on by default: {:?}",
-        with_colour.stdout
+        with_colour_stdout.contains('\u{1b}'),
+        "colour is on by default: {with_colour_stdout:?}"
     );
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_githooks"))
