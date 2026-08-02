@@ -354,6 +354,9 @@ fn report_fix(plans: &[fix::FixPlan]) {
         for w in p.write.iter().filter(|w| w.changes) {
             println!("  write {}", w.path.display());
         }
+        if let Some(w) = &p.write_agents_md {
+            println!("  write {}", w.path.display());
+        }
     }
 
     println!();
@@ -369,7 +372,8 @@ fn report_fix(plans: &[fix::FixPlan]) {
         acting.iter().map(|p| p.remove.len()).sum::<usize>(),
         acting
             .iter()
-            .map(|p| p.write.iter().filter(|w| w.changes).count())
+            .map(|p| p.write.iter().filter(|w| w.changes).count()
+                + usize::from(p.write_agents_md.is_some()))
             .sum::<usize>()
     );
     println!();
