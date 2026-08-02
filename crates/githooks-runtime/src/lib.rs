@@ -18,6 +18,7 @@
 //! githooks --hooks-dir <dir> pre-commit [args…]
 //! ```
 
+pub mod agents_md;
 pub mod check;
 pub mod dispatch;
 pub mod git;
@@ -131,15 +132,241 @@ pub fn skip_suppresses(check: &str, skip: &str) -> bool {
     names_check(check, skip).is_some()
 }
 
-/// Print every check: stage, scope, and whether it would fire in this
-/// repository.
+/// One check, as reported by `githooks list`.
 ///
-/// "Why didn't prettier run?" was previously a code-reading exercise. The
-/// answer is a check's `Scope` evaluated against the repo's tracked files, so
-/// the tool can simply say it.
-pub fn list_checks() {
+/// Deliberately flat — this is what gets rendered as text or serialised to
+/// JSON, and a reader (human or agent) parsing the latter should not have to
+/// chase nested objects for a yes/no question.
+#[derive(Debug, Clone)]
+pub struct CheckListing {
+    /// `<trigger>-<name>` — what `hook.skip` and `githooks.severity.<key>`
+    /// resolve against.
+    pub id: String,
+    pub short_name: String,
+    pub stage: check::Stage,
+    pub source: Source,
+    /// What the check (or manifest line) declared.
+    pub declared_severity: check::Severity,
+    /// What `registry::Overrides::of` would actually apply — NOT the same as
+    /// `declared_severity` once `githooks.severity.*` is configured. This is
+    /// the one thing the old text-only `list_checks` never reported, and the
+    /// exact "declared vs. effective" gap that caused a real bug in the
+    /// fleet's own severity column (see `githooks-fleet/src/severities.rs`).
+    pub effective_severity: check::Severity,
+    pub severity_overridden: bool,
+    pub fix: check::Fix,
+    pub status: Status,
+    /// Empty when `status == Status::Runs`; the same prose the text output
+    /// always showed for the other three states.
+    pub reason: String,
+    pub scope_files: Vec<String>,
+    pub scope_opt_in: Vec<String>,
+    /// `Some` only for a declared, `Runnable` external — a builtin has no
+    /// command to show, and an `Unusable` external never got far enough to
+    /// have one.
+    pub command: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Builtin,
+    Declared,
+}
+
+/// The four states the text output's glyphs already named. Not called
+/// `Outcome` — that type means what a check concluded when it RAN; this means
+/// whether it would run at all, the same question `Scope::matches` answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    Runs,
+    Inert,
+    Skipped,
+    Unusable,
+}
+
+pub struct ListOptions {
+    pub json: bool,
+    pub stage: Option<check::Stage>,
+    pub pushed: bool,
+}
+
+/// Every check that would be considered for `stage_filter` (or both stages,
+/// when `None`), evaluated against `paths`.
+///
+/// Reads `hook.skip` and `githooks.severity.*` from the current repo's git
+/// config, same as the original `list_checks` did — this is why it is not
+/// unit-tested in isolation; see `hooks/pull_rebase.rs`'s own split between
+/// pure helpers (unit-tested) and config-dependent behaviour (integration
+/// tested) for the precedent.
+pub fn gather_checks(stage_filter: Option<check::Stage>, paths: &[String]) -> Vec<CheckListing> {
     use crate::check::Stage;
-    let paths: Vec<String> = Command::new("git")
+    let stages: Vec<Stage> = match stage_filter {
+        Some(s) => vec![s],
+        None => vec![Stage::PreCommit, Stage::PrePush],
+    };
+    let skips = configured_skips();
+    let overrides = registry::Overrides::read();
+    let externals_by_id: std::collections::BTreeMap<&str, &manifest::External> =
+        manifest::externals()
+            .iter()
+            .map(|e| (e.id.as_str(), e))
+            .collect();
+
+    let mut out = Vec::new();
+    for stage in stages {
+        // Externals are listed here too, and marked, because the question
+        // this command answers — "would this run here?" — is asked most
+        // often about the check somebody just added to `.githooks.conf`.
+        for check in registry::all_stage_checks(stage) {
+            let name = check.name();
+            let external = externals_by_id.get(name).copied();
+            let skipped = skips.iter().any(|s| skip_suppresses(name, s));
+            let applies = check.scope().matches(paths);
+
+            let unusable_why = external.and_then(|e| match &e.kind {
+                manifest::Kind::Unusable { why } => Some(why.as_str()),
+                manifest::Kind::Runnable { .. } => None,
+            });
+            // Four states: a check that is correctly silent must never look
+            // like one that is disabled, and neither must look like one
+            // whose declaration could not be read.
+            let (status, reason) = if let Some(w) = unusable_why {
+                (Status::Unusable, format!("{} {w}", manifest::MANIFEST))
+            } else if skipped {
+                (Status::Skipped, "skipped via hook.skip".to_string())
+            } else if applies {
+                (Status::Runs, String::new())
+            } else {
+                (
+                    Status::Inert,
+                    format!("inert here — needs {}", describe(check.scope())),
+                )
+            };
+
+            let command = external.and_then(|e| match &e.kind {
+                manifest::Kind::Runnable { program, args, .. } => Some(
+                    std::iter::once(program.as_str())
+                        .chain(args.iter().map(String::as_str))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ),
+                manifest::Kind::Unusable { .. } => None,
+            });
+
+            let declared_severity = check.severity();
+            let effective_severity = overrides.of(check);
+            out.push(CheckListing {
+                id: name.to_string(),
+                short_name: short_name(name).to_string(),
+                stage,
+                source: if external.is_some() {
+                    Source::Declared
+                } else {
+                    Source::Builtin
+                },
+                declared_severity,
+                effective_severity,
+                severity_overridden: declared_severity != effective_severity,
+                fix: check.fix(),
+                status,
+                reason,
+                scope_files: check.scope().files.iter().map(|s| s.to_string()).collect(),
+                scope_opt_in: check.scope().opt_in.iter().map(|s| s.to_string()).collect(),
+                command,
+            });
+        }
+    }
+    out
+}
+
+/// BYTE-IDENTICAL to what `list_checks` printed before it grew `--json`.
+/// `listings` is already stage-grouped (`gather_checks` iterates stage by
+/// stage), so a heading prints exactly once per stage encountered, in the
+/// same order.
+pub fn print_text(listings: &[CheckListing]) {
+    let mut current: Option<check::Stage> = None;
+    for l in listings {
+        if current != Some(l.stage) {
+            println!("{}", ui::highlight(l.stage.as_str()));
+            current = Some(l.stage);
+        }
+        let glyph = match l.status {
+            Status::Unusable => '✗',
+            Status::Skipped => '⊘',
+            Status::Runs => '●',
+            Status::Inert => '○',
+        };
+        // The SHORT name: this loop is already inside a `pre-commit` /
+        // `pre-push` heading, so printing the trigger on all twenty rows
+        // restates the heading twenty times and pushes the reason — the part
+        // that differs per row — eleven columns to the right.
+        //
+        // Where a check CAME FROM belongs next to its name, not appended
+        // after a reason that is often empty. A reader scanning this list
+        // wants to know which of these their repository added.
+        let label = match l.source {
+            Source::Declared => format!("{} (declared)", l.short_name),
+            Source::Builtin => l.short_name.clone(),
+        };
+        println!("  {glyph} {label:<26} {}", l.reason);
+    }
+    println!();
+    println!("  ● runs here   ○ inert   ⊘ skipped via hook.skip   ✗ declaration unusable");
+}
+
+/// `{"stage_filter": ..., "pushed": ..., "checks": [...]}` — an object, not a
+/// bare array, so a field can be added later without changing the top-level
+/// shape.
+pub fn print_json(stage_filter: Option<check::Stage>, pushed: bool, listings: &[CheckListing]) {
+    let checks: Vec<String> = listings
+        .iter()
+        .map(|l| {
+            json::object(&[
+                json::string_field("id", &l.id),
+                json::string_field("short_name", &l.short_name),
+                json::string_field("stage", l.stage.as_str()),
+                json::string_field(
+                    "source",
+                    match l.source {
+                        Source::Builtin => "builtin",
+                        Source::Declared => "declared",
+                    },
+                ),
+                json::string_field("declared_severity", l.declared_severity.as_str()),
+                json::string_field("effective_severity", l.effective_severity.as_str()),
+                json::bool_field("severity_overridden", l.severity_overridden),
+                json::string_field("fix", l.fix.as_str()),
+                json::string_field(
+                    "status",
+                    match l.status {
+                        Status::Runs => "runs",
+                        Status::Inert => "inert",
+                        Status::Skipped => "skipped",
+                        Status::Unusable => "unusable",
+                    },
+                ),
+                json::string_field("reason", &l.reason),
+                json::string_array_field("scope_files", &l.scope_files),
+                json::string_array_field("scope_opt_in", &l.scope_opt_in),
+                json::opt_string_field("command", l.command.as_deref()),
+            ])
+        })
+        .collect();
+
+    println!(
+        "{}",
+        json::object(&[
+            json::opt_string_field("stage_filter", stage_filter.map(check::Stage::as_str)),
+            json::bool_field("pushed", pushed),
+            format!("\"checks\":{}", json::array(&checks)),
+        ])
+    );
+}
+
+/// `git ls-files` — every check's default scope evaluation, unchanged from
+/// what `list_checks` always did.
+fn tracked_paths() -> Vec<String> {
+    Command::new("git")
         .args(["ls-files"])
         .output()
         .ok()
@@ -149,65 +376,71 @@ pub fn list_checks() {
                 .map(str::to_owned)
                 .collect()
         })
-        .unwrap_or_default();
-    let skips = configured_skips();
-
-    let broken: std::collections::BTreeMap<&str, &str> = manifest::externals()
-        .iter()
-        .filter_map(|external| match &external.kind {
-            manifest::Kind::Unusable { why } => Some((external.id.as_str(), why.as_str())),
-            manifest::Kind::Runnable { .. } => None,
-        })
-        .collect();
-
-    for stage in [Stage::PreCommit, Stage::PrePush] {
-        println!("{}", ui::highlight(stage.as_str()));
-        // Externals are listed here too, and marked, because the question this
-        // command answers — "would this run here?" — is asked most often about
-        // the check somebody just added to `.githooks.conf`.
-        for check in registry::all_stage_checks(stage) {
-            let name = check.name();
-            let skipped = skips.iter().any(|s| skip_suppresses(name, s));
-            let applies = check.scope().matches(&paths);
-            // Four states, four glyphs: a check that is correctly silent must
-            // never look like one that is disabled, and neither must look like
-            // one whose declaration could not be read.
-            let (glyph, why) = if let Some(w) = broken.get(name) {
-                ('✗', format!("{} {w}", manifest::MANIFEST))
-            } else if skipped {
-                ('⊘', "skipped via hook.skip".to_string())
-            } else if applies {
-                ('●', String::new())
-            } else {
-                (
-                    '○',
-                    format!("inert here — needs {}", describe(check.scope())),
-                )
-            };
-            // The SHORT name: this loop is already inside a `pre-commit` /
-            // `pre-push` heading, so printing the trigger on all twenty rows
-            // restates the heading twenty times and pushes the reason — the
-            // part that differs per row — eleven columns to the right.
-            //
-            // Where a check CAME FROM belongs next to its name, not appended
-            // after a reason that is often empty. A reader scanning this list
-            // wants to know which of these their repository added.
-            let label = if is_external(name) {
-                format!("{} (declared)", short_name(name))
-            } else {
-                short_name(name).to_string()
-            };
-            println!("  {glyph} {label:<26} {why}");
-        }
-    }
-    println!();
-    println!("  ● runs here   ○ inert   ⊘ skipped via hook.skip   ✗ declaration unusable");
+        .unwrap_or_default()
 }
 
-fn is_external(name: &str) -> bool {
-    manifest::externals()
-        .iter()
-        .any(|external| external.id == name)
+/// The pushed-range file list, computed standalone rather than from a real
+/// pre-push invocation's stdin.
+///
+/// Reuses `pushrefs::changed_files`, which already handles zero-oid deletes,
+/// merge commits and the `--stdin` trailing-newline edge case — this only
+/// SYNTHESISES the one `PushRef` a standalone invocation has no other way to
+/// obtain.
+fn pushed_paths() -> Result<Vec<String>, String> {
+    // Same precedent as `hooks/pull_rebase.rs`: `None` means "no upstream",
+    // i.e. a branch that has never been pushed, and that is not an error —
+    // just nothing this flag can answer yet.
+    let Some(upstream) =
+        git::stdout(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+    else {
+        return Err(
+            "no upstream configured for the current branch — nothing has been \
+             pushed yet, so --pushed has nothing to diff against"
+                .to_string(),
+        );
+    };
+    let Some(local_oid) = git::stdout(&["rev-parse", "HEAD"]) else {
+        return Err("could not resolve HEAD".to_string());
+    };
+    let Some(remote_oid) = git::stdout(&["rev-parse", "@{u}"]) else {
+        return Err(format!("could not resolve upstream {upstream}"));
+    };
+    let local_ref =
+        git::stdout(&["symbolic-ref", "-q", "HEAD"]).unwrap_or_else(|| "HEAD".to_string());
+    let synthetic = pushrefs::PushRef {
+        local_ref: local_ref.clone(),
+        local_oid,
+        remote_ref: local_ref,
+        remote_oid,
+    };
+    Ok(pushrefs::changed_files(&[synthetic]))
+}
+
+/// `githooks list`: what would run here, and why — as prose, or as
+/// `--json` for a reader that wants to parse it.
+pub fn list_checks(opts: ListOptions) -> i32 {
+    let paths = if opts.pushed {
+        match pushed_paths() {
+            Ok(p) => p,
+            Err(msg) => {
+                if opts.json {
+                    println!("{}", json::object(&[json::string_field("error", &msg)]));
+                } else {
+                    eprintln!("githooks: {msg}");
+                }
+                return 2;
+            }
+        }
+    } else {
+        tracked_paths()
+    };
+    let listings = gather_checks(opts.stage, &paths);
+    if opts.json {
+        print_json(opts.stage, opts.pushed, &listings);
+    } else {
+        print_text(&listings);
+    }
+    0
 }
 
 fn describe(s: crate::check::Scope) -> String {

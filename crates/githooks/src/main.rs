@@ -6,14 +6,17 @@
 //!
 //! ```text
 //! githooks --hooks-dir <dir> <hook-name> [args…]
-//! githooks list | install | uninstall [--binary] | trust [--show|--revoke]
+//! githooks list [--json] [--stage pre-commit|pre-push] [--pushed]
+//! githooks install | uninstall [--binary] | trust [--show|--revoke]
 //! githooks run [<check>] [--all-files] | restore
+//! githooks agents-md [--check] [--path <file>]
 //! ```
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use githooks_runtime::{pushrefs, registry};
+use githooks_runtime::check::Stage;
+use githooks_runtime::{pushrefs, registry, ListOptions};
 
 fn main() {
     let mut args = std::env::args_os().skip(1);
@@ -41,8 +44,21 @@ fn main() {
     // rather than the fleet tool because this is the binary installed
     // everywhere, and the question is asked about the repo you are standing in.
     if rest.first().is_some_and(|a| a == "list") || hook.as_deref() == Some("list") {
-        githooks_runtime::list_checks();
-        std::process::exit(0);
+        let json = rest.iter().any(|a| a == "--json");
+        let pushed = rest.iter().any(|a| a == "--pushed");
+        let stage = match stage_flag(&rest) {
+            Ok(s) => s,
+            Err(msg) => {
+                eprintln!("githooks: {msg}");
+                std::process::exit(2);
+            }
+        };
+        let code = githooks_runtime::list_checks(ListOptions {
+            json,
+            stage,
+            pushed,
+        });
+        std::process::exit(code);
     }
 
     // `githooks install` — was a Makefile recipe. It lives here so the guard
@@ -115,6 +131,51 @@ fn main() {
         });
     }
 
+    if rest.first().is_some_and(|a| a == "agents-md") || hook.as_deref() == Some("agents-md") {
+        let check_only = rest.iter().any(|a| a == "--check");
+        let path = path_flag(&rest).unwrap_or_else(|| {
+            PathBuf::from(githooks_runtime::hooks::common::repo_root()).join("AGENTS.md")
+        });
+        let code = if check_only {
+            match githooks_runtime::agents_md::check(&path) {
+                Ok(githooks_runtime::agents_md::CheckResult::NotPresent) => {
+                    println!(
+                        "{}: not present (opt-in — run without --check to add it)",
+                        path.display()
+                    );
+                    0
+                }
+                Ok(githooks_runtime::agents_md::CheckResult::MatchesGenerated) => {
+                    println!("{}: up to date", path.display());
+                    0
+                }
+                Ok(githooks_runtime::agents_md::CheckResult::Drifted) => {
+                    eprintln!(
+                        "{}: drifted from the generated block — run `githooks agents-md`",
+                        path.display()
+                    );
+                    1
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            }
+        } else {
+            match githooks_runtime::agents_md::write(&path) {
+                Ok(()) => {
+                    println!("wrote {}", path.display());
+                    0
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            }
+        };
+        std::process::exit(code);
+    }
+
     if rest.first().is_some_and(|a| a == "uninstall") || hook.as_deref() == Some("uninstall") {
         let also_binary = rest.iter().any(|a| a == "--binary");
         std::process::exit(match githooks_runtime::install::uninstall(also_binary) {
@@ -163,4 +224,38 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// `--stage <pre-commit|pre-push>` for `list`, ad hoc scanned like every other
+/// flag here — no parsing library, matching `trust.rs`'s `let flag = |f: &str|
+/// args.iter().any(|a| a == f);` idiom.
+fn stage_flag(rest: &[OsString]) -> Result<Option<Stage>, String> {
+    let mut iter = rest.iter();
+    while let Some(a) = iter.next() {
+        if a == "--stage" {
+            let v = iter
+                .next()
+                .and_then(|v| v.to_str())
+                .ok_or_else(|| "--stage requires a value".to_string())?;
+            return match v {
+                "pre-commit" => Ok(Some(Stage::PreCommit)),
+                "pre-push" => Ok(Some(Stage::PrePush)),
+                other => Err(format!(
+                    "--stage must be `pre-commit` or `pre-push`, got {other:?}"
+                )),
+            };
+        }
+    }
+    Ok(None)
+}
+
+/// `--path <file>` for `agents-md`.
+fn path_flag(rest: &[OsString]) -> Option<PathBuf> {
+    let mut iter = rest.iter();
+    while let Some(a) = iter.next() {
+        if a == "--path" {
+            return iter.next().map(PathBuf::from);
+        }
+    }
+    None
 }

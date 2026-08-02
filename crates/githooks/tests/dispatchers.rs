@@ -379,3 +379,184 @@ fn list_distinguishes_skipped_from_inert() {
     assert!(clippy.contains('⊘'), "expected the skip glyph: {clippy}");
     assert!(clippy.contains("hook.skip"), "{clippy}");
 }
+
+// ---- list --json ---------------------------------------------------------
+
+fn list_json(r: &Repo, extra: &[&str]) -> serde_json::Value {
+    let out = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("list")
+        .arg("--json")
+        .args(extra)
+        .current_dir(&r.dir)
+        .output()
+        .expect("run");
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "not valid JSON: {e}\n{}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    })
+}
+
+fn find_check<'a>(v: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+    v["checks"]
+        .as_array()
+        .expect("checks array")
+        .iter()
+        .find(|c| c["id"] == id)
+        .unwrap_or_else(|| panic!("{id} not found in {v}"))
+}
+
+#[test]
+fn list_json_shape_matches_text() {
+    let r = Repo::new();
+    r.stage("Cargo.toml", "[package]\nname=\"t\"\n");
+    r.stage("src/main.rs", "fn main() {}\n");
+    r.commit("feat: a rust repo");
+
+    let v = list_json(&r, &[]);
+    assert!(v["stage_filter"].is_null());
+    assert_eq!(v["pushed"], false);
+    assert!(!v["checks"].as_array().unwrap().is_empty());
+
+    let clippy = find_check(&v, "pre-commit-clippy");
+    assert_eq!(clippy["status"], "runs");
+    assert_eq!(clippy["source"], "builtin");
+    assert!(clippy["command"].is_null());
+
+    let ruff = find_check(&v, "pre-commit-ruff");
+    assert_eq!(ruff["status"], "inert");
+    assert!(ruff["reason"].as_str().unwrap().contains(".py"));
+}
+
+/// The one behaviour with no equivalent in the text output: a downgrade is
+/// invisible to `git diff` but must not be invisible here, or an agent
+/// reading only `declared_severity` would believe a downgraded check still
+/// blocks.
+#[test]
+fn list_json_reflects_severity_override() {
+    let r = Repo::new();
+    r.stage("Cargo.toml", "[package]\nname=\"t\"\n");
+    r.stage("src/main.rs", "fn main() {}\n");
+    r.commit("feat: a rust repo");
+    r.git(&["config", "githooks.severity.pre-commit-clippy", "warn"]);
+
+    let v = list_json(&r, &[]);
+    let clippy = find_check(&v, "pre-commit-clippy");
+    assert_eq!(clippy["declared_severity"], "block");
+    assert_eq!(clippy["effective_severity"], "warn");
+    assert_eq!(clippy["severity_overridden"], true);
+}
+
+#[test]
+fn list_json_stage_filter() {
+    let r = Repo::new();
+    r.stage("Cargo.toml", "[package]\nname=\"t\"\n");
+    r.commit("feat: init");
+
+    let v = list_json(&r, &["--stage", "pre-push"]);
+    assert_eq!(v["stage_filter"], "pre-push");
+    for c in v["checks"].as_array().unwrap() {
+        assert_eq!(c["stage"], "pre-push", "{c}");
+    }
+}
+
+#[test]
+fn list_json_rejects_an_unknown_stage() {
+    let r = Repo::new();
+    r.stage("a.txt", "x\n");
+    r.commit("init");
+    let out = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("list")
+        .arg("--stage")
+        .arg("nonsense")
+        .current_dir(&r.dir)
+        .output()
+        .expect("run");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--stage"));
+}
+
+#[test]
+fn list_json_declared_check_shows_its_command() {
+    let r = Repo::new();
+    r.stage(
+        ".githooks.conf",
+        "pre-commit  shellcheck  *.sh  block  scripts/lint.sh\n",
+    );
+    r.commit("chore: declare a check");
+    let trusted = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("trust")
+        .current_dir(&r.dir)
+        .output()
+        .expect("run");
+    assert!(trusted.status.success(), "{trusted:?}");
+
+    let v = list_json(&r, &[]);
+    let declared = find_check(&v, "pre-commit-shellcheck");
+    assert_eq!(declared["source"], "declared");
+    assert_eq!(declared["command"], "scripts/lint.sh");
+}
+
+#[test]
+fn list_pushed_no_upstream_fails_clearly() {
+    let r = Repo::new();
+    r.stage("a.txt", "x\n");
+    r.commit("init");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("list")
+        .arg("--json")
+        .arg("--pushed")
+        .current_dir(&r.dir)
+        .output()
+        .expect("run");
+    assert_eq!(out.status.code(), Some(2));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON on stdout");
+    assert!(v["error"].as_str().unwrap().contains("upstream"), "{v}");
+
+    let out_text = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("list")
+        .arg("--pushed")
+        .current_dir(&r.dir)
+        .output()
+        .expect("run");
+    assert_eq!(out_text.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out_text.stderr).contains("upstream"));
+}
+
+/// `--pushed` must reflect the pushed COMMIT RANGE, not the whole tracked
+/// tree — `--pushed` scopes to `@{u}..HEAD` (what the NEXT push carries), so
+/// a file already pushed in an EARLIER push and untouched since is in the
+/// tracked tree (unscoped `list` sees it) but not in this diff.
+#[test]
+fn list_pushed_reports_only_the_push_range() {
+    let r = Repo::new();
+    r.stage("src/main.rs", "fn main() {}\n");
+    r.stage("Cargo.toml", "[package]\nname=\"t\"\n");
+    r.commit("feat: add rust");
+    let origin = r.path(".git/test-origin.git");
+    r.git(&["init", "-q", "--bare", origin.to_str().unwrap()]);
+    r.git(&["remote", "add", "origin", origin.to_str().unwrap()]);
+    // The rust files are fully pushed here.
+    r.git(&["push", "-q", "--no-verify", "-u", "origin", "main"]);
+
+    // A later, unrelated commit — never touches a .rs file.
+    r.stage("notes.md", "hello\n");
+    r.commit("docs: add notes, not yet pushed");
+
+    let without = list_json(&r, &[]);
+    let with_pushed = list_json(&r, &["--pushed"]);
+
+    assert_eq!(
+        find_check(&without, "pre-commit-clippy")["status"],
+        "runs",
+        "src/main.rs is still tracked, so unscoped list must still see it: {without}"
+    );
+    assert_eq!(
+        find_check(&with_pushed, "pre-commit-clippy")["status"],
+        "inert",
+        "the pending push only carries notes.md — src/main.rs was pushed \
+         earlier and this diff must not resurrect it: {with_pushed}"
+    );
+}
