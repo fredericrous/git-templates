@@ -18,7 +18,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 
 use crate::checks;
-use crate::scan::{FleetScan, Repo};
+use crate::scan::{AgentsMdState, FleetScan, Repo};
 use crate::shim::{BakeState, ShimState, DISPATCHERS};
 
 /// What the screen is showing, and what a keystroke therefore means.
@@ -373,6 +373,17 @@ fn bake_word(b: &BakeState) -> &'static str {
     }
 }
 
+/// `-` for missing, not a colour: the pointer is opt-in, so a repo that never
+/// added it is not a problem the way a drifted one is.
+fn agents_md_word(s: AgentsMdState) -> &'static str {
+    match s {
+        AgentsMdState::UpToDate => "ok",
+        AgentsMdState::Missing => "-",
+        AgentsMdState::Drifted => "drift",
+        AgentsMdState::Malformed => "bad",
+    }
+}
+
 /// A redundant text summary of the same information the glyphs carry, so the
 /// screen survives NO_COLOR and colour vision deficiency.
 fn state_word(r: &Repo) -> String {
@@ -506,7 +517,7 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
 
     let header = if wide {
         vec![
-            "REPO", "SHIMS", "BAKE", "LANG", "SKIPS", "WARN", "DECL", "STATE",
+            "REPO", "SHIMS", "BAKE", "LANG", "SKIPS", "WARN", "DECL", "AGENTS", "STATE",
         ]
     } else if mid {
         vec!["REPO", "SHIMS", "BAKE", "STATE"]
@@ -569,6 +580,14 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
                     app.color,
                     if broken > 0 { Color::Red } else { Color::Reset },
                 )));
+                cells.push(Cell::from(agents_md_word(repo.agents_md)).style(tint(
+                    app.color,
+                    match repo.agents_md {
+                        AgentsMdState::UpToDate => Color::Green,
+                        AgentsMdState::Missing => Color::Reset,
+                        AgentsMdState::Drifted | AgentsMdState::Malformed => Color::Red,
+                    },
+                )));
             }
             let word = state_word(repo);
             let colour = if word.starts_with('x') {
@@ -592,6 +611,7 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
             Constraint::Length(6),
             Constraint::Length(5),
             Constraint::Length(6),
+            Constraint::Length(7),
             Constraint::Length(14),
         ]
     } else if mid {
@@ -788,6 +808,22 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
             }
         }
     }
+    lines.push(Line::from(""));
+    let (agents_md_word, agents_md_colour) = match repo.agents_md {
+        AgentsMdState::UpToDate => ("up to date".to_string(), Color::Green),
+        // Opt-in, so absence is not a problem — matches the neutral colour
+        // `declared`'s own "none" case would get, not the red a real drift
+        // does.
+        AgentsMdState::Missing => ("not present (opt-in)".to_string(), Color::Reset),
+        AgentsMdState::Drifted => ("drifted from the generated block".to_string(), Color::Red),
+        AgentsMdState::Malformed => (
+            "unpaired marker — fix or remove it by hand".to_string(),
+            Color::Red,
+        ),
+    };
+    lines.push(
+        Line::from(format!("AGENTS.md: {agents_md_word}")).style(tint(app.color, agents_md_colour)),
+    );
     lines.push(Line::from(""));
     lines.push(
         Line::from(format!("CHECKS ({})", crate::checks::all_checks().len()))
@@ -1084,6 +1120,7 @@ mod tests {
             severities: Vec::new(),
             declared: Vec::new(),
             trusted: None,
+            agents_md: AgentsMdState::Missing,
         }
     }
 
@@ -1489,6 +1526,42 @@ mod tests {
         };
         assert!(row("clean").contains(" 2 "), "{}", row("clean"));
         assert!(row("dirty").contains("2!1"), "{}", row("dirty"));
+    }
+
+    /// The AGENTS.md column is its own field, not folded into DECL or STATE —
+    /// a repo can have every check running and still be missing the pointer.
+    #[test]
+    fn the_agents_column_shows_each_repos_own_state() {
+        let mut current = repo("current", true);
+        current.agents_md = AgentsMdState::UpToDate;
+        let mut missing = repo("missing", true);
+        missing.agents_md = AgentsMdState::Missing;
+        let mut drifted = repo("drifted", true);
+        drifted.agents_md = AgentsMdState::Drifted;
+        let app = App::new(scan_with_repos(vec![current, missing, drifted]));
+        let out = render(&app, 140, 12);
+
+        assert!(out.contains("AGENTS"), "the column must exist: {out}");
+        let row = |needle: &str| {
+            out.lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert!(row("current").contains("ok"), "{}", row("current"));
+        assert!(row("missing").contains('-'), "{}", row("missing"));
+        assert!(row("drifted").contains("drift"), "{}", row("drifted"));
+    }
+
+    #[test]
+    fn detail_reports_the_agents_md_state() {
+        let mut r = repo("a", true);
+        r.agents_md = AgentsMdState::Drifted;
+        let mut app = App::new(scan_with_repos(vec![r]));
+        app.mode = Mode::Detail;
+        let out = render(&app, 120, 30);
+        assert!(out.contains("AGENTS.md"), "{out}");
+        assert!(out.contains("drifted"), "{out}");
     }
 
     /// Ninety-six repositories declare nothing. The columns and the pane must

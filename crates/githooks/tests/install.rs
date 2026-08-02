@@ -129,6 +129,48 @@ fn installing_twice_is_idempotent() {
     assert_eq!(first, second, "a second install changed the shim");
 }
 
+/// Hooks are SHARED across every worktree of a repository — git dispatches
+/// them from the common directory, never a linked worktree's own private
+/// gitdir. An install run from inside a linked worktree must bake shims where
+/// git will actually look, not into `.git/worktrees/<name>/hooks`, which git
+/// never reads and which would make the install silently inert.
+#[test]
+fn installing_from_a_linked_worktree_bakes_into_the_shared_hooks_dir() {
+    let s = Sandbox::new("worktree");
+    let repo = s.path("repo");
+    init_repo(&repo);
+    git(&repo, &["commit", "--allow-empty", "-qm", "seed"]);
+    let wt = s.path("repo-wt");
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "add", "-q", "-b", "feature"])
+        .arg(&wt)
+        .output()
+        .expect("git worktree add");
+    assert!(
+        out.status.success(),
+        "git worktree add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let (code, out) = s.install(&wt);
+    assert_eq!(code, 0, "{out}");
+    for name in ["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"] {
+        assert!(
+            repo.join(".git/hooks").join(name).is_file(),
+            "{name} missing from the common hooks dir:\n{out}"
+        );
+    }
+    // The worktree's own PRIVATE gitdir — `wt.join(".git")` is a FILE, not a
+    // directory, so this is where a shim baked at `--git-dir`-plus-"hooks"
+    // would have actually landed: inert, since git never dispatches from here.
+    assert!(
+        !repo.join(".git/worktrees/feature/hooks").exists(),
+        "baked into the worktree-private gitdir instead of the shared one"
+    );
+}
+
 /// The incident, reproduced: the XDG path is a SYMLINK to a checkout, so
 /// "installing" there means overwriting tracked source. It must refuse, and say
 /// so, and leave every tracked file exactly as it was.
@@ -370,5 +412,64 @@ fn the_installed_hooks_run_a_real_commit() {
     assert!(
         !text.contains("githooks binary not found"),
         "the installed shim could not resolve the binary:\n{text}"
+    );
+}
+
+// ---- offer_agents_md ------------------------------------------------------
+
+/// A test process has no controlling terminal, so `trust::confirm`'s
+/// `/dev/tty` open fails and it answers "no" — the same path a real
+/// non-interactive install takes. `install` must still succeed, and must not
+/// have written anything nobody agreed to.
+#[test]
+fn a_non_interactive_install_completes_without_writing_agents_md() {
+    let s = Sandbox::new("agents-md-noninteractive");
+    let repo = s.path("repo");
+    init_repo(&repo);
+
+    let (code, out) = s.install(&repo);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        !repo.join("AGENTS.md").exists(),
+        "an unanswered prompt must not write anything"
+    );
+}
+
+/// Re-running install after a declined (unanswered) prompt must stay
+/// harmless — the same "twice is idempotent" property the shim install
+/// already has.
+#[test]
+fn offering_agents_md_again_after_declining_is_harmless() {
+    let s = Sandbox::new("agents-md-twice");
+    let repo = s.path("repo");
+    init_repo(&repo);
+
+    assert_eq!(s.install(&repo).0, 0);
+    let (code, out) = s.install(&repo);
+    assert_eq!(code, 0, "a second install failed:\n{out}");
+    assert!(!repo.join("AGENTS.md").exists());
+}
+
+/// Once the block already matches what would be generated, `offer_agents_md`
+/// must skip silently — no prompt at all — the same way `offer_trust` skips
+/// once a manifest is already trusted.
+#[test]
+fn an_up_to_date_agents_md_is_not_re_offered() {
+    let s = Sandbox::new("agents-md-uptodate");
+    let repo = s.path("repo");
+    init_repo(&repo);
+
+    let write = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("agents-md")
+        .current_dir(&repo)
+        .output()
+        .expect("run githooks agents-md");
+    assert!(write.status.success());
+
+    let (code, out) = s.install(&repo);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        !out.contains("AGENTS.md can point"),
+        "an already up-to-date block must not be offered again:\n{out}"
     );
 }

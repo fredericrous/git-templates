@@ -31,7 +31,7 @@
 //! 6. **`githooks restore`** for when even the handler was interrupted.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use crate::ui::{error_sign, warning_sign};
 
@@ -65,9 +65,9 @@ pub struct StagedOnly {
 /// newline policy to agree about, and binary files need no special case. It
 /// costs a temporary copy of only the files that have unstaged changes.
 impl StagedOnly {
-    pub fn enter(hooks_dir: &Path) -> Result<StagedOnly, String> {
+    pub fn enter() -> Result<StagedOnly, String> {
         // A tree mid-merge is already holding work that is not the author's.
-        if !crate::git_states_in_progress(hooks_dir).is_empty() {
+        if !crate::git_states_in_progress().is_empty() {
             return Ok(StagedOnly { held: false });
         }
         // Conflicted paths cannot be split into staged and unstaged halves.
@@ -78,14 +78,13 @@ impl StagedOnly {
         }
         // Tracked files only: an untracked file is not part of this commit and
         // moving it would surprise everyone.
-        let changed: Vec<String> = crate::git::stdout(&["diff", "--name-only"])
-            .map(|out| out.lines().map(str::to_owned).collect())
-            .unwrap_or_default();
+        let changed: Vec<String> =
+            crate::git::stdout_paths(&["diff", "--name-only"]).unwrap_or_default();
         if changed.is_empty() {
             return Ok(StagedOnly { held: false });
         }
 
-        let Some(store) = store_dir(hooks_dir) else {
+        let Some(store) = store_dir() else {
             return Ok(StagedOnly { held: false });
         };
         let _ = std::fs::remove_dir_all(&store);
@@ -199,8 +198,19 @@ fn walk(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
     Ok(out)
 }
 
-fn store_dir(hooks_dir: &Path) -> Option<std::path::PathBuf> {
-    Some(hooks_dir.parent()?.join(STORE))
+/// Where the store lives, agreeing with [`StagedOnly::restore`] by construction
+/// — both ask git the same question, rather than one of them deriving a path
+/// from `hooks_dir`. That used to be `hooks_dir.parent()`: correct for the
+/// main worktree, where `.git/hooks`'s parent IS `$GIT_DIR`, but wrong for a
+/// LINKED worktree, where hooks dispatch from the COMMON directory's shared
+/// `hooks/` while `$GIT_DIR` is the worktree's own PRIVATE gitdir. The
+/// mismatch parked files in one directory and looked for them in the other —
+/// silently, since `restore` treats "no store" as "nothing to do" — which is
+/// how a real commit in a real worktree lost real unstaged content while this
+/// very fix was being written.
+fn store_dir() -> Option<std::path::PathBuf> {
+    let dir = crate::git::stdout(&["rev-parse", "--git-dir"])?;
+    Some(Path::new(&dir).join(STORE))
 }
 
 impl Drop for StagedOnly {
@@ -230,20 +240,71 @@ pub fn restore_command() -> Result<(), String> {
     Ok(())
 }
 
+/// The write end of the self-pipe a signal handler wakes the watcher thread
+/// through. `-1` until `install_signal_handler` has run.
+#[cfg(unix)]
+static SIGNAL_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
+
+/// Which signal woke the watcher, so it can re-raise the right one.
+#[cfg(unix)]
+static PENDING_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
 /// Restore before dying on a signal.
 ///
 /// `Drop` does not run when the process is killed, and Ctrl-C during a slow
 /// pre-commit is the most likely way to reach an orphaned stash. Installed only
 /// when a stash is actually held.
+///
+/// The handler itself does almost nothing. `restore()` runs `git`, walks the
+/// filesystem, writes files and prints — none of that is async-signal-safe,
+/// and running it IN the handler risks a deadlock: if the thread the signal
+/// interrupted already held a lock the handler's own code would then wait on
+/// forever (the allocator's, or stdio's), the process hangs instead of
+/// exiting, which is worse than either failure `restore` exists to prevent.
+///
+/// So the handler only records which signal arrived and writes one byte down
+/// a pipe — both on POSIX's async-signal-safe list — and a plain background
+/// thread, blocked reading that pipe, does the actual restore once it wakes,
+/// in ordinary thread context where none of those restrictions apply. This is
+/// the standard "self-pipe" pattern for getting work out of a signal handler.
 #[cfg(unix)]
 pub fn install_signal_handler() {
-    extern "C" fn on_signal(sig: i32) {
+    let mut fds = [-1i32; 2];
+    if unsafe { libc_pipe(fds.as_mut_ptr()) } != 0 {
+        // No pipe, no watcher, no handler: Ctrl-C falls back to the default
+        // action. Losing the safety net is better than building it on a
+        // primitive that just failed us.
+        return;
+    }
+    let (read_fd, write_fd) = (fds[0], fds[1]);
+    SIGNAL_PIPE_WRITE.store(write_fd, Ordering::SeqCst);
+
+    std::thread::spawn(move || loop {
+        let mut byte = 0u8;
+        let n = unsafe { libc_read(read_fd, &mut byte as *mut u8, 1) };
+        if n <= 0 {
+            return; // pipe closed, or a real error: nothing left to watch for
+        }
         StagedOnly::restore();
-        // Re-raise with the default handler so the exit status is honest about
-        // having been killed.
-        unsafe {
-            libc_signal(sig, 0); // SIG_DFL
-            libc_raise(sig);
+        // Re-raise with the default handler so the exit status is honest
+        // about having been killed.
+        let sig = PENDING_SIGNAL.load(Ordering::SeqCst);
+        if sig != 0 {
+            unsafe {
+                libc_signal(sig, 0); // SIG_DFL
+                libc_raise(sig);
+            }
+        }
+    });
+
+    extern "C" fn on_signal(sig: i32) {
+        PENDING_SIGNAL.store(sig, Ordering::SeqCst);
+        let fd = SIGNAL_PIPE_WRITE.load(Ordering::SeqCst);
+        if fd >= 0 {
+            let byte = 1u8;
+            unsafe {
+                libc_write(fd, &byte as *const u8, 1);
+            }
         }
     }
     unsafe {
@@ -255,14 +316,23 @@ pub fn install_signal_handler() {
 #[cfg(not(unix))]
 pub fn install_signal_handler() {}
 
-// One extern rather than a dependency: `scripts/check-no-deps.sh` keeps this
-// binary crate-free, and these are two libc calls with stable signatures.
+// Externs rather than a dependency: `scripts/check-no-deps.sh` keeps this
+// binary crate-free, and these are five libc calls with stable signatures —
+// `pipe`/`read`/`write` need nothing beyond plain integers and byte pointers,
+// so unlike `sigset_t`-based APIs there is no opaque, platform-varying struct
+// layout to get wrong by hand.
 #[cfg(unix)]
 extern "C" {
     #[link_name = "signal"]
     fn libc_signal_raw(sig: i32, handler: usize) -> usize;
     #[link_name = "raise"]
     fn libc_raise_raw(sig: i32) -> i32;
+    #[link_name = "pipe"]
+    fn libc_pipe_raw(fds: *mut i32) -> i32;
+    #[link_name = "read"]
+    fn libc_read_raw(fd: i32, buf: *mut u8, count: usize) -> isize;
+    #[link_name = "write"]
+    fn libc_write_raw(fd: i32, buf: *const u8, count: usize) -> isize;
 }
 
 #[cfg(unix)]
@@ -277,4 +347,19 @@ unsafe fn libc_raise(sig: i32) {
     unsafe {
         libc_raise_raw(sig);
     }
+}
+
+#[cfg(unix)]
+unsafe fn libc_pipe(fds: *mut i32) -> i32 {
+    unsafe { libc_pipe_raw(fds) }
+}
+
+#[cfg(unix)]
+unsafe fn libc_read(fd: i32, buf: *mut u8, count: usize) -> isize {
+    unsafe { libc_read_raw(fd, buf, count) }
+}
+
+#[cfg(unix)]
+unsafe fn libc_write(fd: i32, buf: *const u8, count: usize) -> isize {
+    unsafe { libc_write_raw(fd, buf, count) }
 }

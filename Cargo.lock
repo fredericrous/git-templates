@@ -141,6 +141,7 @@ name = "githooks"
 version = "0.1.0"
 dependencies = [
  "githooks-runtime",
+ "serde_json",
 ]
 
 [[package]]

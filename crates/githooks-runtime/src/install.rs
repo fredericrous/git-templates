@@ -215,6 +215,7 @@ pub fn run(force: bool) -> Result<(), String> {
     populate_template_dir(&binary)?;
     bake_repo_hooks(&binary, force)?;
     offer_trust();
+    offer_agents_md();
     Ok(())
 }
 
@@ -253,6 +254,47 @@ fn offer_trust() {
     } else {
         println!("    Left untrusted. The built-ins still run; these do not.");
         println!("    Change your mind with `githooks trust`.");
+    }
+}
+
+/// Ask about `AGENTS.md`, once, right where `offer_trust` asks about the
+/// manifest — same reasoning, same shape: a single question with an install
+/// step to hang it from, and declining changes nothing about how the hooks
+/// themselves run.
+///
+/// This is the first thing `install` would write to TRACKED repo content —
+/// everything else here lives in `.git/hooks` (never tracked) or a
+/// machine-local path (`~/.local/bin`, the XDG template dir). That is exactly
+/// why it is a confirm, not a silent write: `crate::agents_md::write` is
+/// marker-scoped and safe to re-run, but "safe to overwrite" is not the same
+/// promise as "yours to write unasked."
+///
+/// Never blocks and never fails the install: skips silently when there is
+/// nothing to offer, and a non-interactive install simply leaves the
+/// question unanswered — `trust::confirm` already treats no tty as "no".
+fn offer_agents_md() {
+    let root = crate::hooks::common::repo_root();
+    let path = Path::new(&root).join("AGENTS.md");
+    match crate::agents_md::check(&path) {
+        Ok(crate::agents_md::CheckResult::MatchesGenerated) => return,
+        Ok(_) => {}
+        // Malformed markers: nothing this prompt can safely offer to fix.
+        Err(_) => return,
+    }
+
+    println!();
+    println!(
+        "{} AGENTS.md can point coding agents at `githooks list --json` \
+         instead of leaving them to discover these checks the hard way:",
+        warning_sign()
+    );
+    if crate::trust::confirm("    Add it? (y/N) ") {
+        match crate::agents_md::write(&path) {
+            Ok(()) => println!("{} wrote {}", valid_sign(), path.display()),
+            Err(e) => println!("{} {e}", warning_sign()),
+        }
+    } else {
+        println!("    Left as-is. Change your mind with `githooks agents-md`.");
     }
 }
 
@@ -322,16 +364,28 @@ fn populate_template_dir(binary: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Where git will actually look for hooks in the repository we are standing
+/// in — never `--git-dir` plus `join("hooks")`. For the main worktree the two
+/// agree, but hooks are explicitly SHARED across every worktree, unlike
+/// `MERGE_HEAD` and friends: a linked worktree's `--git-dir` is its own
+/// PRIVATE gitdir, so joining "hooks" onto it names a directory git never
+/// dispatches from, and a shim baked there is inert — installed, and never
+/// run. `--git-path hooks` is the question actually being asked, and git
+/// itself resolves the worktree case correctly.
+fn repo_hooks_dir() -> Option<PathBuf> {
+    crate::git::stdout(&["rev-parse", "--path-format=absolute", "--git-path", "hooks"])
+        .map(PathBuf::from)
+}
+
 /// Bake the shims into the repository we are standing in, if we are in one.
 fn bake_repo_hooks(binary: &str, force: bool) -> Result<(), String> {
-    let Some(git_dir) = crate::git::stdout(&["rev-parse", "--git-dir"]) else {
+    let Some(hooks) = repo_hooks_dir() else {
         println!(
             "{} not inside a git repository — no repo hooks written.",
             warning_sign()
         );
         return Ok(());
     };
-    let hooks = PathBuf::from(git_dir).join("hooks");
     let _ = std::fs::create_dir_all(&hooks);
 
     // Fail closed, and for the whole repository rather than per file: a partial
@@ -366,10 +420,9 @@ fn bake_repo_hooks(binary: &str, force: bool) -> Result<(), String> {
 ///   reinstall should not silently forget that they disabled a check;
 /// - the binary goes only when asked, because other repositories are using it.
 pub fn uninstall(remove_binary: bool) -> Result<(), String> {
-    let Some(git_dir) = crate::git::stdout(&["rev-parse", "--git-dir"]) else {
+    let Some(hooks) = repo_hooks_dir() else {
         return Err("not inside a git repository".to_string());
     };
-    let hooks = PathBuf::from(git_dir).join("hooks");
 
     let mut removed = 0usize;
     let mut foreign: Vec<&str> = Vec::new();

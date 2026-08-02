@@ -125,6 +125,34 @@ pub struct Repo {
     /// is no manifest — which is almost every repo, and must read differently
     /// from "declared something and it is not running".
     pub trusted: Option<bool>,
+    /// Whether `AGENTS.md` carries an up-to-date pointer at this check's own
+    /// generated block, and if not, why.
+    pub agents_md: AgentsMdState,
+}
+
+/// A local wrapper around `githooks_runtime::agents_md::CheckResult`: that
+/// type lives in the dependency-free crate and cannot derive `Serialize`
+/// itself, the same reason `severities::Level` wraps
+/// `githooks_runtime::check::Severity` rather than re-exporting it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentsMdState {
+    UpToDate,
+    Missing,
+    Drifted,
+    /// An unpaired marker — not something this crate, any more than the
+    /// dependency-free one, tries to guess its way out of.
+    Malformed,
+}
+
+fn agents_md_state(repo: &Path) -> AgentsMdState {
+    use githooks_runtime::agents_md::CheckResult;
+    match githooks_runtime::agents_md::check(&repo.join("AGENTS.md")) {
+        Ok(CheckResult::MatchesGenerated) => AgentsMdState::UpToDate,
+        Ok(CheckResult::NotPresent) => AgentsMdState::Missing,
+        Ok(CheckResult::Drifted) => AgentsMdState::Drifted,
+        Err(_) => AgentsMdState::Malformed,
+    }
 }
 
 /// A whole scan, including how it was performed.
@@ -327,6 +355,7 @@ fn inspect(root: &Path, repo: &Path, hooks: &Path, managed: bool, installed_bina
             githooks_runtime::trust::State::Trusted => Some(true),
             _ => Some(false),
         },
+        agents_md: agents_md_state(repo),
     }
 }
 

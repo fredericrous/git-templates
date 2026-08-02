@@ -57,3 +57,68 @@ pub fn succeeds(args: &[&str]) -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
+
+/// A path list from `diff --name-only`, `diff-tree --name-only` or
+/// `ls-files` — commands whose output is meant to be split into individual
+/// paths, never just read as one blob.
+///
+/// By default git QUOTES any "unusual" byte in a path, non-ASCII included:
+/// `é.json` prints as `"\303\251.json"`. Reading that line as a literal path
+/// looks up a file that does not exist — the caller then treats real,
+/// unstaged content as absent, which is how `StagedOnly` used to lose it.
+/// `-z` disables quoting entirely and NUL-terminates each entry instead, so
+/// there is no escaping left to get wrong. Inserted right after the
+/// subcommand (`args[0]`), which is always a valid position for it on every
+/// command this is used for.
+pub fn stdout_paths(args: &[&str]) -> Option<Vec<String>> {
+    let (first, rest) = args.split_first()?;
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push(*first);
+    argv.push("-z");
+    argv.extend_from_slice(rest);
+    stdout_raw(&argv).map(|raw| split_nul_paths(&raw))
+}
+
+/// The parsing half of [`stdout_paths`], split out so it can be tested on
+/// literal bytes rather than a real git process — including the byte
+/// sequence a QUOTED path would have produced under the old line-splitting
+/// approach, to prove `-z` output is never reinterpreted that way.
+fn split_nul_paths(raw: &[u8]) -> Vec<String> {
+    raw.split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splits_on_nul_and_drops_the_trailing_empty_segment() {
+        assert_eq!(
+            split_nul_paths(b"src/main.rs\0Cargo.toml\0"),
+            vec!["src/main.rs", "Cargo.toml"]
+        );
+    }
+
+    #[test]
+    fn empty_input_is_no_paths() {
+        assert_eq!(split_nul_paths(b""), Vec::<String>::new());
+    }
+
+    /// The exact bug this exists to prevent: under `--name-only` without
+    /// `-z`, git would have printed `é.json` as the quoted, LINE-oriented
+    /// text `"\303\251.json"` — literal backslashes, digits and quotes, nine
+    /// bytes standing in for the original two-byte UTF-8 sequence. `-z`
+    /// output carries the real UTF-8 bytes of the path with no such
+    /// reinterpretation, so splitting on NUL must hand them back unchanged.
+    #[test]
+    fn a_non_ascii_path_is_not_reinterpreted_as_its_quoted_form() {
+        let mut raw = "é.json".as_bytes().to_vec();
+        raw.push(0);
+        let got = split_nul_paths(&raw);
+        assert_eq!(got, vec!["é.json".to_string()]);
+        assert_ne!(got[0], "\"\\303\\251.json\"", "must not be the quoted form");
+    }
+}

@@ -35,6 +35,7 @@ usage: githooks-fleet [scan|tui|fix|install|uninstall] [--root <dir>] [--depth <
   --root <dir>   where to look for repositories (default: $HOME/Developer)
   --depth <n>    directory levels to descend  (default: 6)
   --binary <p>   the binary shims should point at (default: $HOME/.local/bin/githooks)
+  --agents-md    with fix/install: also roll out the AGENTS.md pointer
   --json         emit the result as JSON
 ";
 
@@ -61,6 +62,11 @@ struct Args {
     /// is not always at the default path, and because a comparison is only
     /// meaningful when both sides agree on the target.
     binary: Option<String>,
+    /// Roll the AGENTS.md pointer out alongside fix/install. Opt-in per
+    /// invocation, never bundled into `--apply` by default — writing tracked
+    /// content across up to 96 repositories is a materially bigger action
+    /// than the untracked `.git/hooks` shims apply already writes.
+    agents_md: bool,
 }
 
 fn parse(argv: &[String]) -> Result<Args, String> {
@@ -71,6 +77,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         json: false,
         apply: false,
         binary: None,
+        agents_md: false,
     };
     let mut it = argv.iter().peekable();
     if let Some(first) = it.peek() {
@@ -115,6 +122,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                     .map_err(|_| format!("--depth: {v:?} is not a number"))?;
             }
             "--apply" => a.apply = true,
+            "--agents-md" => a.agents_md = true,
             "--binary" => {
                 a.binary = Some(it.next().ok_or("--binary needs a path")?.clone());
             }
@@ -216,7 +224,13 @@ fn main() -> ExitCode {
                 } else {
                     fix::Intent::Repair
                 };
-                fix::plan(r, &args.root.join(&r.path), &installed, intent)
+                fix::plan(
+                    r,
+                    &args.root.join(&r.path),
+                    &installed,
+                    intent,
+                    args.agents_md,
+                )
             })
             .collect();
         if args.apply {
@@ -340,6 +354,9 @@ fn report_fix(plans: &[fix::FixPlan]) {
         for w in p.write.iter().filter(|w| w.changes) {
             println!("  write {}", w.path.display());
         }
+        if let Some(w) = &p.write_agents_md {
+            println!("  write {}", w.path.display());
+        }
     }
 
     println!();
@@ -355,7 +372,8 @@ fn report_fix(plans: &[fix::FixPlan]) {
         acting.iter().map(|p| p.remove.len()).sum::<usize>(),
         acting
             .iter()
-            .map(|p| p.write.iter().filter(|w| w.changes).count())
+            .map(|p| p.write.iter().filter(|w| w.changes).count()
+                + usize::from(p.write_agents_md.is_some()))
             .sum::<usize>()
     );
     println!();
