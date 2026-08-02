@@ -115,12 +115,21 @@ fn range_changed_files(remote_oid: &str, local_oid: &str) -> Vec<String> {
     // writes — and `diff-tree --stdin` treats "no newline after this hash"
     // as "the line isn't finished yet", silently dropping the LAST commit
     // rather than reading it. Put the newline back before feeding it in.
+    //
+    // `-m`: without it, `diff-tree` shows NOTHING for a merge commit at all
+    // — confirmed empirically, not merely documented — so a file edited only
+    // to resolve a conflict (never touched by either parent individually) is
+    // invisible to a scope-gated check. `-m` diffs a merge against EACH
+    // parent and unions the results, which is exactly "did this commit,
+    // merge or not, touch this path" — the caller already de-duplicates the
+    // combined list, so the extra per-parent repeats cost nothing.
     crate::git::stdout_piped(
         &[
             "diff-tree",
             "--no-commit-id",
             "--name-only",
             "-r",
+            "-m",
             "--stdin",
         ],
         &format!("{commits}\n"),

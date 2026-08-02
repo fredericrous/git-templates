@@ -384,6 +384,47 @@ fn a_reverted_change_within_the_pushed_range_still_counts() {
     );
 }
 
+/// A merge commit's own resolution can introduce a file neither parent
+/// touched — resolving a conflict, or just adding something, as part of the
+/// merge itself. `diff-tree` shows NOTHING for a merge commit at all unless
+/// asked with `-m` — confirmed empirically, not merely documented — so
+/// without it this file is invisible to a scope-gated check even though it
+/// is genuinely part of what is being pushed.
+#[test]
+fn a_file_touched_only_by_a_merge_resolution_still_counts() {
+    let r = Repo::new();
+    probe(&r, PROBE, 0);
+    manifest(&r, &format!("pre-push  smoke  *.rs  block  ./{PROBE}\n"));
+    r.commit("init");
+    let base = String::from_utf8_lossy(&r.git(&["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+
+    r.git(&["checkout", "-q", "-b", "feat/a"]);
+    r.stage("a.txt", "a\n");
+    r.commit("add a");
+
+    r.git(&["checkout", "-q", "-b", "feat/b", base.as_str()]);
+    r.stage("b.txt", "b\n");
+    r.commit("add b");
+
+    // Two branches touching different files merge cleanly; the `.rs` file is
+    // added ON TOP, as part of the merge commit, never on either branch.
+    r.git(&["merge", "-q", "--no-ff", "--no-commit", "feat/a"]);
+    r.stage("src/resolution_only.rs", "fn resolved() {}\n");
+    r.commit("merge feat/a, plus a resolution-only rust file");
+    let tip = String::from_utf8_lossy(&r.git(&["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+
+    let (code, out) = push_range(&r, &base, &tip);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("probe-"),
+        "a file introduced only by the merge commit itself must still be seen: {out}"
+    );
+}
+
 /// The whole point of the trust gate: a manifest nobody accepted does not run,
 /// and is not silently dropped either.
 #[test]
