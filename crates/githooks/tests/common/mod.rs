@@ -90,7 +90,7 @@ impl Repo {
     /// hook GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE pointing at the REAL repo.
     /// Those beat `current_dir`, so without this a fixture's `git commit`
     /// commits to git-templates itself. It did exactly that once.
-    fn strip_git_env_impl(cmd: &mut Command) {
+    pub fn strip_git_env_impl(cmd: &mut Command) {
         for (k, _) in std::env::vars_os() {
             if k.to_string_lossy().starts_with("GIT_") {
                 cmd.env_remove(&k);

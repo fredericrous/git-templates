@@ -474,20 +474,22 @@ pub fn configured_skips() -> Vec<String> {
         .collect()
 }
 
-/// True during a cherry-pick, where the zsh `pre-commit` exited 0 immediately.
-/// The marker sits next to the hooks directory, i.e. in `.git/`.
 /// Which git operations are part-way through, from the markers in `$GIT_DIR`.
 ///
-/// `hooks_dir.parent()` is the git dir. `parent()` is LEXICAL; `join("..")` is
-/// not — the latter makes the kernel resolve `hooks/..`, which fails outright
-/// when the hooks directory does not exist, and `git init --template=` creates
-/// none. The check then reports "no operation in progress" for a reason that
-/// has nothing to do with git operations. That was learned once, for
-/// cherry-picks; it applies to all five.
-pub fn git_states_in_progress(hooks_dir: &Path) -> Vec<crate::check::GitState> {
-    let Some(git_dir) = hooks_dir.parent() else {
+/// Asks git directly rather than deriving a path from `hooks_dir`. That used
+/// to be `hooks_dir.parent()` — correct for the main worktree, where hooks
+/// live in `.git/hooks` and `.git` IS `$GIT_DIR`, but wrong for a LINKED
+/// worktree: hooks dispatch from the COMMON directory's `hooks/`, shared
+/// across every worktree, while `MERGE_HEAD`/`CHERRY_PICK_HEAD`/etc. live in
+/// each worktree's own PRIVATE gitdir under `.git/worktrees/<name>`.
+/// Conflating the two silently disabled this guard for every linked
+/// worktree — the same mistake `staged_only`'s store path made, which lost
+/// unstaged work outright; see its module doc.
+pub fn git_states_in_progress() -> Vec<crate::check::GitState> {
+    let Some(git_dir) = crate::git::stdout(&["rev-parse", "--git-dir"]) else {
         return Vec::new();
     };
+    let git_dir = Path::new(&git_dir);
     crate::check::GitState::ALL
         .into_iter()
         .filter(|state| {
@@ -499,15 +501,13 @@ pub fn git_states_in_progress(hooks_dir: &Path) -> Vec<crate::check::GitState> {
         .collect()
 }
 
-pub fn cherry_pick_in_progress(hooks_dir: &Path) -> bool {
-    // `parent()` is LEXICAL; `join("..")` is not. The latter makes the kernel
-    // resolve `hooks/..`, which fails outright when the hooks directory does
-    // not exist — and `git init --template=` creates no hooks directory. The
-    // check then reports "no cherry-pick" for a reason that has nothing to do
-    // with cherry-picks.
-    hooks_dir
-        .parent()
-        .map(|d| d.join("CHERRY_PICK_HEAD").exists())
+/// True during a cherry-pick, where the zsh `pre-commit` exited 0 immediately.
+/// Superseded internally by [`git_states_in_progress`]; kept for whatever
+/// still calls it directly. See that function for why this asks git rather
+/// than deriving a path from `hooks_dir`.
+pub fn cherry_pick_in_progress() -> bool {
+    crate::git::stdout(&["rev-parse", "--git-dir"])
+        .map(|d| Path::new(&d).join("CHERRY_PICK_HEAD").exists())
         .unwrap_or(false)
 }
 

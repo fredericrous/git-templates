@@ -161,12 +161,12 @@ where
 }
 
 pub fn pre_commit(ctx: &Ctx) -> Verdict {
-    let in_progress = crate::git_states_in_progress(ctx.hooks_dir);
+    let in_progress = crate::git_states_in_progress();
     let checks = selected_during(Stage::PreCommit, &in_progress);
 
     // Around the WHOLE fan-out, not per check: twenty checks run concurrently
     // and would fight over one working tree.
-    let held = match crate::staged_only::StagedOnly::enter(ctx.hooks_dir) {
+    let held = match crate::staged_only::StagedOnly::enter() {
         Ok(guard) => guard,
         Err(e) => {
             // Refusing to check the wrong content is the safe direction; a
@@ -328,7 +328,7 @@ pub fn pre_push(ctx: &Ctx) -> Verdict {
     // pre-push had NO state guard at all, with a comment admitting it existed
     // only because the zsh version had none. Now it asks the same question
     // pre-commit does and each check answers for itself.
-    let in_progress = crate::git_states_in_progress(ctx.hooks_dir);
+    let in_progress = crate::git_states_in_progress();
     for check in selected_during(Stage::PrePush, &in_progress) {
         let sub = Ctx {
             name: check.name(),

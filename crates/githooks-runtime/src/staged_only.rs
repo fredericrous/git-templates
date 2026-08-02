@@ -65,9 +65,9 @@ pub struct StagedOnly {
 /// newline policy to agree about, and binary files need no special case. It
 /// costs a temporary copy of only the files that have unstaged changes.
 impl StagedOnly {
-    pub fn enter(hooks_dir: &Path) -> Result<StagedOnly, String> {
+    pub fn enter() -> Result<StagedOnly, String> {
         // A tree mid-merge is already holding work that is not the author's.
-        if !crate::git_states_in_progress(hooks_dir).is_empty() {
+        if !crate::git_states_in_progress().is_empty() {
             return Ok(StagedOnly { held: false });
         }
         // Conflicted paths cannot be split into staged and unstaged halves.
@@ -84,7 +84,7 @@ impl StagedOnly {
             return Ok(StagedOnly { held: false });
         }
 
-        let Some(store) = store_dir(hooks_dir) else {
+        let Some(store) = store_dir() else {
             return Ok(StagedOnly { held: false });
         };
         let _ = std::fs::remove_dir_all(&store);
@@ -198,8 +198,19 @@ fn walk(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
     Ok(out)
 }
 
-fn store_dir(hooks_dir: &Path) -> Option<std::path::PathBuf> {
-    Some(hooks_dir.parent()?.join(STORE))
+/// Where the store lives, agreeing with [`StagedOnly::restore`] by construction
+/// — both ask git the same question, rather than one of them deriving a path
+/// from `hooks_dir`. That used to be `hooks_dir.parent()`: correct for the
+/// main worktree, where `.git/hooks`'s parent IS `$GIT_DIR`, but wrong for a
+/// LINKED worktree, where hooks dispatch from the COMMON directory's shared
+/// `hooks/` while `$GIT_DIR` is the worktree's own PRIVATE gitdir. The
+/// mismatch parked files in one directory and looked for them in the other —
+/// silently, since `restore` treats "no store" as "nothing to do" — which is
+/// how a real commit in a real worktree lost real unstaged content while this
+/// very fix was being written.
+fn store_dir() -> Option<std::path::PathBuf> {
+    let dir = crate::git::stdout(&["rev-parse", "--git-dir"])?;
+    Some(Path::new(&dir).join(STORE))
 }
 
 impl Drop for StagedOnly {
