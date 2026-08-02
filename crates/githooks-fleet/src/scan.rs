@@ -173,19 +173,18 @@ fn is_ours(path: &Path) -> bool {
 ///
 /// `git rev-parse --git-path hooks` is the authority: relative
 /// `core.hooksPath` resolution, `~` expansion and worktree indirection are
-/// git's rules to get right, not ours to reimplement. But a fleet scan walks
-/// every repo on disk, and spawning git per repo just to ask "did you
-/// customise this" would cost real wall-clock at scale — `core.hooksPath` is
-/// virtually never set, and a config file that does not even mention it
-/// cannot have set it. So this checks `.git/config`'s own bytes first; only a
-/// repo whose config plausibly does pays for the subprocess.
+/// git's rules to get right, not ours to reimplement. This used to skip that
+/// call unless `.git/config`'s own bytes mentioned `hooksPath`, on the theory
+/// that a config file which does not even mention it cannot have set it —
+/// true of THAT FILE, but `core.hooksPath` can just as well come from global
+/// or system config, or from a file `.git/config` merely `include`s, none of
+/// which the local bytes say anything about. A fleet scan walking every repo
+/// on disk is exactly the setting where someone points `core.hooksPath` at a
+/// shared directory globally, so the case the shortcut got wrong was not a
+/// rare one. One `git` call per repo, always — asking git is the one thing
+/// this function exists to do right.
 pub fn hooks_dir_for(repo: &Path) -> PathBuf {
     let default = repo.join(".git").join("hooks");
-    let mentions_hooks_path = std::fs::read_to_string(repo.join(".git").join("config"))
-        .is_ok_and(|c| c.to_lowercase().contains("hookspath"));
-    if !mentions_hooks_path {
-        return default;
-    }
     let Some(resolved) =
         githooks_runtime::git::stdout_in(repo, &["rev-parse", "--git-path", "hooks"])
     else {

@@ -64,6 +64,35 @@ impl Tree {
         .expect("write");
         self
     }
+    /// `core.hooksPath` set via an INCLUDED file rather than directly in
+    /// `.git/config` — the case a local-text-only shortcut would miss, since
+    /// the literal string `hooksPath` never appears in `.git/config` itself.
+    fn hooks_path_via_include_repo(&self, rel: &str, hooks_rel: &str) -> &Self {
+        let repo = self.0.join(rel);
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .expect("git");
+        };
+        git(&["init", "-q", "--template=", "."]);
+        std::fs::write(
+            repo.join("shared.gitconfig"),
+            format!("[core]\n\thooksPath = {hooks_rel}\n"),
+        )
+        .expect("write shared config");
+        git(&["config", "--add", "include.path", "../shared.gitconfig"]);
+        let hooks = repo.join(hooks_rel);
+        std::fs::create_dir_all(&hooks).expect("mkdir");
+        std::fs::write(
+            hooks.join("pre-commit"),
+            "#!/bin/sh\nexec \"$BIN\" --hooks-dir \"$(dirname \"$0\")\" pre-commit \"$@\"\n",
+        )
+        .expect("write");
+        self
+    }
     fn dir(&self, rel: &str) -> &Self {
         std::fs::create_dir_all(self.0.join(rel)).expect("mkdir");
         self
@@ -378,5 +407,18 @@ fn core_hooks_path_is_honoured_not_assumed() {
     // The default location was never created — a managed reading here would
     // mean the scan fell back to `.git/hooks` and got lucky, not that it
     // resolved `core.hooksPath`.
+    assert!(!t.path().join("redirected/.git/hooks").exists());
+}
+
+/// `core.hooksPath` reaching a repo through an `include`, not a literal key
+/// in its own `.git/config` — a local-file-only shortcut would see nothing
+/// to act on here and fall back to `.git/hooks`, wrongly.
+#[test]
+fn core_hooks_path_via_an_include_is_still_honoured() {
+    let t = Tree::new("hookspath-include");
+    t.hooks_path_via_include_repo("redirected", "tooling/hooks");
+    let v = json(&["--root", t.path().to_str().unwrap()]);
+    let repo = &v["repos"][0];
+    assert_eq!(repo["managed"], true, "{repo}");
     assert!(!t.path().join("redirected/.git/hooks").exists());
 }
