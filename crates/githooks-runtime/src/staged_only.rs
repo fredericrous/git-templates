@@ -104,7 +104,18 @@ impl StagedOnly {
         let Some(store) = store_dir(hooks_dir) else {
             return Ok(StagedOnly { held: false });
         };
-        let _ = std::fs::remove_dir_all(&store);
+        // A stash left behind by an interrupted restore still holds work
+        // nobody has recovered — point 5 in the module doc. Clearing it to
+        // make room for a new one would be exactly the loss this module
+        // exists to prevent, so refuse instead of silently deleting it.
+        if has_contents(&store) {
+            return Err(format!(
+                "{} a previous stash was left behind at {} — recover it with \
+                 `githooks restore`, then retry",
+                error_sign(),
+                store.display()
+            ));
+        }
         let root = crate::hooks::common::repo_root();
         let root = Path::new(&root);
 
@@ -180,7 +191,14 @@ impl StagedOnly {
         if !HELD.swap(false, Ordering::SeqCst) {
             return;
         }
-        let Some(dir) = crate::git::stdout(&["rev-parse", "--git-dir"]) else {
+        // `--git-common-dir`, NOT `--git-dir`: hooks — and so `enter()`'s
+        // store — live in the COMMON `.git`, shared across worktrees. From a
+        // linked worktree `--git-dir` names that worktree's PRIVATE admin
+        // directory instead, which has no `githooks-held` in it. `restore()`
+        // would then find `store.is_dir()` false and return here having done
+        // nothing — silently, because that shape reads exactly like "nothing
+        // was ever held" — losing the changes `enter()` really did set aside.
+        let Some(dir) = crate::git::stdout(&["rev-parse", "--git-common-dir"]) else {
             return;
         };
         let store = Path::new(&dir).join(STORE);
@@ -217,6 +235,13 @@ fn marker(to: &Path, suffix: &str) -> std::path::PathBuf {
     name.push(".");
     name.push(suffix);
     to.with_file_name(name)
+}
+
+/// Whether `dir` exists and holds at least one entry.
+fn has_contents(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
 }
 
 fn held_nothing(store: &Path) -> String {
@@ -314,7 +339,10 @@ impl Drop for StagedOnly {
 ///
 /// For when even the signal handler was interrupted.
 pub fn restore_command() -> Result<(), String> {
-    let dir = crate::git::stdout(&["rev-parse", "--git-dir"])
+    // Same reasoning as `restore()`: the store sits in the COMMON `.git`,
+    // which `--git-common-dir` names correctly from a linked worktree and
+    // `--git-dir` does not.
+    let dir = crate::git::stdout(&["rev-parse", "--git-common-dir"])
         .ok_or_else(|| "not inside a git repository".to_string())?;
     let store = Path::new(&dir).join(STORE);
     if !store.is_dir() {

@@ -394,6 +394,120 @@ fn an_unstaged_delete_of_an_extensioned_file_restores_under_its_full_name() {
     );
 }
 
+/// A stash an earlier, interrupted run failed to restore still holds work
+/// nobody has recovered. `enter()` used to `remove_dir_all` it unconditionally
+/// before parking a new one — the next commit with any unstaged change would
+/// silently destroy that unrecovered backup. It must refuse instead.
+#[test]
+fn a_previous_unrecovered_stash_is_not_clobbered() {
+    let r = Repo::new();
+    seed(&r);
+    r.stage("x.json", VALID);
+    r.write("x.json", BROKEN);
+
+    // Simulate a run that parked something and never got to restore it.
+    std::fs::create_dir_all(r.path(".git/githooks-held")).expect("mkdir");
+    std::fs::write(
+        r.path(".git/githooks-held/precious.txt"),
+        "not recovered yet\n",
+    )
+    .expect("write");
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(
+        !run.passed(),
+        "must refuse rather than silently clobber an unrecovered stash:\n{}",
+        run.output()
+    );
+    assert_eq!(
+        std::fs::read_to_string(r.path(".git/githooks-held/precious.txt")).expect("read"),
+        "not recovered yet\n",
+        "the unrecovered stash must survive the refusal"
+    );
+    assert_eq!(
+        tree(&r, "x.json"),
+        BROKEN,
+        "the tree must be untouched when the guard refuses"
+    );
+}
+
+/// A linked worktree's `.git` is a FILE pointing at a private admin
+/// directory (`<main>/.git/worktrees/<name>`) — not the common `.git` the
+/// hooks share and the stash lives in. `enter()` gets this right because it
+/// is handed `--hooks-dir` directly; `restore()` used to re-derive the
+/// location via `git rev-parse --git-dir`, which names the PRIVATE directory
+/// from inside a worktree and so never finds what `enter()` parked. That
+/// looked exactly like "nothing was held" and silently lost the author's
+/// unstaged work.
+#[test]
+fn a_commit_in_a_linked_worktree_still_gets_its_unstaged_work_back() {
+    let r = Repo::new();
+    seed(&r);
+    let wt = r.worktree("wt");
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(&wt)
+            .args(args)
+            .output()
+            .expect("git")
+    };
+
+    std::fs::write(wt.join("x.json"), VALID).expect("write");
+    git(&["add", "x.json"]);
+    std::fs::write(wt.join("x.json"), BROKEN).expect("write");
+
+    let run = r.hook_at(&wt, "pre-commit", &[]);
+    assert!(
+        run.passed(),
+        "judged the working tree, not the commit:\n{}",
+        run.output()
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt.join("x.json")).expect("read"),
+        BROKEN,
+        "unstaged work in a linked worktree was not restored — \
+         restore() looked in the wrong .git"
+    );
+    // The stash lives in the COMMON .git, not the worktree's private admin dir.
+    assert!(!r.path(".git/githooks-held").exists());
+}
+
+/// Same worktree distinction, through the manual recovery path: `githooks
+/// restore` run from inside a linked worktree must find the stash the guard
+/// left in the common `.git`, not report "nothing of ours to restore".
+#[test]
+fn restore_command_finds_the_stash_from_a_linked_worktree() {
+    let r = Repo::new();
+    seed(&r);
+    let wt = r.worktree("wt");
+
+    // Park a file the way the guard does, directly in the COMMON .git — the
+    // one `enter()` actually uses — then abandon it, as if the process died
+    // before its own restore ran.
+    std::fs::create_dir_all(r.path(".git/githooks-held")).expect("mkdir");
+    std::fs::write(r.path(".git/githooks-held/x.json"), BROKEN).expect("write");
+    Command::new("git")
+        .arg("-C")
+        .arg(&wt)
+        .args(["checkout", "--", "."])
+        .output()
+        .expect("git checkout");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("restore")
+        .current_dir(&wt)
+        .output()
+        .expect("githooks restore");
+    assert!(out.status.success(), "{:?}", out);
+    assert_eq!(
+        std::fs::read_to_string(wt.join("x.json")).expect("read"),
+        BROKEN,
+        "restore did not find the common .git's stash from the worktree"
+    );
+    assert!(!r.path(".git/githooks-held").exists());
+}
+
 /// `None` on a platform/runner that cannot create the link at all (Windows
 /// without `SeCreateSymbolicLinkPrivilege`), so the two tests above skip
 /// instead of failing on a capability the environment never had.
