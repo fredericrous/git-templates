@@ -215,6 +215,7 @@ pub fn run(force: bool) -> Result<(), String> {
     populate_template_dir(&binary)?;
     bake_repo_hooks(&binary, force)?;
     offer_trust();
+    offer_agents_md();
     Ok(())
 }
 
@@ -253,6 +254,47 @@ fn offer_trust() {
     } else {
         println!("    Left untrusted. The built-ins still run; these do not.");
         println!("    Change your mind with `githooks trust`.");
+    }
+}
+
+/// Ask about `AGENTS.md`, once, right where `offer_trust` asks about the
+/// manifest — same reasoning, same shape: a single question with an install
+/// step to hang it from, and declining changes nothing about how the hooks
+/// themselves run.
+///
+/// This is the first thing `install` would write to TRACKED repo content —
+/// everything else here lives in `.git/hooks` (never tracked) or a
+/// machine-local path (`~/.local/bin`, the XDG template dir). That is exactly
+/// why it is a confirm, not a silent write: `crate::agents_md::write` is
+/// marker-scoped and safe to re-run, but "safe to overwrite" is not the same
+/// promise as "yours to write unasked."
+///
+/// Never blocks and never fails the install: skips silently when there is
+/// nothing to offer, and a non-interactive install simply leaves the
+/// question unanswered — `trust::confirm` already treats no tty as "no".
+fn offer_agents_md() {
+    let root = crate::hooks::common::repo_root();
+    let path = Path::new(&root).join("AGENTS.md");
+    match crate::agents_md::check(&path) {
+        Ok(crate::agents_md::CheckResult::MatchesGenerated) => return,
+        Ok(_) => {}
+        // Malformed markers: nothing this prompt can safely offer to fix.
+        Err(_) => return,
+    }
+
+    println!();
+    println!(
+        "{} AGENTS.md can point coding agents at `githooks list --json` \
+         instead of leaving them to discover these checks the hard way:",
+        warning_sign()
+    );
+    if crate::trust::confirm("    Add it? (y/N) ") {
+        match crate::agents_md::write(&path) {
+            Ok(()) => println!("{} wrote {}", valid_sign(), path.display()),
+            Err(e) => println!("{} {e}", warning_sign()),
+        }
+    } else {
+        println!("    Left as-is. Change your mind with `githooks agents-md`.");
     }
 }
 

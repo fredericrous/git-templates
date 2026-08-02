@@ -372,3 +372,62 @@ fn the_installed_hooks_run_a_real_commit() {
         "the installed shim could not resolve the binary:\n{text}"
     );
 }
+
+// ---- offer_agents_md ------------------------------------------------------
+
+/// A test process has no controlling terminal, so `trust::confirm`'s
+/// `/dev/tty` open fails and it answers "no" — the same path a real
+/// non-interactive install takes. `install` must still succeed, and must not
+/// have written anything nobody agreed to.
+#[test]
+fn a_non_interactive_install_completes_without_writing_agents_md() {
+    let s = Sandbox::new("agents-md-noninteractive");
+    let repo = s.path("repo");
+    init_repo(&repo);
+
+    let (code, out) = s.install(&repo);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        !repo.join("AGENTS.md").exists(),
+        "an unanswered prompt must not write anything"
+    );
+}
+
+/// Re-running install after a declined (unanswered) prompt must stay
+/// harmless — the same "twice is idempotent" property the shim install
+/// already has.
+#[test]
+fn offering_agents_md_again_after_declining_is_harmless() {
+    let s = Sandbox::new("agents-md-twice");
+    let repo = s.path("repo");
+    init_repo(&repo);
+
+    assert_eq!(s.install(&repo).0, 0);
+    let (code, out) = s.install(&repo);
+    assert_eq!(code, 0, "a second install failed:\n{out}");
+    assert!(!repo.join("AGENTS.md").exists());
+}
+
+/// Once the block already matches what would be generated, `offer_agents_md`
+/// must skip silently — no prompt at all — the same way `offer_trust` skips
+/// once a manifest is already trusted.
+#[test]
+fn an_up_to_date_agents_md_is_not_re_offered() {
+    let s = Sandbox::new("agents-md-uptodate");
+    let repo = s.path("repo");
+    init_repo(&repo);
+
+    let write = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("agents-md")
+        .current_dir(&repo)
+        .output()
+        .expect("run githooks agents-md");
+    assert!(write.status.success());
+
+    let (code, out) = s.install(&repo);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        !out.contains("AGENTS.md can point"),
+        "an already up-to-date block must not be offered again:\n{out}"
+    );
+}
