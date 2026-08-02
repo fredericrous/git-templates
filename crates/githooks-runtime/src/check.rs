@@ -277,6 +277,18 @@ pub enum Fix {
     Rewrite,
 }
 
+impl Fix {
+    /// How it is written in `--json`. No `parse()`: nothing reads a `Fix`
+    /// back out of text — the manifest's `fix` marker has its own, unrelated
+    /// parsing path in `manifest.rs`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Fix::None => "none",
+            Fix::Rewrite => "rewrite",
+        }
+    }
+}
+
 /// One check, whether compiled in or declared by the repository.
 ///
 /// `Sync` because `pre-commit` hands every check to its own thread. Both
@@ -340,6 +352,12 @@ mod tests {
         for bad in ["", "Warn", "WARN", "advisory", "true", "1", " warn"] {
             assert_eq!(Severity::parse(bad), None, "{bad:?} must not parse");
         }
+    }
+
+    #[test]
+    fn fix_says_how_it_is_written_in_json() {
+        assert_eq!(Fix::None.as_str(), "none");
+        assert_eq!(Fix::Rewrite.as_str(), "rewrite");
     }
 
     #[test]
