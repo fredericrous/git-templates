@@ -1032,6 +1032,7 @@ pub fn run(root: std::path::PathBuf, depth: usize, binary: String) -> std::io::R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::AgentsMdState;
     use ratatui::backend::TestBackend;
     use std::path::PathBuf;
 
@@ -1084,6 +1085,7 @@ mod tests {
             severities: Vec::new(),
             declared: Vec::new(),
             trusted: None,
+            agents_md: AgentsMdState::Missing,
         }
     }
 

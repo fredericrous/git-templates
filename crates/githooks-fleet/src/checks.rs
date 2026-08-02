@@ -115,6 +115,7 @@ pub fn rollup(repos: &[Repo]) -> Vec<CheckRollup> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::AgentsMdState;
     use crate::shim::{BakeState, ShimState};
     use std::path::PathBuf;
 
@@ -141,6 +142,7 @@ mod tests {
             severities: Vec::new(),
             declared: Vec::new(),
             trusted: None,
+            agents_md: AgentsMdState::Missing,
         }
     }
 
@@ -176,6 +178,7 @@ mod tests {
             severities: Vec::new(),
             declared: Vec::new(),
             trusted: None,
+            agents_md: AgentsMdState::Missing,
         }
     }
 
