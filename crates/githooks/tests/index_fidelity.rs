@@ -59,6 +59,32 @@ fn a_broken_staged_change_is_still_caught() {
     assert_eq!(tree(&r, "x.json"), VALID, "unstaged work was not restored");
 }
 
+/// Git QUOTES non-ASCII bytes in `--name-only` output by default — `é.json`
+/// prints as the literal text `"\303\251.json"`. A line-oriented reader that
+/// treated that as a real path would never find the actual file, record a
+/// false "absent" marker for it, and restore nothing where the real unstaged
+/// bytes belong — silent data loss on any filename outside ASCII.
+#[test]
+fn a_non_ascii_path_survives_the_stash_and_restore() {
+    let r = Repo::new();
+    r.stage("é.json", "{\n  \"a\": 1\n}\n");
+    r.commit("chore: seed");
+    r.stage("é.json", VALID);
+    r.write("é.json", BROKEN);
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(
+        run.passed(),
+        "judged the working tree, not the commit:\n{}",
+        run.output()
+    );
+    assert_eq!(
+        tree(&r, "é.json"),
+        BROKEN,
+        "unstaged work on a non-ASCII path was not restored"
+    );
+}
+
 /// The common case, and it must cost nothing: a clean tree is never touched.
 #[test]
 fn nothing_unstaged_means_nothing_is_moved() {

@@ -78,9 +78,8 @@ impl StagedOnly {
         }
         // Tracked files only: an untracked file is not part of this commit and
         // moving it would surprise everyone.
-        let changed: Vec<String> = crate::git::stdout(&["diff", "--name-only"])
-            .map(|out| out.lines().map(str::to_owned).collect())
-            .unwrap_or_default();
+        let changed: Vec<String> =
+            crate::git::stdout_paths(&["diff", "--name-only"]).unwrap_or_default();
         if changed.is_empty() {
             return Ok(StagedOnly { held: false });
         }

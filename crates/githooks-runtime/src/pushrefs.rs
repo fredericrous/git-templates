@@ -79,9 +79,9 @@ pub fn changed_files(refs: &[PushRef]) -> Vec<String> {
             format!("{}..{}", r.remote_oid, r.local_oid)
         };
         if let Some(out) =
-            crate::git::stdout(&["diff-tree", "--no-commit-id", "--name-only", "-r", &range])
+            crate::git::stdout_paths(&["diff-tree", "--no-commit-id", "--name-only", "-r", &range])
         {
-            changed.extend(out.lines().map(str::trim).map(str::to_owned));
+            changed.extend(out);
         }
     }
     changed.into_iter().collect()

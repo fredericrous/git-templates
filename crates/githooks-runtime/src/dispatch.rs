@@ -316,9 +316,7 @@ fn announce(report: &Report) {
 ///   distinction to protect when the answer is "all of it".
 pub fn run_all(ctx: &Ctx, all_files: bool) -> Verdict {
     if all_files {
-        let files = crate::git::stdout(&["ls-files"])
-            .map(|out| out.lines().map(str::to_owned).collect())
-            .unwrap_or_default();
+        let files = crate::git::stdout_paths(&["ls-files"]).unwrap_or_default();
         crate::hooks::common::override_file_set(files);
     }
     run_stage(&selected(Stage::PreCommit), ctx, &Overrides::read())
