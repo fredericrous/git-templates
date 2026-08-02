@@ -17,7 +17,7 @@ use std::process::Command;
 
 use serde::Serialize;
 
-use crate::scan::Repo;
+use crate::scan::{AgentsMdState, Repo};
 use crate::shim::{self, DISPATCHERS};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -41,6 +41,10 @@ pub enum Refusal {
     /// activation is the first mode that writes them into a repository nobody
     /// had installed into. Same failure, one filename along.
     ForeignHook { names: Vec<String> },
+    /// `AGENTS.md` carries an unpaired marker. Not routed through `Tracked`:
+    /// this file is SUPPOSED to be tracked, so a malformed block is its own
+    /// refusal rather than a false positive on that guard.
+    AgentsMdMalformed { path: PathBuf },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -73,19 +77,36 @@ pub struct WriteShim {
     pub changes: bool,
 }
 
+/// Rolling the `AGENTS.md` pointer out. Only ever present when the caller
+/// opted in (`plan`'s `agents_md` argument) — writing tracked content across
+/// a whole fleet is a materially bigger action than the untracked `.git/hooks`
+/// shims `write` covers, so it never happens implicitly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WriteAgentsMd {
+    pub path: PathBuf,
+    /// Always true: this only appears in a plan when the file is missing or
+    /// drifted. A repo already at the generated block gets no entry at all,
+    /// unlike `WriteShim` — which lists all four dispatchers unconditionally
+    /// for parity with `propagate.sh`. There is no such parity target here.
+    pub changes: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FixPlan {
     pub repo: PathBuf,
     pub refuse: Vec<Refusal>,
     pub remove: Vec<Removal>,
     pub write: Vec<WriteShim>,
+    pub write_agents_md: Option<WriteAgentsMd>,
 }
 
 impl FixPlan {
     /// A plan that would change nothing. Applying twice must produce one of
     /// these the second time.
     pub fn is_noop(&self) -> bool {
-        self.remove.is_empty() && self.write.iter().all(|w| !w.changes)
+        self.remove.is_empty()
+            && self.write.iter().all(|w| !w.changes)
+            && self.write_agents_md.is_none()
     }
     pub fn refused(&self) -> bool {
         !self.refuse.is_empty()
@@ -122,13 +143,20 @@ pub enum Intent {
     Activate,
 }
 
-pub fn plan(repo: &Repo, repo_abs: &Path, binary: &str, intent: Intent) -> FixPlan {
+pub fn plan(
+    repo: &Repo,
+    repo_abs: &Path,
+    binary: &str,
+    intent: Intent,
+    agents_md: bool,
+) -> FixPlan {
     let hooks = repo_abs.join(".git/hooks");
     let mut p = FixPlan {
         repo: repo.path.clone(),
         refuse: Vec::new(),
         remove: Vec::new(),
         write: Vec::new(),
+        write_agents_md: None,
     };
 
     if !repo.managed && intent == Intent::Repair {
@@ -212,13 +240,35 @@ pub fn plan(repo: &Repo, repo_abs: &Path, binary: &str, intent: Intent) -> FixPl
         p.remove.clear();
         p.write.clear();
     }
+
+    // Independent of the hook-shim logic above: AGENTS.md is a plain tracked
+    // file, not a `.git/hooks` dispatcher, so it is neither routed through
+    // `is_tracked` nor suppressed by a hook-shim refusal. Read from the scan's
+    // own `repo.agents_md` rather than re-touching the filesystem here —
+    // `apply` re-checks fresh at the moment of action, the same split already
+    // used for `is_tracked`.
+    if agents_md {
+        let path = repo_abs.join("AGENTS.md");
+        match repo.agents_md {
+            AgentsMdState::Missing | AgentsMdState::Drifted => {
+                p.write_agents_md = Some(WriteAgentsMd {
+                    path,
+                    changes: true,
+                });
+            }
+            AgentsMdState::UpToDate => {}
+            AgentsMdState::Malformed => {
+                p.refuse.push(Refusal::AgentsMdMalformed { path });
+            }
+        }
+    }
+
     p
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scan::AgentsMdState;
     use crate::shim::{BakeState, ShimState};
 
     fn repo(managed: bool) -> Repo {
@@ -247,6 +297,7 @@ mod tests {
             Path::new("/nowhere"),
             "/bin/gh",
             Intent::Repair,
+            false,
         );
         assert_eq!(p.refuse, vec![Refusal::Unmanaged]);
         assert!(
@@ -262,6 +313,7 @@ mod tests {
             Path::new("/definitely/not/here"),
             "/bin/gh",
             Intent::Repair,
+            false,
         );
         assert_eq!(p.refuse, vec![Refusal::UnreadableHooks]);
     }
@@ -278,7 +330,7 @@ mod tests {
         r.foreign_subs = vec!["pre-push-mine.sh".into()];
         r.hook_pkgjson = true;
 
-        let p = plan(&r, &dir, "/bin/gh", Intent::Repair);
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false);
         assert_eq!(p.remove.len(), 3);
         let reasons: Vec<_> = p.remove.iter().map(|r| r.reason).collect();
         assert!(reasons.contains(&RemovalReason::StaleOurs));
@@ -304,9 +356,75 @@ mod tests {
         for n in DISPATCHERS {
             std::fs::write(hooks.join(n), shim::render("/bin/gh")).unwrap();
         }
-        let p = plan(&repo(true), &dir, "/bin/gh", Intent::Repair);
+        let p = plan(&repo(true), &dir, "/bin/gh", Intent::Repair, false);
         assert!(p.is_noop(), "{p:?}");
         assert_eq!(p.write.len(), 4);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A repo with no `.git/hooks`, otherwise healthy, so only the
+    /// `agents_md` argument is under test.
+    fn healthy_repo_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("fixplan-agents-md-{name}-{}", std::process::id()));
+        let hooks = dir.join(".git/hooks");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&hooks).unwrap();
+        for n in DISPATCHERS {
+            std::fs::write(hooks.join(n), shim::render("/bin/gh")).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn agents_md_is_never_planned_without_opting_in() {
+        let dir = healthy_repo_dir("optout");
+        let mut r = repo(true);
+        r.agents_md = AgentsMdState::Missing;
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false);
+        assert!(p.write_agents_md.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_or_drifted_agents_md_is_planned_when_opted_in() {
+        for state in [AgentsMdState::Missing, AgentsMdState::Drifted] {
+            let dir = healthy_repo_dir("plan");
+            let mut r = repo(true);
+            r.agents_md = state;
+            let p = plan(&r, &dir, "/bin/gh", Intent::Repair, true);
+            assert!(!p.is_noop(), "{p:?}");
+            let w = p.write_agents_md.expect("must plan a write");
+            assert!(w.changes);
+            assert_eq!(w.path, dir.join("AGENTS.md"));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn an_up_to_date_agents_md_is_not_replanned() {
+        let dir = healthy_repo_dir("uptodate");
+        let mut r = repo(true);
+        r.agents_md = AgentsMdState::UpToDate;
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, true);
+        assert!(p.write_agents_md.is_none());
+        assert!(p.is_noop(), "{p:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_malformed_agents_md_refuses_the_repo() {
+        let dir = healthy_repo_dir("malformed");
+        let mut r = repo(true);
+        r.agents_md = AgentsMdState::Malformed;
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, true);
+        assert_eq!(
+            p.refuse,
+            vec![Refusal::AgentsMdMalformed {
+                path: dir.join("AGENTS.md")
+            }]
+        );
+        assert!(p.write_agents_md.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

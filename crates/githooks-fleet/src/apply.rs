@@ -93,6 +93,30 @@ pub fn apply(plan: &FixPlan) -> Outcome {
         written += 1;
     }
 
+    if let Some(w) = &plan.write_agents_md {
+        // Re-check at the moment of action, same rule as `is_tracked` above:
+        // the scan this plan was built from may be stale, and a repo that
+        // reached `MatchesGenerated` in between must not be overwritten.
+        match githooks_runtime::agents_md::check(&w.path) {
+            Ok(githooks_runtime::agents_md::CheckResult::MatchesGenerated) => {}
+            Ok(_) => match githooks_runtime::agents_md::write(&w.path) {
+                Ok(()) => written += 1,
+                Err(e) => {
+                    return Outcome::Failed {
+                        error: e,
+                        at: w.path.display().to_string(),
+                    }
+                }
+            },
+            Err(e) => {
+                return Outcome::Failed {
+                    error: e,
+                    at: w.path.display().to_string(),
+                }
+            }
+        }
+    }
+
     Outcome::Applied { removed, written }
 }
 
@@ -152,7 +176,7 @@ mod tests {
         std::fs::write(hooks.join("package.json"), "{\"//\":\"Forces Node\"}").unwrap();
 
         let (repo, abs) = scan_one(&root, "/bin/gh");
-        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair);
+        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair, false);
         let out = apply(&p);
 
         assert!(
@@ -181,13 +205,13 @@ mod tests {
 
         let (repo, abs) = scan_one(&root, "/bin/gh");
         assert!(matches!(
-            apply(&plan(&repo, &abs, "/bin/gh", Intent::Repair)),
+            apply(&plan(&repo, &abs, "/bin/gh", Intent::Repair, false)),
             Outcome::Applied { .. }
         ));
 
         // Re-scan: the world changed, so the plan must be recomputed.
         let (repo2, abs2) = scan_one(&root, "/bin/gh");
-        let p2 = plan(&repo2, &abs2, "/bin/gh", Intent::Repair);
+        let p2 = plan(&repo2, &abs2, "/bin/gh", Intent::Repair, false);
         assert!(p2.is_noop(), "second plan should be empty: {p2:?}");
         assert_eq!(apply(&p2), Outcome::Unchanged);
         let _ = std::fs::remove_dir_all(&root);
@@ -202,7 +226,7 @@ mod tests {
         std::fs::remove_file(hooks.join("pre-push")).unwrap();
 
         let (repo, abs) = scan_one(&root, "/bin/gh");
-        let out = apply(&plan(&repo, &abs, "/bin/gh", Intent::Repair));
+        let out = apply(&plan(&repo, &abs, "/bin/gh", Intent::Repair, false));
         assert!(
             matches!(out, Outcome::Applied { written: 1, .. }),
             "{out:?}"
@@ -210,6 +234,66 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(hooks.join("pre-push")).unwrap(),
             shim::render("/bin/gh")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The block is a plain text file, never chmod'd — unlike a shim, git
+    /// never executes it.
+    #[test]
+    fn a_planned_agents_md_write_is_a_plain_file_not_a_shim() {
+        let (root, hooks) = fixture("agents-md-write");
+        healthy_shims(&hooks, "/bin/gh");
+
+        let (repo, abs) = scan_one(&root, "/bin/gh");
+        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair, true);
+        let out = apply(&p);
+        assert!(matches!(out, Outcome::Applied { .. }), "{out:?}");
+
+        let agents_md = abs.join("AGENTS.md");
+        assert_eq!(
+            std::fs::read_to_string(&agents_md).unwrap(),
+            githooks_runtime::agents_md::generate_block()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&agents_md).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0, "AGENTS.md must not be made executable");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The world can change between the scan a plan was built from and the
+    /// moment it is applied — the same reason `is_tracked` re-checks. A repo
+    /// that reached the generated block in that window must not be
+    /// overwritten (which would be a no-op anyway, but re-checking is what
+    /// makes that true rather than assumed).
+    #[test]
+    fn an_agents_md_that_became_current_between_scan_and_apply_is_left_alone() {
+        let (root, hooks) = fixture("agents-md-race");
+        healthy_shims(&hooks, "/bin/gh");
+
+        let (repo, abs) = scan_one(&root, "/bin/gh");
+        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair, true);
+        assert!(p.write_agents_md.is_some(), "plan expected a write");
+
+        // Something else won the race and wrote the current block first.
+        std::fs::write(
+            abs.join("AGENTS.md"),
+            githooks_runtime::agents_md::generate_block(),
+        )
+        .unwrap();
+
+        let out = apply(&p);
+        assert!(
+            matches!(out, Outcome::Applied { written: 0, .. }),
+            "must not count a write it skipped: {out:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(abs.join("AGENTS.md")).unwrap(),
+            githooks_runtime::agents_md::generate_block(),
+            "must still be exactly the generated block, not doubled or corrupted"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -222,7 +306,7 @@ mod tests {
         let before = std::fs::read_to_string(hooks.join("pre-commit")).unwrap();
 
         let (repo, abs) = scan_one(&root, "/bin/gh");
-        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair);
+        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair, false);
         assert_eq!(p.refuse, vec![Refusal::Unmanaged]);
         assert_eq!(apply(&p), Outcome::Refused);
         assert_eq!(
@@ -245,7 +329,7 @@ mod tests {
         )
         .unwrap();
         let (repo, abs) = scan_one(&root, "/bin/gh");
-        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair);
+        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair, false);
         let removals: Vec<_> = p.remove.iter().map(|r| r.path.clone()).collect();
         assert!(!removals.is_empty());
         apply(&p);
@@ -263,7 +347,7 @@ mod tests {
         healthy_shims(&hooks, "/bin/gh");
         std::fs::remove_file(hooks.join("commit-msg")).unwrap();
         let (repo, abs) = scan_one(&root, "/bin/gh");
-        apply(&plan(&repo, &abs, "/bin/gh", Intent::Repair));
+        apply(&plan(&repo, &abs, "/bin/gh", Intent::Repair, false));
         let mode = std::fs::metadata(hooks.join("commit-msg"))
             .unwrap()
             .permissions()
