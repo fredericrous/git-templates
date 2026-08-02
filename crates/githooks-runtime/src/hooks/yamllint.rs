@@ -30,7 +30,11 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
         return Outcome::Unavailable;
     };
     let argv = vec!["yamllint".to_string(), "-c".to_string(), config];
-    if !run_tool(&root, &argv, &files) {
+    // `--` before the file list: a staged file named e.g. `-x.yaml` would
+    // otherwise be read as a flag by yamllint's own (argparse) parser.
+    let mut with_files = vec!["--".to_string()];
+    with_files.extend(files);
+    if !run_tool(&root, &argv, &with_files) {
         fail("yamllint found issues. Please fix");
         return Outcome::Failed;
     }

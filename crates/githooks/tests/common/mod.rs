@@ -69,7 +69,10 @@ impl Repo {
             std::fs::create_dir_all(p).expect("create parent");
         }
         std::fs::write(&full, content).expect("write file");
-        self.git(&["add", path]);
+        // `--`: a fixture staging a file named e.g. `-weird.json` (to prove a
+        // hook itself handles one) would otherwise fail to stage at all —
+        // `git add -weird.json` is `unknown switch 'w'` to git's OWN parser.
+        self.git(&["add", "--", path]);
     }
 
     pub fn write(&self, path: &str, content: &str) {

@@ -71,6 +71,33 @@ fn go_template_yaml_outside_a_chart_still_fails() {
     assert!(!r.hook("pre-commit-lint-json-yaml", &[]).passed());
 }
 
+/// A staged file named like a flag must still be judged on its CONTENT.
+/// `node -e script -weird.json` — no `--` — is `node: bad option:
+/// -weird.json` before node ever reads the file, so a perfectly valid file
+/// would fail for a reason that has nothing to do with JSON.
+#[test]
+fn a_dash_prefixed_filename_is_still_content_checked() {
+    if missing("node") {
+        return;
+    }
+    let r = Repo::new();
+    r.stage("-weird.json", "{\"a\": 1}\n");
+    assert!(r.hook("pre-commit-lint-json-yaml", &[]).passed());
+}
+
+/// The YAML half of the same fix: `yq e true -weird.yaml` — no `--` — is
+/// `unknown shorthand flag: 'w'` to yq's own parser, before yq ever opens
+/// the file.
+#[test]
+fn a_dash_prefixed_yaml_filename_is_still_content_checked() {
+    if missing("yq") {
+        return;
+    }
+    let r = Repo::new();
+    r.stage("-weird.yaml", "a: 1\n");
+    assert!(r.hook("pre-commit-lint-json-yaml", &[]).passed());
+}
+
 // ---- yamllint -----------------------------------------------------------
 
 /// Stock yamllint rules are too noisy to enforce generically, so a repo-local
@@ -97,6 +124,21 @@ fn yamllint_runs_when_the_repo_opts_in() {
     r.write(".yamllint", "rules:\n  trailing-spaces: enable\n");
     r.stage("a.yaml", "a: 1   \n"); // trailing spaces
     assert!(!r.hook("pre-commit-yamllint", &[]).passed());
+}
+
+/// `yamllint -c cfg -weird.yaml` — no `--` — leaves argparse unable to find
+/// its required FILE_OR_DIR positional at all, before yamllint ever opens
+/// the file, so a clean file would fail for a reason unrelated to its
+/// content.
+#[test]
+fn a_dash_prefixed_filename_is_still_content_checked_by_yamllint() {
+    if missing("yamllint") {
+        return;
+    }
+    let r = Repo::new();
+    r.write(".yamllint", "rules:\n  trailing-spaces: enable\n");
+    r.stage("-weird.yaml", "a: 1\n");
+    assert!(r.hook("pre-commit-yamllint", &[]).passed());
 }
 
 // ---- lint-js ------------------------------------------------------------
@@ -150,6 +192,21 @@ fn prettier_flags_an_unformatted_file_when_the_repo_opts_in() {
     r2.write(".prettierrc", "{}\n");
     r2.stage("b.ts", "const x = 1;\n");
     assert!(r2.hook("pre-commit-prettier", &[]).passed());
+}
+
+/// Prettier is the sneaky direction: `prettier --check -weird.ts` — no `--`
+/// — does not even ERROR on the unrecognised flag, it prints a warning and
+/// exits 0 having checked nothing. Without a `--` before the file list, an
+/// unformatted file named like a flag would silently pass.
+#[test]
+fn a_dash_prefixed_filename_is_still_content_checked_by_prettier() {
+    if missing("prettier") {
+        return;
+    }
+    let r = Repo::new();
+    r.write(".prettierrc", "{}\n");
+    r.stage("-weird.ts", "const  x   =1\n");
+    assert!(!r.hook("pre-commit-prettier", &[]).passed());
 }
 
 // ---- ruff / pyright -----------------------------------------------------
