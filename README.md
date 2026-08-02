@@ -173,6 +173,37 @@ reports on content that is not committed and may never be — which is what you
 want when adopting a check into an existing repository, where `git add .` is not
 an acceptable way to measure the mess.
 
+## For coding agents
+
+`githooks list --json` is the same answer as `githooks list`, machine-readable:
+every check's declared and effective severity (accounting for a
+`githooks.severity.*` override), whether it fires here and why not, and its
+command if it is a declared external. `--stage` filters to one trigger;
+`--pushed` scopes to what your *next push* would actually carry — `@{u}..HEAD`
+— rather than the whole tracked tree:
+
+```sh
+githooks list --json
+githooks list --json --stage pre-push
+githooks list --json --stage pre-push --pushed
+```
+
+`githooks agents-md` writes a short, self-verifying pointer to the above into
+`AGENTS.md`, scoped to a `<!-- githooks:start -->` / `<!-- githooks:end -->`
+block — it only ever touches that span, so the rest of the file stays yours:
+
+```sh
+githooks agents-md          # write it, or bring it up to date
+githooks agents-md --check  # exit non-zero if it has drifted (missing is fine — opt-in)
+```
+
+`githooks install` offers to add this block interactively, the same way it
+offers `githooks trust`. Across a fleet, `githooks-fleet` reports each repo's
+state as its own `AGENTS` column, and `fix --apply --agents-md` (or
+`install --agents-md`) rolls the block out — or repairs drift — everywhere at
+once; like every other fleet write, it is opt-in per invocation, never bundled
+into a plain `--apply`.
+
 Design notes live in `docs/`:
 [hook-architecture.md](docs/hook-architecture.md) (the `Check` trait, shipped),
 [index-fidelity-and-run-modes.md](docs/index-fidelity-and-run-modes.md) (what
