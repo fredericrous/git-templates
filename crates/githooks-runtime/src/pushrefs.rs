@@ -70,26 +70,41 @@ pub fn changed_files(refs: &[PushRef]) -> Vec<String> {
         .unwrap_or_else(|| "0".repeat(40));
     let mut changed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for r in refs {
-        if r.local_oid == zero {
-            continue; // deleting a ref pushes no code
-        }
-        if r.remote_oid == zero {
-            // A brand new ref: nothing to walk against, so this is just the
-            // tip commit's own diff, as it always was.
-            if let Some(out) = crate::git::stdout(&[
-                "diff-tree",
-                "--no-commit-id",
-                "--name-only",
-                "-r",
-                &r.local_oid,
-            ]) {
-                changed.extend(out.lines().map(str::trim).map(str::to_owned));
-            }
-            continue;
-        }
-        changed.extend(range_changed_files(&r.remote_oid, &r.local_oid));
+        changed.extend(changed_files_for(r, &zero));
     }
     changed.into_iter().collect()
+}
+
+/// Every path touched by ONE ref being pushed.
+///
+/// Split out from `changed_files` so a caller that runs a suite in a
+/// per-ref worktree — `where_to_run` takes one tip, not the whole ref
+/// list, for exactly this reason — can ask "what did THIS ref change"
+/// instead of the aggregate across every ref in the push.
+pub fn changed_files_for(r: &PushRef, zero: &str) -> Vec<String> {
+    if r.local_oid == zero {
+        return Vec::new(); // deleting a ref pushes no code
+    }
+    if r.remote_oid == zero {
+        // A brand-new ref: no remote tree to diff against, so the
+        // `remote..local` trick below does not apply. Walk every commit
+        // this push would introduce that no remote-tracking ref already
+        // has — `rev-list --not --remotes` — rather than just the tip's
+        // own diff against its parent, which silently missed every
+        // earlier commit on a multi-commit new branch: a crate added two
+        // commits back, with a docs-only commit on top, reported only the
+        // docs file as changed, so a scope-gated check like
+        // `pre-push-cargo-test` never ran.
+        let commits = crate::git::stdout(&["rev-list", &r.local_oid, "--not", "--remotes"]);
+        return match commits {
+            Some(commits) if !commits.is_empty() => diff_tree_stdin(&commits),
+            // No remote-tracking ref to exclude anything against (e.g. no
+            // remote configured at all) — fall back to the tip alone,
+            // which is at least what the check always did before.
+            _ => diff_tree_stdin(&r.local_oid),
+        };
+    }
+    range_changed_files(&r.remote_oid, &r.local_oid)
 }
 
 /// Every path touched by ANY commit reachable in `remote..local`, not just
@@ -111,6 +126,12 @@ fn range_changed_files(remote_oid: &str, local_oid: &str) -> Vec<String> {
     if commits.is_empty() {
         return Vec::new();
     }
+    diff_tree_stdin(&commits)
+}
+
+/// Feed a newline-separated list of commit ids through `diff-tree --stdin`,
+/// diffing each against its own parent(s), and return the union of paths.
+fn diff_tree_stdin(commits: &str) -> Vec<String> {
     // `git::stdout` trims the trailing newline `rev-list` itself always
     // writes — and `diff-tree --stdin` treats "no newline after this hash"
     // as "the line isn't finished yet", silently dropping the LAST commit
@@ -132,7 +153,7 @@ fn range_changed_files(remote_oid: &str, local_oid: &str) -> Vec<String> {
             "-m",
             "--stdin",
         ],
-        &format!("{commits}\n"),
+        &format!("{}\n", commits.trim_end()),
     )
     .map(|out| out.lines().map(str::trim).map(str::to_owned).collect())
     .unwrap_or_default()

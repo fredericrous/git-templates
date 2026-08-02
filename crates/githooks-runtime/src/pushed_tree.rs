@@ -138,24 +138,17 @@ impl Drop for PushedTree {
     }
 }
 
-/// The commit at the tip of what is being pushed.
-pub fn tip(refs: &[crate::pushrefs::PushRef]) -> Option<String> {
-    let zero = crate::git::stdout(&["hash-object", "--stdin"])
-        .map(|h| "0".repeat(h.len()))
-        .unwrap_or_else(|| "0".repeat(40));
-    refs.iter()
-        .find(|r| r.local_oid != zero)
-        .map(|r| r.local_oid.clone())
-}
-
 /// Where a pre-push suite should run, and whether that is the honest answer.
+///
+/// Takes ONE commit, not the whole ref list: a push can carry several refs
+/// (`git push origin a b`), each with its own tip, and a caller that checked
+/// out only the first one and ran every ref's tests against it would test
+/// the second ref's code against the first ref's tree. Callers loop over
+/// their own refs and pass each one's tip in turn.
 ///
 /// Returns the directory plus the guard that owns it — dropping the guard
 /// removes the worktree, so the caller must hold it for the length of the run.
-pub fn where_to_run(
-    refs: &[crate::pushrefs::PushRef],
-    fallback: &str,
-) -> (PathBuf, Option<PushedTree>) {
+pub fn where_to_run(tip: &str, fallback: &str) -> (PathBuf, Option<PushedTree>) {
     if !enabled() {
         // Today's behaviour, but no longer silent about it.
         println!(
@@ -165,10 +158,7 @@ pub fn where_to_run(
         );
         return (PathBuf::from(fallback), None);
     }
-    let Some(tip) = tip(refs) else {
-        return (PathBuf::from(fallback), None);
-    };
-    match PushedTree::create(Path::new(fallback), &tip) {
+    match PushedTree::create(Path::new(fallback), tip) {
         Some(tree) => {
             let path = tree.path().to_path_buf();
             (path, Some(tree))

@@ -216,42 +216,56 @@ pub fn clippy(_args: &[std::ffi::OsString]) -> Outcome {
 
 /// pre-push. Mirrors `run-tests-js`: the range that is actually being pushed
 /// decides whether the suite runs, so a docs-only push costs nothing.
+///
+/// PER REF, not once for the whole push: `git push origin a b` carries two
+/// tips, and a single worktree checked out to the first one would run the
+/// second ref's tests against the first ref's tree — a real failure in the
+/// untested branch reported as a pass because nothing actually ran against
+/// it. Each ref that touches Rust gets its own worktree and its own verdict.
 pub fn test(refs: &[crate::pushrefs::PushRef]) -> Outcome {
     let Some(root) = git::stdout(&["rev-parse", "--show-toplevel"]) else {
         return Outcome::Passed;
     };
-    let changed = crate::pushrefs::changed_files(refs);
-    let roots = cargo_roots(&root, changed.iter().map(String::as_str));
-    if roots.is_empty() {
-        return Outcome::Passed;
-    }
-    // Where the suite runs decides what it is answering about. `_guard` owns
-    // the checkout for the length of the run; dropping it removes the worktree.
-    let (where_, _guard) = crate::pushed_tree::where_to_run(refs, &root);
-    let roots: Vec<PathBuf> = roots
-        .iter()
-        .map(|r| {
-            r.strip_prefix(&root)
-                .map(|rel| where_.join(rel))
-                .unwrap_or_else(|_| r.clone())
-        })
-        .collect();
-    match each_root(
-        &roots,
-        None,
-        &["test", "--workspace", "--all-features"],
-        "Rust changed but cargo is not installed.",
-    ) {
-        None => Outcome::Unavailable,
-        Some(true) => {
-            ok("Rust tests passed");
-            Outcome::Passed
+    let zero = git::stdout(&["hash-object", "--stdin"])
+        .map(|h| "0".repeat(h.len()))
+        .unwrap_or_else(|| "0".repeat(40));
+    let mut ran_any = false;
+    for r in refs {
+        let changed = crate::pushrefs::changed_files_for(r, &zero);
+        let roots = cargo_roots(&root, changed.iter().map(String::as_str));
+        if roots.is_empty() {
+            continue;
         }
-        Some(false) => {
-            fail("Rust tests failed. Push aborted.");
-            Outcome::Failed
+        // Where THIS ref's suite runs decides what it is answering about.
+        // `_guard` owns the checkout for the length of this ref's run;
+        // dropping it removes the worktree before the next ref's begins.
+        let (where_, _guard) = crate::pushed_tree::where_to_run(&r.local_oid, &root);
+        let roots: Vec<PathBuf> = roots
+            .iter()
+            .map(|rt| {
+                rt.strip_prefix(&root)
+                    .map(|rel| where_.join(rel))
+                    .unwrap_or_else(|_| rt.clone())
+            })
+            .collect();
+        match each_root(
+            &roots,
+            None,
+            &["test", "--workspace", "--all-features"],
+            "Rust changed but cargo is not installed.",
+        ) {
+            None => return Outcome::Unavailable,
+            Some(true) => ran_any = true,
+            Some(false) => {
+                fail("Rust tests failed. Push aborted.");
+                return Outcome::Failed;
+            }
         }
     }
+    if ran_any {
+        ok("Rust tests passed");
+    }
+    Outcome::Passed
 }
 
 #[cfg(test)]
