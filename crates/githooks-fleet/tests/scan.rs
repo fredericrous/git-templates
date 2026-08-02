@@ -102,6 +102,11 @@ impl Tree {
         std::fs::write(self.0.join(rel).join(".githooks.conf"), body).expect("write");
         self
     }
+    /// A committed `AGENTS.md` at a repo root, verbatim.
+    fn agents_md(&self, rel: &str, body: &str) -> &Self {
+        std::fs::write(self.0.join(rel).join("AGENTS.md"), body).expect("write");
+        self
+    }
     fn path(&self) -> &Path {
         &self.0
     }
@@ -447,4 +452,42 @@ fn core_hooks_path_via_an_include_is_still_honoured() {
     let repo = &v["repos"][0];
     assert_eq!(repo["managed"], true, "{repo}");
     assert!(!t.path().join("redirected/.git/hooks").exists());
+}
+
+/// A repo with no `AGENTS.md` at all is `missing`, not a problem to alarm on —
+/// the pointer is opt-in, same posture as `.githooks.conf`.
+#[test]
+fn a_repo_without_agents_md_scans_as_missing() {
+    let t = Tree::new("agents-md-missing");
+    t.managed_repo("a");
+    let v = json(&["--root", t.path().to_str().unwrap()]);
+    assert_eq!(v["repos"][0]["agents_md"], "missing");
+}
+
+/// The exact block `githooks agents-md` would write scans as up to date, so
+/// a fleet-wide rollout knows which repos are already done.
+#[test]
+fn a_repo_with_the_generated_block_scans_as_up_to_date() {
+    let t = Tree::new("agents-md-current");
+    t.managed_repo("a")
+        .agents_md("a", &githooks_runtime::agents_md::generate_block());
+    let v = json(&["--root", t.path().to_str().unwrap()]);
+    assert_eq!(v["repos"][0]["agents_md"], "up_to_date");
+}
+
+/// A block that has drifted from what `agents-md` would generate today — the
+/// case a fleet rollout exists to repair.
+#[test]
+fn a_repo_with_a_stale_block_scans_as_drifted() {
+    let t = Tree::new("agents-md-drifted");
+    t.managed_repo("a").agents_md(
+        "a",
+        &format!(
+            "{}\nstale content from an older version\n{}\n",
+            githooks_runtime::agents_md::START,
+            githooks_runtime::agents_md::END
+        ),
+    );
+    let v = json(&["--root", t.path().to_str().unwrap()]);
+    assert_eq!(v["repos"][0]["agents_md"], "drifted");
 }

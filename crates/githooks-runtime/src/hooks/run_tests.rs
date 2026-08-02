@@ -100,10 +100,10 @@ pub fn defines_script(pkg_json: &str, script: &str) -> bool {
 /// required), and it is the more correct set anyway — only TRACKED packages can
 /// be part of a push, and node_modules is excluded by construction rather than
 /// by fd happening to honour .gitignore.
-pub fn package_dirs(ls_files: &str) -> Vec<String> {
+pub fn package_dirs(ls_files: &[String]) -> Vec<String> {
     let mut dirs: Vec<String> = ls_files
-        .lines()
-        .map(str::trim)
+        .iter()
+        .map(String::as_str)
         .filter(|f| *f == "package.json" || f.ends_with("/package.json"))
         .map(|f| parent_of(f).to_string())
         .collect();
@@ -173,7 +173,7 @@ pub fn run(refs: &[crate::pushrefs::PushRef]) -> Outcome {
     let Some(root) = git::stdout(&["rev-parse", "--show-toplevel"]) else {
         return Outcome::Passed;
     };
-    let pkg_dirs = git::stdout(&["ls-files"])
+    let pkg_dirs = git::stdout_paths(&["ls-files"])
         .map(|f| package_dirs(&f))
         .unwrap_or_default();
 
@@ -189,13 +189,13 @@ pub fn run(refs: &[crate::pushrefs::PushRef]) -> Outcome {
         };
 
         let Some(changed) =
-            git::stdout(&["diff-tree", "--no-commit-id", "--name-only", "-r", &range])
+            git::stdout_paths(&["diff-tree", "--no-commit-id", "--name-only", "-r", &range])
         else {
             continue;
         };
         let changed_dirs: Vec<String> = changed
-            .lines()
-            .map(str::trim)
+            .iter()
+            .map(String::as_str)
             .filter(|f| is_js(f))
             .map(|f| parent_of(f).to_string())
             .collect();
@@ -248,9 +248,17 @@ mod tests {
 
     #[test]
     fn collects_package_directories() {
-        let ls = "package.json\napps/web/package.json\napps/web/src/a.ts\nREADME.md\n";
+        let ls: Vec<String> = [
+            "package.json",
+            "apps/web/package.json",
+            "apps/web/src/a.ts",
+            "README.md",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         assert_eq!(
-            package_dirs(ls),
+            package_dirs(&ls),
             vec!["".to_string(), "apps/web".to_string()]
         );
     }

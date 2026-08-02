@@ -8,3 +8,9 @@ license = "MIT"
 # Only the runtime, which itself has none. See crates/githooks-runtime.
 [dependencies]
 githooks-runtime = { path = "../githooks-runtime" }
+
+# Test-only: asserting on parsed JSON structure rather than substrings for
+# `list --json`. Does not touch the shipped binary — check-no-deps.sh's
+# `--edges normal` excludes dev-dependencies, and CI verifies that directly.
+[dev-dependencies]
+serde_json = "1"

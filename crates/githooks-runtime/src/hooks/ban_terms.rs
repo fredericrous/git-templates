@@ -381,14 +381,14 @@ pub fn run(hook_name: &str, _args: &[std::ffi::OsString]) -> Outcome {
     let mut found_any = false;
     for term in &TERMS {
         let arg = format!("-G{}", term.prefilter);
-        let Some(out) = git::stdout(&["diff", "--cached", &arg, "--diff-filter=d", "--name-only"])
+        let Some(out) =
+            git::stdout_paths(&["diff", "--cached", &arg, "--diff-filter=d", "--name-only"])
         else {
             continue;
         };
         let matches: Vec<&str> = out
-            .lines()
-            .map(str::trim)
-            .filter(|f| !f.is_empty())
+            .iter()
+            .map(String::as_str)
             .filter(|f| is_searchable(f))
             .filter(|f| !stem_matches_self(f))
             .filter(|file| {

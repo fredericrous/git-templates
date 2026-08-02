@@ -38,14 +38,12 @@ pub fn staged_files(exts: &[&str]) -> Vec<String> {
             .cloned()
             .collect();
     }
-    let Some(out) = git::stdout(&["diff", "--diff-filter=d", "--cached", "--name-only"]) else {
+    let Some(out) = git::stdout_paths(&["diff", "--diff-filter=d", "--cached", "--name-only"])
+    else {
         return Vec::new();
     };
-    out.lines()
-        .map(str::trim)
-        .filter(|f| !f.is_empty())
+    out.into_iter()
         .filter(|f| exts.is_empty() || exts.iter().any(|e| f.ends_with(e)))
-        .map(str::to_owned)
         .collect()
 }
 
