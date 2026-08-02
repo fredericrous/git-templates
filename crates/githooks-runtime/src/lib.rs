@@ -23,6 +23,7 @@ pub mod dispatch;
 pub mod git;
 pub mod hooks;
 pub mod install;
+pub mod json;
 pub mod manifest;
 pub mod pushed_tree;
 pub mod pushrefs;
