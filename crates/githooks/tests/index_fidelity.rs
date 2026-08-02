@@ -325,6 +325,75 @@ fn a_dangling_unstaged_symlink_is_not_deleted() {
     );
 }
 
+/// A regression the first two symlink tests could not catch: they both use
+/// `link`, which has no extension, so `Path::with_extension` (the original,
+/// wrong implementation) happened to behave like appending a suffix for it.
+/// A tracked symlink that HAS one, `link.txt`, is where `with_extension`
+/// actually replaces `.txt` with the marker — parking it as
+/// `link.githooks-symlink` and, on restore, recreating bare `link` while the
+/// real `link.txt` (whatever `checkout` left there) is never touched again.
+#[test]
+fn a_retargeted_symlink_with_an_extension_keeps_its_name() {
+    let r = Repo::new();
+    seed(&r);
+    if !try_symlink("x.json", &r.path("link.txt")) {
+        println!("  ! symlinks unavailable — skipping");
+        return;
+    }
+    r.git(&["add", "link.txt"]);
+    r.commit("chore: add a symlink");
+
+    std::fs::remove_file(r.path("link.txt")).expect("remove the old link");
+    assert!(
+        try_symlink("unstaged-target", &r.path("link.txt")),
+        "fixture: retarget failed after the capability check passed"
+    );
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "{}", run.output());
+
+    let meta = std::fs::symlink_metadata(r.path("link.txt"))
+        .expect("link.txt must still exist, under its full name");
+    assert!(
+        meta.file_type().is_symlink(),
+        "the symlink was replaced with a regular file"
+    );
+    assert_eq!(
+        std::fs::read_link(r.path("link.txt")).expect("read link"),
+        std::path::Path::new("unstaged-target"),
+        "the unstaged retarget was not restored"
+    );
+    assert!(
+        !r.path("link").exists(),
+        "restore invented a bare `link` — with_extension truncated the marker's name"
+    );
+}
+
+/// The same `with_extension` mistake, on the OTHER marker: a tracked file
+/// deleted in the working tree but not staged. `x.json` already has an
+/// extension, so this is the case `nothing_unstaged_means_nothing_is_moved`
+/// and friends never exercised — they all pass `x.json` through the
+/// MODIFIED branch, which never went through `with_extension` at all.
+#[test]
+fn an_unstaged_delete_of_an_extensioned_file_restores_under_its_full_name() {
+    let r = Repo::new();
+    seed(&r);
+    r.stage("x.json", VALID);
+    std::fs::remove_file(r.path("x.json")).expect("delete unstaged");
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "{}", run.output());
+
+    // The wrong marker name ("x.githooks-absent") does not match "x.json",
+    // so `remove_file` on it silently no-ops and `checkout`'s resurrected
+    // x.json is left behind — the delete the author made is never restored.
+    assert!(
+        !r.path("x.json").exists(),
+        "the unstaged delete was not restored — with_extension named the \
+         marker for `x`, not `x.json`, so restore's remove_file missed it"
+    );
+}
+
 /// `None` on a platform/runner that cannot create the link at all (Windows
 /// without `SeCreateSymbolicLinkPrivilege`), so the two tests above skip
 /// instead of failing on a capability the environment never had.

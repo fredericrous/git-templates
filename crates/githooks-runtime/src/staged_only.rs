@@ -125,7 +125,7 @@ impl StagedOnly {
                 Ok(meta) if meta.file_type().is_symlink() => match std::fs::read_link(&from) {
                     Ok(link_target) => {
                         if std::fs::write(
-                            to.with_extension("githooks-symlink"),
+                            marker(&to, "githooks-symlink"),
                             link_target.to_string_lossy().as_bytes(),
                         )
                         .is_err()
@@ -146,7 +146,7 @@ impl StagedOnly {
                     // so the restore deletes it again rather than
                     // resurrecting it.
                     Err(_) => {
-                        if std::fs::write(to.with_extension("githooks-absent"), b"").is_err() {
+                        if std::fs::write(marker(&to, "githooks-absent"), b"").is_err() {
                             return Err(held_nothing(&store));
                         }
                     }
@@ -203,6 +203,20 @@ impl StagedOnly {
             }
         }
     }
+}
+
+/// `to`, with `.<suffix>` APPENDED to the whole file name — never
+/// `Path::with_extension`, which REPLACES the last extension: for `link.txt`
+/// it would produce `link.githooks-absent`, silently dropping `.txt`, so
+/// `put_back` would recreate `link` instead of `link.txt` and the original
+/// `link.txt` — whatever `checkout` put there — would never be touched again.
+/// `put_back`'s `strip_suffix(".githooks-…")` already expects this shape; it
+/// was the write side that disagreed with it.
+fn marker(to: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = to.file_name().unwrap_or_default().to_os_string();
+    name.push(".");
+    name.push(suffix);
+    to.with_file_name(name)
 }
 
 fn held_nothing(store: &Path) -> String {
