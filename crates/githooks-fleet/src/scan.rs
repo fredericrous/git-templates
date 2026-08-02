@@ -156,13 +156,15 @@ impl FleetScan {
 /// A file is ours only if it dispatches to the binary. Anything else in
 /// `.git/hooks` is somebody's own hook and is never counted as ours.
 ///
-/// This was deliberately identical to the test `propagate.sh` used, so the two
-/// could not drift on what "managed" means while both existed. The script is
-/// gone; the definition stays because it is the right one, not because
-/// something else depends on it.
+/// Asked once, via `install::is_our_shim` — the SHIM_MARKER check — rather
+/// than re-tested here with a bespoke substring match. This answer feeds
+/// `stale_ours`, which `fix::plan` turns straight into a removal list: the
+/// old body was `s.contains("--hooks-dir")`, matched by a hand-written hook
+/// that merely mentions the flag in a comment or forwards it to another
+/// tool, which `install::is_our_shim` would have refused to touch.
 fn is_ours(path: &Path) -> bool {
     std::fs::read_to_string(path)
-        .map(|s| s.contains("--hooks-dir"))
+        .map(|s| githooks_runtime::install::is_our_shim(&s))
         .unwrap_or(false)
 }
 
@@ -244,6 +246,21 @@ pub fn scan_with(
     s
 }
 
+/// Walks `dir`, following symlinks — DELIBERATELY, not merely because
+/// `Path::is_dir` happens to. `~/.config/git/git-templates` is commonly a
+/// symlink to a checkout (see `install::TemplateDir`), and a linked worktree
+/// reaches its repository the same way; either can sit inside `--root`, and a
+/// scan that refused to follow them would silently under-report the fleet —
+/// exactly the "0 copies / 0 distinct" failure this module's own doc warns
+/// about.
+///
+/// The `depth` budget bounds the cost, but a symlink can still walk the scan
+/// to a directory outside `--root` that a filesystem path comparison would
+/// not expect. That is not this function's problem to solve: `fix`/`apply`
+/// never trust a path scan reported — every removal and write is re-verified
+/// against `git ls-files` at the moment of action (`fix::is_tracked`), so a
+/// symlink reaching tracked source changes what gets REPORTED here, never
+/// what a later `--apply` is willing to touch.
 fn walk(
     root: &Path,
     dir: &Path,

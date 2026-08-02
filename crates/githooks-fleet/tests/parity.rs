@@ -82,7 +82,7 @@ impl Fleet {
         self.healthy(rel);
         std::fs::write(
             self.hooks(rel).join("pre-commit-ruff"),
-            "#!/bin/sh\nexec x --hooks-dir y pre-commit-ruff\n",
+            "#!/bin/sh\n# git-templates hook shim.\nexec x --hooks-dir y pre-commit-ruff\n",
         )
         .unwrap();
         self

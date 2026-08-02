@@ -27,7 +27,7 @@ impl Tree {
         std::fs::create_dir_all(&hooks).expect("mkdir");
         std::fs::write(
             hooks.join("pre-commit"),
-            "#!/bin/sh\nexec \"$BIN\" --hooks-dir \"$(dirname \"$0\")\" pre-commit \"$@\"\n",
+            "#!/bin/sh\n# git-templates hook shim.\nexec \"$BIN\" --hooks-dir \"$(dirname \"$0\")\" pre-commit \"$@\"\n",
         )
         .expect("write");
         self
@@ -59,7 +59,7 @@ impl Tree {
         std::fs::create_dir_all(&hooks).expect("mkdir");
         std::fs::write(
             hooks.join("pre-commit"),
-            "#!/bin/sh\nexec \"$BIN\" --hooks-dir \"$(dirname \"$0\")\" pre-commit \"$@\"\n",
+            "#!/bin/sh\n# git-templates hook shim.\nexec \"$BIN\" --hooks-dir \"$(dirname \"$0\")\" pre-commit \"$@\"\n",
         )
         .expect("write");
         self
@@ -88,7 +88,7 @@ impl Tree {
         std::fs::create_dir_all(&hooks).expect("mkdir");
         std::fs::write(
             hooks.join("pre-commit"),
-            "#!/bin/sh\nexec \"$BIN\" --hooks-dir \"$(dirname \"$0\")\" pre-commit \"$@\"\n",
+            "#!/bin/sh\n# git-templates hook shim.\nexec \"$BIN\" --hooks-dir \"$(dirname \"$0\")\" pre-commit \"$@\"\n",
         )
         .expect("write");
         self
@@ -277,7 +277,7 @@ fn stale_and_foreign_hook_files_are_reported_separately() {
     // Ours, but no longer shipped (a retired per-check shim).
     std::fs::write(
         hooks.join("pre-commit-ruff"),
-        "#!/bin/sh\nexec x --hooks-dir y pre-commit-ruff\n",
+        "#!/bin/sh\n# git-templates hook shim.\nexec x --hooks-dir y pre-commit-ruff\n",
     )
     .unwrap();
     // Somebody's own sub-hook: not ours, and now dispatched by nothing.
@@ -289,6 +289,32 @@ fn stale_and_foreign_hook_files_are_reported_separately() {
     assert_eq!(r["stale_ours"][0], "pre-commit-ruff");
     assert_eq!(r["foreign_subs"][0], "pre-push-mine.sh");
     assert_eq!(r["hook_pkgjson"], true);
+}
+
+/// "Ours" is answered by the shim marker, not by grepping for `--hooks-dir` —
+/// a hand-written hook that happens to mention that flag (in a comment, or
+/// forwarding it to another tool) is not ours, and must not be classified as
+/// a stale shim of ours: that classification feeds `fix --apply`'s removal
+/// list directly.
+#[test]
+fn a_hook_merely_mentioning_hooks_dir_is_not_classified_as_ours() {
+    let t = Tree::new("mentions-flag");
+    t.managed_repo("a");
+    let hooks = t.path().join("a/.git/hooks");
+    std::fs::write(
+        hooks.join("pre-commit-mine"),
+        "#!/bin/sh\n# forwards --hooks-dir to some other tool of mine\nexec my-own-tool \"$@\"\n",
+    )
+    .unwrap();
+
+    let v = json(&["--root", t.path().to_str().unwrap()]);
+    let r = &v["repos"][0];
+    assert_eq!(
+        r["stale_ours"].as_array().map(|a| a.len()).unwrap_or(0),
+        0,
+        "a hook that only MENTIONS --hooks-dir was classified as ours: {r}"
+    );
+    assert_eq!(r["foreign_subs"][0], "pre-commit-mine");
 }
 
 /// A shim installed by `make install` must classify as OK, not drifted — the
