@@ -18,7 +18,7 @@ mod shim;
 mod skips;
 mod tui;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
@@ -63,40 +63,43 @@ struct Args {
     binary: Option<String>,
 }
 
-fn parse(argv: &[String]) -> Result<Args, String> {
-    let mut a = Args {
-        mode: Mode::Scan,
-        root: default_root(),
-        depth: 6,
-        json: false,
-        apply: false,
-        binary: None,
-    };
+/// `home` is threaded through rather than read from the environment here, so
+/// the no-`$HOME`-and-no-`--root` refusal below is a plain unit test rather
+/// than something that can only be exercised by mutating the real process
+/// environment (racy, since tests in this binary run in parallel).
+fn parse(argv: &[String], home: Option<&Path>) -> Result<Args, String> {
+    let mut mode = Mode::Scan;
+    let mut root: Option<PathBuf> = None;
+    let mut depth = 6;
+    let mut json = false;
+    let mut apply = false;
+    let mut binary: Option<String> = None;
+
     let mut it = argv.iter().peekable();
     if let Some(first) = it.peek() {
         match first.as_str() {
             "scan" => {
-                a.mode = Mode::Scan;
+                mode = Mode::Scan;
                 it.next();
             }
             "fix" => {
-                a.mode = Mode::Fix;
+                mode = Mode::Fix;
                 it.next();
             }
             "tui" => {
-                a.mode = Mode::Tui;
+                mode = Mode::Tui;
                 it.next();
             }
             "install" => {
-                a.mode = Mode::Install;
+                mode = Mode::Install;
                 // Installing IS applying; requiring `--apply` as well would be
                 // asking twice for one decision.
-                a.apply = true;
+                apply = true;
                 it.next();
             }
             "uninstall" => {
-                a.mode = Mode::Uninstall;
-                a.apply = true;
+                mode = Mode::Uninstall;
+                apply = true;
                 it.next();
             }
             _ => {}
@@ -104,46 +107,70 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     }
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--json" => a.json = true,
+            "--json" => json = true,
             "--root" => {
-                a.root = it.next().ok_or("--root needs a directory")?.into();
+                root = Some(it.next().ok_or("--root needs a directory")?.into());
             }
             "--depth" => {
                 let v = it.next().ok_or("--depth needs a number")?;
-                a.depth = v
+                depth = v
                     .parse()
                     .map_err(|_| format!("--depth: {v:?} is not a number"))?;
             }
-            "--apply" => a.apply = true,
+            "--apply" => apply = true,
             "--binary" => {
-                a.binary = Some(it.next().ok_or("--binary needs a path")?.clone());
+                binary = Some(it.next().ok_or("--binary needs a path")?.clone());
             }
             "-h" | "--help" => return Err(String::new()),
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
-    Ok(a)
+    // Resolved last, so it only runs when no explicit `--root` makes it moot.
+    let root = match root {
+        Some(r) => r,
+        None => default_root(home).ok_or_else(|| {
+            "no --root given and $HOME is not set — refusing to guess \
+             (the alternative is silently scanning, and `fix --apply`ing, \
+             from wherever this happened to be launched)"
+                .to_string()
+        })?,
+    };
+    Ok(Args {
+        mode,
+        root,
+        depth,
+        json,
+        apply,
+        binary,
+    })
+}
+
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 /// Where `make install` puts the binary. Shims baked with anything else are
 /// reported as stale, which is the GUI-client failure mode.
-fn default_binary() -> String {
-    std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".local/bin/githooks"))
-        .unwrap_or_else(|| PathBuf::from("githooks"))
-        .to_string_lossy()
-        .into_owned()
+///
+/// `home: None` has no good guess and must not pretend to: a bare relative
+/// `"githooks"` baked into a shim is a silently broken install — the same
+/// failure family as #79 (a wrong path from a missing env var), just on the
+/// write side rather than the delete side.
+fn default_binary(home: Option<&Path>) -> Option<String> {
+    home.map(|h| h.join(".local/bin/githooks").to_string_lossy().into_owned())
 }
 
-fn default_root() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join("Developer"))
-        .unwrap_or_else(|| PathBuf::from("."))
+/// `home: None` must not fall back to `.` — `fix --apply`/`install` would
+/// then operate, recursively, from wherever the process happened to be
+/// launched, with only `is_dir()` standing between that and doing real work.
+/// #79 was exactly this: a surprising path from an absent env var.
+fn default_root(home: Option<&Path>) -> Option<PathBuf> {
+    home.map(|h| h.join("Developer"))
 }
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    let args = match parse(&argv) {
+    let args = match parse(&argv, home().as_deref()) {
         Ok(a) => a,
         Err(e) => {
             if !e.is_empty() {
@@ -163,7 +190,20 @@ fn main() -> ExitCode {
     }
 
     let started = std::time::Instant::now();
-    let installed = args.binary.clone().unwrap_or_else(default_binary);
+    let installed = match args
+        .binary
+        .clone()
+        .or_else(|| default_binary(home().as_deref()))
+    {
+        Some(b) => b,
+        None => {
+            eprintln!(
+                "githooks-fleet: no --binary given and $HOME is not set — \
+                 refusing to guess which binary the shims should point at"
+            );
+            return ExitCode::from(2);
+        }
+    };
 
     if args.mode == Mode::Tui {
         return match tui::run(args.root.clone(), args.depth, installed.clone()) {
@@ -404,19 +444,67 @@ mod tests {
 
     #[test]
     fn parses_flags_and_defaults() {
-        let a = parse(&[]).expect("defaults");
+        let home = Path::new("/home/x");
+        let a = parse(&[], Some(home)).expect("defaults");
         assert_eq!(a.depth, 6);
         assert!(!a.json);
+        assert_eq!(a.root, home.join("Developer"));
 
-        let a = parse(&["--depth".into(), "2".into(), "--json".into()]).unwrap();
+        let a = parse(&["--depth".into(), "2".into(), "--json".into()], Some(home)).unwrap();
         assert_eq!(a.depth, 2);
         assert!(a.json);
     }
 
     #[test]
     fn rejects_bad_input_loudly() {
-        assert!(parse(&["--depth".into(), "lots".into()]).is_err());
-        assert!(parse(&["--depth".into()]).is_err());
-        assert!(parse(&["--nope".into()]).is_err());
+        let home = Some(Path::new("/home/x"));
+        assert!(parse(&["--depth".into(), "lots".into()], home).is_err());
+        assert!(parse(&["--depth".into()], home).is_err());
+        assert!(parse(&["--nope".into()], home).is_err());
+    }
+
+    /// The failure this exists to prevent: `$HOME` missing and no `--root`
+    /// silently resolving to `.` — `fix --apply`/`install` would then act,
+    /// recursively, on whatever directory the process happened to be
+    /// launched from. #79 was exactly this shape, on the delete side.
+    #[test]
+    fn no_home_and_no_root_is_refused_not_guessed() {
+        assert!(
+            parse(&[], None).is_err(),
+            "must refuse rather than default to the current directory"
+        );
+    }
+
+    /// An explicit `--root` moots the whole question — `$HOME` need not even
+    /// exist for this to work.
+    #[test]
+    fn an_explicit_root_needs_no_home() {
+        let a = parse(&["--root".into(), "/somewhere".into()], None).expect("explicit --root");
+        assert_eq!(a.root, PathBuf::from("/somewhere"));
+    }
+
+    #[test]
+    fn default_root_and_binary_need_home() {
+        assert_eq!(
+            default_root(None),
+            None,
+            "no directory to guess without $HOME"
+        );
+        assert_eq!(
+            default_binary(None),
+            None,
+            "no binary path to guess without $HOME"
+        );
+
+        let home = Path::new("/home/x");
+        assert_eq!(default_root(Some(home)), Some(home.join("Developer")));
+        assert_eq!(
+            default_binary(Some(home)),
+            Some(
+                home.join(".local/bin/githooks")
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        );
     }
 }
