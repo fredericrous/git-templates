@@ -54,8 +54,23 @@ impl PushedTree {
     /// it would race every other test in the binary.
     pub fn create(repo: &Path, tip: &str) -> Option<PushedTree> {
         let base = std::env::temp_dir().join(unique_name("githooks-push"));
-        let _ = std::fs::remove_dir_all(&base);
-        let path = base.clone();
+        Self::create_at(base, repo, tip)
+    }
+
+    /// The actual work, over an explicit path — split out so a test can hand
+    /// it a path it controls, since `create`'s own path is unpredictable BY
+    /// DESIGN and cannot be aimed at a fixture.
+    ///
+    /// `create_dir`, not a `remove_dir_all` before creating: that deleted
+    /// whatever was already at this path BEFORE this process had established
+    /// it owned it — an unpredictable name makes landing on an existing path
+    /// unlikely, not impossible, and "unlikely" is not the bar for a delete.
+    /// `create_dir` is exclusive: it fails loudly on anything already there
+    /// instead of removing it, and git's own `worktree add` is content to
+    /// receive a directory that already exists as long as it is empty —
+    /// which this one, having just been created, provably is.
+    fn create_at(base: PathBuf, repo: &Path, tip: &str) -> Option<PushedTree> {
+        std::fs::create_dir(&base).ok()?;
         let ok = crate::git::succeeds(&[
             "-C",
             repo.to_str()?,
@@ -63,11 +78,17 @@ impl PushedTree {
             "add",
             "--detach",
             "--quiet",
-            path.to_str()?,
+            base.to_str()?,
             tip,
         ]);
-        ok.then_some(PushedTree {
-            path,
+        if !ok {
+            // Ours to clean up: we created it moments ago, so nothing else
+            // could have raced in ahead of us to make this delete unsafe.
+            let _ = std::fs::remove_dir_all(&base);
+            return None;
+        }
+        Some(PushedTree {
+            path: base,
             repo: repo.to_path_buf(),
         })
     }
@@ -174,6 +195,31 @@ mod tests {
         let b = unique_name("githooks-push");
         assert_ne!(a, b);
         assert!(a.starts_with("githooks-push-"));
+    }
+
+    /// The point of the whole fix: something already at the target path is
+    /// left ALONE, not deleted to make way. `create_at` fails closed
+    /// (`None`) instead of the old `remove_dir_all`-first shape, which would
+    /// have destroyed `sentinel.txt` here to clear the path for a worktree
+    /// that was never going to use it anyway (the repo below is fake).
+    #[test]
+    fn an_existing_path_is_left_alone_not_cleared() {
+        let base = std::env::temp_dir().join(format!("pushed-collision-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("sentinel.txt"), "do not delete me").unwrap();
+
+        let got = PushedTree::create_at(base.clone(), Path::new("/does/not/matter"), "HEAD");
+        assert!(
+            got.is_none(),
+            "must refuse rather than reuse a path it did not create"
+        );
+        assert_eq!(
+            std::fs::read_to_string(base.join("sentinel.txt")).unwrap(),
+            "do not delete me",
+            "an existing path must never be cleared to make room"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn repo(name: &str) -> PathBuf {
