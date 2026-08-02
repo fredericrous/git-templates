@@ -1,6 +1,10 @@
 # Hook architecture: one `Check` trait
 
-Status: **specification**. Nothing here is built.
+Status: **shipped**. PRs 1–3 below are done, and `docs/rust-migration.md`
+carried the result the rest of the way; what came after this document is
+[index-fidelity-and-run-modes.md](index-fidelity-and-run-modes.md). Kept as
+the design record — the "what is wrong today" section describes the state
+before this landed, not the state now.
 
 ## What is wrong today
 
