@@ -44,8 +44,19 @@ from [Releases](https://github.com/fredericrous/githooks/releases/latest) —
 prebuilt for Linux (gnu/musl, x86_64 and aarch64), macOS (Intel and Apple
 silicon) and Windows. Or build from source: `cargo build --release`.
 
-`cargo install githooks` is not live yet; the crates.io publish is still
-pending.
+From [crates.io](https://crates.io/crates/githooks):
+
+```sh
+cargo install githooks
+```
+
+Or with Homebrew:
+
+```sh
+brew tap fredericrous/tap
+brew trust fredericrous/tap    # Homebrew asks this of every third-party tap
+brew install githooks
+```
 
 ## Uninstall
 
