@@ -565,10 +565,62 @@ fn offer_agents_md() {
     }
 }
 
+/// Where this binary can already be found on `PATH`, if it can.
+///
+/// Returns the path as `PATH` exposes it — deliberately NOT the resolved one.
+/// Homebrew's `/usr/local/bin/githooks` is a symlink into
+/// `/usr/local/Cellar/githooks/<version>/bin/`, and that Cellar path is
+/// version-specific and removed on upgrade. Baking it would pin every repo to a
+/// version that is about to be deleted, which is worse than the copy this
+/// function exists to avoid. The same is true of any versioned store — nix,
+/// asdf, mise.
+///
+/// So the comparison is canonical (to recognise ourselves through the symlink)
+/// while the value returned is the entry that led here. That also makes the
+/// answer correct whichever way `current_exe()` behaves: it resolves symlinks
+/// on some platforms and libcs and not others, and this never has to care.
+fn on_path_already(me: &Path) -> Option<PathBuf> {
+    let me_real = me.canonicalize().ok()?;
+    let name = installed_name();
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(&name))
+        .find(|cand| cand.canonicalize().is_ok_and(|real| real == me_real))
+        .map(|cand| absolute(&cand))
+        .filter(|abs| is_bakeable(&abs.to_string_lossy()))
+}
+
 /// Copy the running binary to a stable location, and return where it now lives.
 fn install_binary() -> Result<String, String> {
     let me =
         std::env::current_exe().map_err(|e| format!("cannot locate the running binary: {e}"))?;
+
+    // A binary a package manager already put on PATH is not ours to copy.
+    //
+    // The copy below exists for `./target/release/githooks install`, where the
+    // binary sits in a directory `cargo clean` will delete — baking that path
+    // would install hooks that stop resolving the next time somebody builds.
+    // For `brew install`, `cargo install` or a distro package, the opposite is
+    // true: the binary is already somewhere stable, and copying it produces a
+    // SECOND, unmanaged copy that the package manager will never update again.
+    //
+    // That is not hypothetical. It is what this machine was in: `brew upgrade`
+    // would have refreshed /usr/local/bin while every repo stayed baked to a
+    // frozen copy in ~/.local/bin — the same staleness the copy is meant to
+    // prevent, arrived at from the other direction.
+    //
+    // `$GITHOOKS_BIN_DIR` is checked first because setting it IS the request to
+    // put the binary somewhere specific, and honouring it costs nothing.
+    if std::env::var_os("GITHOOKS_BIN_DIR").is_none() {
+        if let Some(stable) = on_path_already(&me) {
+            let shown = stable.to_string_lossy().into_owned();
+            println!("{} using {}", valid_sign(), highlight(&shown));
+            println!("    already on PATH, so nothing was copied — an upgrade there");
+            println!("    reaches every repository without reinstalling.");
+            return Ok(shown);
+        }
+    }
+
     let dir = bin_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
 

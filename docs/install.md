@@ -38,6 +38,26 @@ defines no binary directory at all; `~/.local/bin` is simply the convention
 systemd, pipx and uv all observe. (`$XDG_CONFIG_HOME` **is** honoured, for the
 template directory.)
 
+### Where the binary ends up
+
+`githooks install` copies the running binary somewhere stable and bakes that
+path into every shim it writes — **unless the binary is already on your
+`PATH`**, in which case it bakes it where it is and copies nothing.
+
+That split matters for package managers. `./target/release/githooks install`
+must copy, because `cargo clean` deletes that directory and the shims would
+stop resolving. A binary from `brew install`, `cargo install` or a distro
+package must **not** be copied: the copy is a second, unmanaged binary that the
+package manager will never update again, so `brew upgrade githooks` refreshes
+one file while every repository stays baked to a frozen one. That is the same
+staleness the copy exists to prevent, arrived at from the other side.
+
+The path baked for a package-managed binary is the one **`PATH` exposes**, not
+the resolved one. Homebrew's `/usr/local/bin/githooks` is a symlink into
+`/usr/local/Cellar/githooks/<version>/bin/`, and that versioned directory is
+deleted on the next upgrade — baking it would pin every repository to a path
+about to stop existing. The same is true of nix, asdf and mise.
+
 ### Installing somewhere else
 
 `$GITHOOKS_BIN_DIR` moves the binary, and `install` bakes wherever it landed
