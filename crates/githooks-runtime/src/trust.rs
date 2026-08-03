@@ -253,7 +253,12 @@ pub fn confirm(_prompt: &str) -> bool {
 
 /// `githooks trust [--show|--revoke]`.
 pub fn command(args: &[std::ffi::OsString]) -> Result<(), String> {
-    let root = crate::hooks::common::repo_root();
+    // Refuse rather than fall back to ".". Trust is RECORDED per repository,
+    // keyed by the root this resolves to, so a "." root outside a repository
+    // meant `githooks trust` in `~` would read `~/.githooks.conf`, show its
+    // declarations, and record trust for them — against a repository that does
+    // not exist, in a state no later `githooks trust --revoke` would find.
+    let root = crate::hooks::common::repo_root_checked()?;
     let root = Path::new(&root);
     let flag = |f: &str| args.iter().any(|a| a == f);
 

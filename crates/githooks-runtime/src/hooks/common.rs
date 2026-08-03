@@ -48,8 +48,39 @@ pub fn staged_files(exts: &[&str]) -> Vec<String> {
 }
 
 /// Repo root, or "." when git cannot say.
+///
+/// **For CHECK BODIES ONLY.** The fallback is safe there and nowhere else: git
+/// invokes a hook with the working tree as the current directory, so a check
+/// that reaches this line is already standing in the repository, and "." is the
+/// right answer rather than a guess.
+///
+/// Anything a user types — `githooks agents-md`, `install`, `trust`, `restore`
+/// — can be typed from any directory on the machine, and there the fallback is
+/// not a fallback but a wrong answer that reads as a right one. Use
+/// [`repo_root_checked`] at every command entry point.
 pub fn repo_root() -> String {
     git::stdout(&["rev-parse", "--show-toplevel"]).unwrap_or_else(|| ".".into())
+}
+
+/// Repo root, or an error naming the problem.
+///
+/// The same question as [`repo_root`] without the "." — because "." is a
+/// PLAUSIBLE root, and that is what made it dangerous. `githooks agents-md`
+/// run outside a repository did not fail; it resolved the root to the current
+/// directory and wrote `./AGENTS.md` into whatever directory the user happened
+/// to be standing in, then printed `wrote ./AGENTS.md` as if that were the
+/// answer. Same shape in `install`'s two prompts, in `trust` (which then
+/// looked for a manifest, and would have recorded trust, under `.`) and in
+/// `restore`.
+///
+/// Every one of those is a command somebody types, and a command somebody
+/// types is a command they can type from `~`. There is no correct behaviour
+/// available to this function when git cannot answer, so it does not invent
+/// one.
+pub fn repo_root_checked() -> Result<String, String> {
+    git::stdout(&["rev-parse", "--show-toplevel"])
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "not inside a git repository".to_string())
 }
 
 /// Resolve a tool, preferring the repo's PINNED copy so the hook matches CI.

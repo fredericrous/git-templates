@@ -353,7 +353,16 @@ fn agents_md(args: &[OsString]) -> i32 {
     let check_only = args.iter().any(|a| a == "--check");
     let path = match path_flag(args) {
         Ok(Some(p)) => p,
-        Ok(None) => PathBuf::from(githooks_runtime::hooks::common::repo_root()).join("AGENTS.md"),
+        // Outside a repository there is no root to write into. `repo_root()`
+        // answered "." here, so `githooks agents-md` typed from `~` wrote
+        // `./AGENTS.md` into the user's home directory and reported success.
+        Ok(None) => match githooks_runtime::hooks::common::repo_root_checked() {
+            Ok(root) => PathBuf::from(root).join("AGENTS.md"),
+            Err(e) => {
+                eprintln!("githooks: {e}");
+                return 2;
+            }
+        },
         Err(e) => {
             eprintln!("githooks: {e}");
             return 2;

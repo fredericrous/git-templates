@@ -612,7 +612,12 @@ pub fn restore_command() -> Result<(), String> {
         println!("{} nothing of ours to restore", warning_sign());
         return Ok(());
     }
-    let root = crate::hooks::common::repo_root();
+    // `store_dir()` already established we are in a repository, so this cannot
+    // fail here — asked the checked way anyway, because `repo_root()`'s "."
+    // would make `put_back` write held files relative to the current directory
+    // rather than the work tree, and a restore that lands in the wrong place is
+    // the failure this whole module exists to prevent.
+    let root = crate::hooks::common::repo_root_checked()?;
     put_back(&store, Path::new(&root))
         .map_err(|e| format!("could not put {} back: {e}", store.display()))?;
     let _ = std::fs::remove_dir_all(&store);

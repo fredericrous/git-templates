@@ -373,7 +373,13 @@ pub fn run(force: bool) -> Result<(), String> {
 /// Never blocks and never fails the install: a repository that declares nothing
 /// says nothing, and a non-interactive install simply reports the state.
 fn offer_trust() {
-    let root = crate::hooks::common::repo_root();
+    // No repository, no manifest to ask about. `repo_root()` answered "." and
+    // this went looking for `./.githooks.conf` in whatever directory the
+    // install was run from — a file it would then have offered to trust ON
+    // BEHALF of a repository that does not exist.
+    let Ok(root) = crate::hooks::common::repo_root_checked() else {
+        return;
+    };
     let root = Path::new(&root);
     let state = crate::trust::state(root);
     if matches!(
@@ -443,7 +449,13 @@ fn offer_trust() {
 /// nothing to offer, and a non-interactive install simply leaves the
 /// question unanswered — `trust::confirm` already treats no tty as "no".
 fn offer_agents_md() {
-    let root = crate::hooks::common::repo_root();
+    // Same reason as `offer_trust`: with `repo_root()`'s "." fallback, an
+    // install run outside a repository offered to write an AGENTS.md into the
+    // current directory — the one thing `install` writes to TRACKED content,
+    // aimed at a directory nobody said was a project.
+    let Ok(root) = crate::hooks::common::repo_root_checked() else {
+        return;
+    };
     let path = Path::new(&root).join("AGENTS.md");
     match crate::agents_md::check(&path) {
         Ok(crate::agents_md::CheckResult::MatchesGenerated) => return,
