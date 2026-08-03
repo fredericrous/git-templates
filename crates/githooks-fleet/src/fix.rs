@@ -92,6 +92,19 @@ pub enum Refusal {
     /// relative path against the WORKING TREE, so baking one across a fleet
     /// would hand every repository the chance to answer for its own hooks.
     UnbakeableBinary { binary: String },
+    /// This repository's hooks resolve to a directory outside it.
+    ///
+    /// `core.hooksPath` may be an absolute path anywhere on the disk, and
+    /// `Intent::Activate` used to `create_dir_all` it and write four 0o755 files
+    /// into it — so a scanned repository could name `/etc/githooks`, or another
+    /// checkout's working tree, and a fleet-wide `install` would oblige. See
+    /// [`crate::scan::HooksDir`] for why the per-repo installer keeps honouring
+    /// the same setting that this refuses.
+    HooksDirOutsideRepo { path: PathBuf },
+    /// git would not say where this repository's hooks live. The old code
+    /// answered that question with `repo.join(".git/hooks")`, which is a guess
+    /// everywhere and a WRONG guess for a repository whose `.git` is a file.
+    HooksDirUnknown { why: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -138,10 +151,45 @@ pub struct WriteAgentsMd {
     pub changes: bool,
 }
 
+/// Something the reader must be told that does NOT stop the repair.
+///
+/// A second channel next to `refuse`, and the separation is the point. A
+/// refusal suppresses the whole repository, which is right when we cannot
+/// establish that acting is safe and wrong when we simply found something worth
+/// mentioning: a stranger's `pre-push-mine.sh` sitting in `.git/hooks` must not
+/// block repairing four broken dispatchers in the same directory. Folding the
+/// two together forces a choice between "say nothing" and "do nothing", and
+/// this tool has been on both sides of that choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "warning", rename_all = "snake_case")]
+pub enum Warning {
+    /// The repository's hooks resolve outside the repository itself.
+    ///
+    /// Also present in `refuse`, as the only condition that appears on both
+    /// channels. The two say different things to different readers: the warning
+    /// NAMES the directory in the fix/install report and in the dashboard, so
+    /// somebody can go and look at what their `core.hooksPath` is pointing at,
+    /// while the refusal is what stops `apply` writing there. Dropping either
+    /// one loses something — the refusal alone is silent about where, the
+    /// warning alone would not suppress the write.
+    HooksDirOutsideRepo { path: PathBuf },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FixPlan {
     pub repo: PathBuf,
+    /// Absolute path to the repository, carried so `apply` can RE-RESOLVE what
+    /// this plan resolved rather than trusting a field that was computed before
+    /// the user was even shown a preview.
+    pub repo_abs: PathBuf,
+    /// Repair or activate. Carried for the same reason: `apply` re-verifies the
+    /// refusals that depend on it, and re-deriving intent from the shape of the
+    /// plan would be guessing at the caller's decision.
+    pub intent: Intent,
+    /// Where this plan resolved the hooks to. `apply` re-resolves and compares.
+    pub hooks: crate::scan::HooksDir,
     pub refuse: Vec<Refusal>,
+    pub warn: Vec<Warning>,
     pub remove: Vec<Removal>,
     pub write: Vec<WriteShim>,
     pub write_agents_md: Option<WriteAgentsMd>,
@@ -150,6 +198,10 @@ pub struct FixPlan {
 impl FixPlan {
     /// A plan that would change nothing. Applying twice must produce one of
     /// these the second time.
+    ///
+    /// Warnings do not count. A repository whose only finding is "there is a
+    /// hook here we did not write" needs nothing done to it, and reporting it as
+    /// a pending change every run would train the reader to ignore the number.
     pub fn is_noop(&self) -> bool {
         self.remove.is_empty()
             && self.write.iter().all(|w| !w.changes)
@@ -184,12 +236,26 @@ pub fn tracked_refusal(path: &Path) -> Option<Refusal> {
     }
 }
 
+/// Is this dispatcher path one activation may claim — nothing there, or already
+/// one of ours?
+///
+/// Every other answer (a stranger's hook, a compiled binary, a symlink, a
+/// directory, an unreadable file) is a repository we do not activate. Shared
+/// with `apply`, which asks the same question again at the moment of writing.
+pub fn is_absent_or_ours(path: &Path) -> bool {
+    matches!(
+        githooks_runtime::hookfile::classify(path),
+        githooks_runtime::hookfile::HookFile::Absent | githooks_runtime::hookfile::HookFile::Ours
+    )
+}
+
 /// Why we are planning: repairing an installation, or making one.
 ///
 /// The difference is exactly one refusal. `fix` declines an unmanaged
 /// repository because there is nothing there to repair and writing into one
 /// would be a decision it was not asked to make. `install` IS that decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Intent {
     Repair,
     Activate,
@@ -202,10 +268,14 @@ pub fn plan(
     intent: Intent,
     agents_md: bool,
 ) -> FixPlan {
-    let hooks = crate::scan::hooks_dir_for(repo_abs);
+    let hooks_dir = crate::scan::hooks_dir_for(repo_abs);
     let mut p = FixPlan {
         repo: repo.path.clone(),
+        repo_abs: repo_abs.to_path_buf(),
+        intent,
+        hooks: hooks_dir.clone(),
         refuse: Vec::new(),
+        warn: Vec::new(),
         remove: Vec::new(),
         write: Vec::new(),
         write_agents_md: None,
@@ -219,10 +289,36 @@ pub fn plan(
         });
         return p;
     }
+    // A repository whose hooks another one in this scan already owns gets an
+    // empty plan — not a refusal, because nothing is wrong: a linked worktree
+    // and its main repo are one hooks directory wearing two paths. Writing the
+    // four shims through both would write the same file twice and report it as
+    // eight, which is the shape of the `192 removals across 96 repos` number
+    // that started this whole exercise.
+    if repo.shares_hooks_with.is_some() {
+        return p;
+    }
     if !repo.managed && intent == Intent::Repair {
         p.refuse.push(Refusal::Unmanaged);
         return p;
     }
+    // Containment BEFORE creation. `Intent::Activate` used to `create_dir_all`
+    // whatever `core.hooksPath` named, which is how a fleet-wide install could
+    // create and populate a directory a scanned repository chose.
+    let hooks = match &hooks_dir {
+        crate::scan::HooksDir::In { path } => path.clone(),
+        crate::scan::HooksDir::Outside { path } => {
+            p.warn
+                .push(Warning::HooksDirOutsideRepo { path: path.clone() });
+            p.refuse
+                .push(Refusal::HooksDirOutsideRepo { path: path.clone() });
+            return p;
+        }
+        crate::scan::HooksDir::Unknown { why } => {
+            p.refuse.push(Refusal::HooksDirUnknown { why: why.clone() });
+            return p;
+        }
+    };
     // Activating creates the directory; repairing does not, because a missing
     // `.git/hooks` in a repo we thought was managed is a fact worth reporting
     // rather than papering over.
@@ -256,14 +352,17 @@ pub fn plan(
 
     // Only when activating: repairing a managed repo means its dispatchers are
     // already ours, and a drifted one is a repair rather than a stranger.
+    //
+    // Asked through `hookfile::classify`, which does not follow links and does
+    // not need the file to be UTF-8. The predicate here used to be
+    // `read_to_string(..).map(|t| !is_our_shim(&t)).unwrap_or(false)` — so a
+    // compiled hook (`Err(InvalidData)`) and a symlink to a tracked file (the
+    // target's bytes) both came back "not foreign", and activation wrote over
+    // them.
     if intent == Intent::Activate {
         let foreign: Vec<String> = DISPATCHERS
             .into_iter()
-            .filter(|name| {
-                std::fs::read_to_string(hooks.join(name))
-                    .map(|text| !githooks_runtime::install::is_our_shim(&text))
-                    .unwrap_or(false)
-            })
+            .filter(|name| !is_absent_or_ours(&hooks.join(name)))
             .map(str::to_owned)
             .collect();
         if !foreign.is_empty() {
@@ -347,6 +446,10 @@ mod tests {
             declared: Vec::new(),
             trusted: None,
             agents_md: AgentsMdState::Missing,
+            hooks_dir: crate::scan::HooksDir::In {
+                path: std::path::PathBuf::from(".git/hooks"),
+            },
+            shares_hooks_with: None,
         }
     }
 
@@ -366,8 +469,29 @@ mod tests {
         );
     }
 
+    /// A repository whose `.git` is there but whose hooks directory is not.
+    /// `Repair` does not create it — a missing `.git/hooks` in a repo we thought
+    /// was managed is a fact worth reporting rather than papering over.
     #[test]
     fn a_missing_hooks_dir_is_refused() {
+        let dir = std::env::temp_dir().join(format!("fixplan-nohooks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        let p = plan(&repo(true), &dir, "/bin/gh", Intent::Repair, false);
+        assert_eq!(p.refuse, vec![Refusal::UnreadableHooks]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CHANGED ON PURPOSE. This case — a repository path that is not there at
+    /// all — used to fall out as `UnreadableHooks`, because `hooks_dir_for`
+    /// answered every failure with the guess `repo.join(".git/hooks")` and the
+    /// guess then failed an `is_dir()`. The right refusal for it, and the reason
+    /// `HooksDirUnknown` exists, is that we do not know where this repository's
+    /// hooks are: for a repo whose `.git` is a FILE, the old guess was not a
+    /// conservative default but a wrong answer, and `UnreadableHooks` reported
+    /// it as if we had looked.
+    #[test]
+    fn a_repo_git_cannot_reach_at_all_refuses_as_unknown() {
         let p = plan(
             &repo(true),
             Path::new("/definitely/not/here"),
@@ -375,7 +499,12 @@ mod tests {
             Intent::Repair,
             false,
         );
-        assert_eq!(p.refuse, vec![Refusal::UnreadableHooks]);
+        assert!(
+            matches!(p.refuse.as_slice(), [Refusal::HooksDirUnknown { why }] if !why.is_empty()),
+            "{:?}",
+            p.refuse
+        );
+        assert!(p.remove.is_empty() && p.write.is_empty());
     }
 
     #[test]

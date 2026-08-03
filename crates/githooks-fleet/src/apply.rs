@@ -401,7 +401,11 @@ mod tests {
 
         let p = FixPlan {
             repo: PathBuf::from("r"),
+            repo_abs: dir.clone(),
+            intent: Intent::Repair,
+            hooks: crate::scan::HooksDir::In { path: dir.clone() },
             refuse: Vec::new(),
+            warn: Vec::new(),
             remove: Vec::new(),
             write: vec![WriteShim {
                 path: target.clone(),
