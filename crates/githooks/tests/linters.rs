@@ -323,9 +323,118 @@ fn ruff_leaves_files_alone_when_fixing_is_off() {
     );
 }
 
+/// `pre-commit-pyright` is `Severity::Block` — it stops commits — and for a
+/// long time this was its ONLY test: an assertion that it does nothing. Pyright
+/// was installed on every CI runner and nothing exercised it, so a check with
+/// the power to reject a commit had no coverage of the path where it does.
+/// The two cases below are that coverage; this one keeps the scoping honest.
+///
+/// SILENT, not merely passing: a repo with no pyright config has not opted in,
+/// and must not be told to install a type checker it never asked for — the same
+/// rule yamllint and kube-linter were fixed for.
+///
+/// Needs no tool at all. `opts_in` is tested before the binary is resolved, so
+/// this holds on a machine with no pyright, which is most of them.
 #[test]
 fn pyright_skips_a_repo_with_no_pyright_config() {
     let r = Repo::new();
     r.stage("a.py", "x: int = 'nope'\n");
-    assert!(r.hook("pre-commit-pyright", &[]).passed());
+    let run = r.hook("pre-commit-pyright", &[]);
+    assert!(run.passed());
+    assert!(
+        run.silent(),
+        "a repo that never opted in must hear nothing:\n{}",
+        run.output()
+    );
+}
+
+/// The blocking path, which nothing asserted until now.
+///
+/// `pyrightconfig.json` is the opt-in. `x: int = 'nope'` is a plain
+/// assignment-type error that needs no imports and no inference across files,
+/// so it fails on any pyright version without pinning the test to one.
+///
+/// The second assertion is not padding. When this case was first run the check
+/// was passing `--` before the file list, pyright read that as a path, and the
+/// hook failed with `File or directory ".../--" does not exist` — a blocked
+/// commit, exit 4, and nothing to do with the staged code. This case went GREEN
+/// on that. "It blocked" is far too weak a claim for a `Severity::Block` check;
+/// what it must do is block for the reason the author can act on.
+#[test]
+fn pyright_reports_a_type_error() {
+    if missing("pyright") {
+        return;
+    }
+    let r = Repo::new();
+    r.write("pyrightconfig.json", "{}\n");
+    r.stage("a.py", "x: int = 'nope'\n");
+    let run = r.hook("pre-commit-pyright", &[]);
+    assert!(
+        !run.passed(),
+        "a type error must block a Severity::Block check:\n{}",
+        run.output()
+    );
+    assert!(
+        !run.says("does not exist"),
+        "it blocked over an argument it could not resolve, not over the code:\n{}",
+        run.output()
+    );
+    assert!(
+        run.says("a.py"),
+        "the report must name the offending file:\n{}",
+        run.output()
+    );
+}
+
+/// …and the other half, which is what stops the case above from passing for the
+/// wrong reason. A check that fails on everything satisfies "reports a type
+/// error" perfectly well; only a clean file passing proves it is reading the
+/// code rather than tripping over its own invocation — a wrong `--`, a bad
+/// working directory, a binary it could not resolve.
+///
+/// This is the case that actually caught the `--` bug, on its first run.
+#[test]
+fn pyright_passes_clean_code() {
+    if missing("pyright") {
+        return;
+    }
+    let r = Repo::new();
+    r.write("pyrightconfig.json", "{}\n");
+    r.stage("a.py", "x: int = 1\n");
+    let run = r.hook("pre-commit-pyright", &[]);
+    assert!(run.passed(), "clean code must not block:\n{}", run.output());
+}
+
+/// The sibling of the `-weird.*` case every other tool-driven check carries —
+/// and the reason the `--` it used to pass could not simply be deleted.
+///
+/// Pyright has no `--`, so the protection has to come from the path itself:
+/// each file is handed over as `./<path>`, which no argument parser can read as
+/// a flag. Without that, `pyright -weird.py` is an unrecognised option and the
+/// check fails for a reason that has nothing to do with the file's contents.
+#[test]
+fn a_dash_prefixed_filename_is_still_content_checked_by_pyright() {
+    if missing("pyright") {
+        return;
+    }
+    let r = Repo::new();
+    r.write("pyrightconfig.json", "{}\n");
+    r.stage("-weird.py", "x: int = 1\n");
+    let run = r.hook("pre-commit-pyright", &[]);
+    assert!(
+        run.passed(),
+        "a clean file named like a flag must still pass:\n{}",
+        run.output()
+    );
+
+    // …and the same name must still be capable of FAILING, or the case above
+    // would be satisfied by pyright silently checking nothing at all — which is
+    // exactly how the prettier version of this bug behaved.
+    let r2 = Repo::new();
+    r2.write("pyrightconfig.json", "{}\n");
+    r2.stage("-weird.py", "x: int = 'nope'\n");
+    assert!(
+        !r2.hook("pre-commit-pyright", &[]).passed(),
+        "a file named like a flag was not actually type-checked"
+    );
 }

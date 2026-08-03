@@ -205,10 +205,35 @@ pub fn pyright(_args: &[std::ffi::OsString]) -> Outcome {
     // local-vs-CI gap. Pyright still resolves the whole workspace for imports,
     // so inference is unchanged; only the reported set is scoped. CI's
     // whole-tree run stays the authority for cross-file-only errors.
-    // `--` before the file list: a staged file named e.g. `-p.py` would
-    // otherwise be read as a flag by pyright's own parser.
-    let mut with_files = vec!["--".to_string()];
-    with_files.extend(files.iter().cloned());
+    // PYRIGHT HAS NO `--` SEPARATOR, and this check used to pass one.
+    //
+    // Every other tool driven from this repository takes `--` to mean "flags
+    // are over" — ruff, prettier, yamllint, node, yq all do, and each has a
+    // regression test for a staged file named like a flag. Pyright does not.
+    // It has a hand-rolled argument parser that treats `--` as an ordinary
+    // path, so `pyright -- a.py` reports
+    //
+    //     File or directory ".../--" does not exist
+    //
+    // and exits 4. `run_tool` sees a non-zero status, and a check declared
+    // `Severity::Block` blocked the commit. Not on bad code — on ALL code. Any
+    // repository with a `pyrightconfig.json` or a `[tool.pyright]` table could
+    // not commit a `.py` file at all while pyright was installed, and the
+    // message it got named a file nobody had written.
+    //
+    // It survived because the check's only test asserted that it does NOTHING
+    // in a repo with no config, which is the one path that never reaches this
+    // line. `linters.rs` now has both halves — a type error must block, and
+    // clean code must not — and it was the second of those that caught this in
+    // its first run. A check that fails on everything satisfies "reports a type
+    // error" perfectly.
+    //
+    // `./` in place of `--` keeps the protection that was intended. `./-p.py`
+    // begins with a dot, so no argument parser can mistake it for a flag, and
+    // pyright resolves it against the working directory `run_tool` already
+    // sets. Git reports staged paths relative to the repository root with
+    // forward slashes on every platform, so this is safe to prepend blindly.
+    let with_files: Vec<String> = files.iter().map(|f| format!("./{f}")).collect();
     if !run_tool(&root, &argv, &with_files) {
         fail("Pyright type errors. Please fix");
         return Outcome::Failed;
