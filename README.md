@@ -6,19 +6,26 @@
 [![Release](https://img.shields.io/github/v/release/fredericrous/githooks?label=release)](https://github.com/fredericrous/githooks/releases/latest)
 [![License](https://img.shields.io/github/license/fredericrous/githooks)](LICENSE)
 
-A single Rust binary that runs twenty checks on `git commit` and `git push`:
-commit-message conventions, merge-conflict markers, linters and formatters for
-the languages your repository actually uses, branch rules, your test suite.
-Nothing runs in a repository you did not ask, nothing is installed you cannot
-name, and uninstall removes exactly what install wrote.
+A single Rust binary that checks `git commit` and `git push` — no YAML to
+write, no runtime to install, nothing to configure before it is useful.
+
+- **Useful in the first minute.** Twenty built-in checks — commit-message
+  conventions, merge-conflict markers, the linters and formatters for the
+  languages your repository actually uses, branch rules, your test suite —
+  and each one fires only where the repository has opted into its tool.
+- **A cloned repository cannot run code on your machine.** Checks a repository
+  declares for itself are inert until you review them and say `githooks trust`
+  — a gate pre-commit, lefthook and husky do not have.
+- **Nothing on the commit path but `std`.** The hook binary links no external
+  crates, and CI fails any build that changes that.
+- **Leaving is one command.** `githooks uninstall` removes exactly the four
+  shims install wrote; a hook you or another tool put there is named and left
+  alone.
 
 ![githooks catching a commit and letting the fixed one through](docs/assets/githooks-demo.gif)
 
-Against pre-commit, lefthook and husky: no YAML to write before anything
-runs — the twenty checks scope themselves to your repository — and a trust
-gate none of them have, so a cloned repository's committed config cannot run
-code on your machine until you review it.
-[The full comparison](docs/similar-projects.md).
+How that stacks up against pre-commit, lefthook and husky, feature by feature:
+[the full comparison](docs/similar-projects.md).
 
 ## Install
 
@@ -124,15 +131,9 @@ githooks-fleet install --root ~/Developer   # or in bulk, across many repos
 ```
 
 `githooks install --force` replaces a hook the installer would otherwise
-refuse: one present but carrying no marker of ours, or one that is a symlink
-(where writing normally would rewrite whatever it points at). Without the flag,
-install names every such file and writes none of them, because a hook somebody
-else put there is somebody else's.
-
-Two things `--force` does **not** override, deliberately. A **tracked** file is
-never written — that is source belonging to a checkout, and it is the guard
-this project got wrong twice. And a path that is a directory or a device is
-refused whatever you pass.
+refuse — one carrying no marker of ours, or a symlink. Even `--force` never
+writes a tracked file or a directory. The full semantics:
+[what `--force` will and will not do](docs/install.md#--force-and-what-it-will-not-do).
 
 **Everywhere, forever** — an opt-in, and a real one:
 
@@ -297,6 +298,9 @@ has to earn is not "delightful", it is "harmless".
   registry is a failure rather than a reassuring green tick. `githooks-fleet`
   takes dependencies quite happily; it is installed separately and runs when
   asked.
+- **No network, ever.** The binary phones nothing home — no telemetry, no
+  update checks, no fetches. With the commit path std-only, there is not even
+  an HTTP client linked to do it with.
 - **634 tests**, run on Linux, macOS and Windows, alongside `cargo fmt
   --check`, `clippy -D warnings`, an MSRV floor of 1.74 compiled for the commit
   path, and `cargo-audit`.
@@ -317,8 +321,10 @@ Threat model and private reporting: [SECURITY.md](SECURITY.md).
 
 ## Windows
 
-Everything works, with one setup difference: there is no symlink. Install with
-the binary itself — Git for Windows ships `bash` and coreutils but not `make`:
+Everything works, and the PowerShell one-liner in [Install](#install) is all
+the setup most machines need. One difference: there is no symlink. To build
+from source instead — Git for Windows ships `bash` and coreutils but not
+`make`:
 
 ```sh
 cargo build --release
@@ -359,7 +365,8 @@ published as a book:
 - [The trust model](docs/trust.md) · [Custom checks](docs/custom-checks.md)
 - [Where the hooks fit in your flow](docs/coding-flow.md) ·
   [Commit conventions](docs/commit-convention.md) ·
-  [How it compares](docs/similar-projects.md)
+  [How it compares](docs/similar-projects.md) ·
+  [Ideas, not a roadmap](docs/ideas.md)
 - Decision records for maintainers: [hook architecture](docs/hook-architecture.md),
   [index fidelity and run modes](docs/index-fidelity-and-run-modes.md),
   [skip management](docs/hook-skip-management.md),
