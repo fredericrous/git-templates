@@ -450,6 +450,332 @@ fn offering_agents_md_again_after_declining_is_harmless() {
     assert!(!repo.join("AGENTS.md").exists());
 }
 
+// ---- what may be written over, and what may never be ----------------------
+
+/// A compiled hook is not valid UTF-8, so `read_to_string` returned `Err`, and
+/// `unwrap_or(false)` read that as "not foreign". `install` wrote a shim
+/// straight over somebody's binary: no `--force`, no refusal, no message.
+///
+/// Asserted BYTE-identical rather than "still exists", because the failure
+/// being guarded against is a successful overwrite, not a deletion.
+#[test]
+fn a_hook_it_cannot_decode_is_refused_and_left_byte_identical() {
+    let s = Sandbox::new("binary-hook");
+    let repo = s.path("repo");
+    init_repo(&repo);
+    std::fs::create_dir_all(repo.join(".git/hooks")).expect("mkdir");
+    let theirs = repo.join(".git/hooks/pre-commit");
+    // A little ELF header and some bytes no UTF-8 decoder accepts.
+    let bytes: Vec<u8> = vec![
+        0x7f, b'E', b'L', b'F', 0x02, 0x01, 0x01, 0x00, 0xff, 0xfe, 0x00,
+    ];
+    std::fs::write(&theirs, &bytes).expect("write");
+
+    let (code, out) = s.install(&repo);
+    assert_ne!(code, 0, "a silent overwrite reported success:\n{out}");
+    assert!(
+        out.contains("not valid UTF-8"),
+        "the refusal must say what it could not read:\n{out}"
+    );
+    assert_eq!(
+        std::fs::read(&theirs).expect("read"),
+        bytes,
+        "THEIR COMPILED HOOK WAS OVERWRITTEN"
+    );
+}
+
+/// The verified bug, end to end: `.git/hooks/<name>` a symlink to a TRACKED
+/// file in the working tree. `fs::write` follows the link, so every guard the
+/// installer had — all of them about the link path, which is untracked and
+/// inside `.git` and entirely unremarkable — was answering a question about a
+/// different file than the one being written.
+///
+/// The property, stated for all four dispatchers at once: `--force` may change
+/// the hook path, and may never change any file a hook path pointed at.
+#[cfg(unix)]
+#[test]
+fn force_replaces_a_symlinked_hook_and_never_the_file_it_pointed_at() {
+    let s = Sandbox::new("write-through");
+    let repo = s.path("repo");
+    init_repo(&repo);
+    let dev = repo.join("devhooks");
+    std::fs::create_dir_all(&dev).expect("mkdir");
+    std::fs::create_dir_all(repo.join(".git/hooks")).expect("mkdir");
+
+    let names = ["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"];
+    for name in names {
+        let target = dev.join(name);
+        std::fs::write(&target, format!("#!/bin/sh\n# PRECIOUS {name}\n")).expect("write");
+        std::os::unix::fs::symlink(&target, repo.join(".git/hooks").join(name)).expect("symlink");
+    }
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "seed"]);
+    let before: Vec<String> = names
+        .iter()
+        .map(|n| std::fs::read_to_string(dev.join(n)).expect("read"))
+        .collect();
+
+    // Plain install refuses, and names the link rather than muttering about
+    // hooks that are "not ours".
+    let (code, out) = s.install(&repo);
+    assert_ne!(
+        code, 0,
+        "a write through a symlink reported success:\n{out}"
+    );
+    assert!(out.contains("symlink"), "the refusal must name it:\n{out}");
+
+    // …and `--force` replaces the LINK.
+    let (code, out) = run_verb(&s, &repo, &["install", "--force"]);
+    assert_eq!(code, 0, "{out}");
+    for (i, name) in names.iter().enumerate() {
+        assert_eq!(
+            std::fs::read_to_string(dev.join(name)).expect("read"),
+            before[i],
+            "THE WRITE WENT THROUGH THE LINK for {name}"
+        );
+        let hook = repo.join(".git/hooks").join(name);
+        assert!(
+            !std::fs::symlink_metadata(&hook)
+                .expect("stat")
+                .file_type()
+                .is_symlink(),
+            "{name} is still a symlink after --force"
+        );
+        assert!(
+            std::fs::read_to_string(&hook)
+                .expect("read")
+                .contains("githooks"),
+            "{name} was not replaced with a shim"
+        );
+    }
+}
+
+/// `--force` is a statement about `.git/hooks`. It is not consent to rewrite a
+/// file git is watching, and there is no flag that is — a repository pointing
+/// `core.hooksPath` at a tracked directory (a perfectly normal way to keep
+/// hooks in version control) must be refused whatever is typed.
+#[test]
+fn a_tracked_hooks_directory_is_refused_even_with_force() {
+    let s = Sandbox::new("tracked-hooks");
+    let repo = s.path("repo");
+    init_repo(&repo);
+    let dev = repo.join("devhooks");
+    std::fs::create_dir_all(&dev).expect("mkdir");
+    for name in ["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"] {
+        std::fs::write(dev.join(name), format!("#!/bin/sh\n# tracked {name}\n")).expect("write");
+    }
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "seed"]);
+    git(&repo, &["config", "core.hooksPath", "devhooks"]);
+    let before = std::fs::read_to_string(dev.join("pre-commit")).expect("read");
+
+    for args in [&["install"][..], &["install", "--force"][..]] {
+        let (code, out) = run_verb(&s, &repo, args);
+        assert_ne!(code, 0, "{args:?} rewrote tracked source:\n{out}");
+        assert!(
+            out.contains("TRACKED") || out.contains("not ours"),
+            "{args:?} must say why:\n{out}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dev.join("pre-commit")).expect("read"),
+            before,
+            "TRACKED FILE WAS REWRITTEN by {args:?}"
+        );
+    }
+}
+
+/// Fail closed for the WHOLE repository. A write that cannot happen must leave
+/// zero dispatchers, not two — the state in which a repo runs half its checks
+/// and nothing says so.
+#[cfg(unix)]
+#[test]
+fn a_write_that_cannot_happen_leaves_no_dispatchers_at_all() {
+    use std::os::unix::fs::PermissionsExt;
+    // root ignores the permission bits and the test would prove nothing.
+    if unsafe { libc_geteuid() } == 0 {
+        return;
+    }
+    let s = Sandbox::new("halfwritten");
+    let repo = s.path("repo");
+    init_repo(&repo);
+    let hooks = repo.join(".git/hooks");
+    std::fs::create_dir_all(&hooks).expect("mkdir");
+    std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+
+    let (code, out) = s.install(&repo);
+    let _ = std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o755));
+
+    assert_ne!(code, 0, "a failed write reported success:\n{out}");
+    for name in ["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"] {
+        assert!(
+            !hooks.join(name).exists(),
+            "{name} landed despite the install failing:\n{out}"
+        );
+    }
+    // And no staging litter either.
+    let leftovers: Vec<_> = std::fs::read_dir(&hooks)
+        .expect("readdir")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".githooks-tmp-"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "staging litter left behind: {leftovers:?}"
+    );
+}
+
+/// `--force` printed "baked 4 shims" and nothing else. The user typed it
+/// because a file was in the way; the one thing the output never said was which
+/// file, or what it was. `.git` is not tracked, so there is nothing to check it
+/// back out from — the message is the only record that will ever exist.
+#[test]
+fn force_names_what_it_overwrote() {
+    let s = Sandbox::new("force-names");
+    let repo = s.path("repo");
+    init_repo(&repo);
+    std::fs::create_dir_all(repo.join(".git/hooks")).expect("mkdir");
+    std::fs::write(
+        repo.join(".git/hooks/commit-msg"),
+        "#!/bin/sh\necho MY OWN HOOK\n",
+    )
+    .expect("write");
+
+    let (code, out) = run_verb(&s, &repo, &["install", "--force"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("overwrote") && out.contains("commit-msg"),
+        "--force must say what it took:\n{out}"
+    );
+    // And it must not claim to have overwritten the three that were absent.
+    assert_eq!(
+        out.matches("overwrote").count(),
+        1,
+        "--force reported overwrites that did not happen:\n{out}"
+    );
+}
+
+/// The README promises a foreign hook is "left alone and named". It was true
+/// only for hooks that happened to be valid UTF-8: the loop matched
+/// `Err(_) => {}` on `read_to_string`, so a compiled hook was passed over in
+/// total silence — not removed, not counted, not mentioned.
+#[test]
+fn uninstall_names_a_hook_it_could_not_read() {
+    let s = Sandbox::new("uninstall-binary");
+    let repo = s.path("repo");
+    init_repo(&repo);
+    assert_eq!(s.install(&repo).0, 0);
+    let theirs = repo.join(".git/hooks/commit-msg");
+    std::fs::write(&theirs, [0x7f, b'E', b'L', b'F', 0xff, 0xfe]).expect("write");
+
+    let (code, out) = run_verb(&s, &repo, &["uninstall"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("commit-msg") && out.contains("not valid UTF-8"),
+        "an unreadable hook was passed over in silence:\n{out}"
+    );
+    assert!(theirs.exists(), "an unreadable hook was deleted");
+}
+
+// ---- uninstall undoes install ---------------------------------------------
+
+/// `uninstall` did not undo `install`. It removed the repository's shims and
+/// left the template directory populated, so with `init.templateDir` set every
+/// subsequent `git clone` re-installed the hooks into the new repo — after the
+/// user had been told the uninstall succeeded.
+#[test]
+fn uninstall_takes_back_the_template_dir_and_names_the_standing_grant() {
+    let s = Sandbox::new("uninstall-template");
+    let repo = s.path("repo");
+    init_repo(&repo);
+    assert_eq!(s.install(&repo).0, 0);
+
+    let tpl = s.path(".config/git/git-templates/templates/hooks");
+    for name in ["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"] {
+        assert!(tpl.join(name).is_file(), "install wrote no template shims");
+    }
+    // The standing grant itself, set the way the README tells people to.
+    let cfg = Command::new("git")
+        .args(["config", "--global", "init.templateDir"])
+        .arg(s.path(".config/git/git-templates"))
+        .env("HOME", &s.0)
+        .env("USERPROFILE", &s.0)
+        .env("XDG_CONFIG_HOME", s.path(".config"))
+        .output()
+        .expect("git config");
+    assert!(cfg.status.success());
+
+    let (code, out) = run_verb(&s, &repo, &["uninstall"]);
+    assert_eq!(code, 0, "{out}");
+    for name in ["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"] {
+        assert!(
+            !tpl.join(name).exists(),
+            "{name} survived in the template dir — the next clone reinstalls it:\n{out}"
+        );
+    }
+    assert!(
+        out.contains("init.templateDir"),
+        "uninstall must name the setting that keeps installing hooks:\n{out}"
+    );
+    assert!(
+        out.contains("git config --global --unset init.templateDir"),
+        "and give the command that revokes it:\n{out}"
+    );
+}
+
+/// The other half, and the dangerous one: when the template dir is a CHECKOUT
+/// reached through a symlink, those shims are tracked source. `install` refuses
+/// to write there; `uninstall` must refuse to delete there, and a delete has no
+/// `--force` to argue with.
+#[cfg(unix)]
+#[test]
+fn uninstall_refuses_a_template_dir_that_is_a_checkout() {
+    let s = Sandbox::new("uninstall-checkout");
+    let checkout = s.path("checkout");
+    init_repo(&checkout);
+    let hooks = checkout.join("templates/hooks");
+    std::fs::create_dir_all(&hooks).expect("mkdir");
+    for name in ["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"] {
+        std::fs::write(
+            hooks.join(name),
+            "#!/bin/sh\n# git-templates hook shim.\nexec githooks __GITHOOKS_BIN__\n",
+        )
+        .expect("write");
+    }
+    git(&checkout, &["add", "-A"]);
+    git(&checkout, &["commit", "-qm", "seed"]);
+
+    let cfg = s.path(".config/git");
+    std::fs::create_dir_all(&cfg).expect("mkdir");
+    std::os::unix::fs::symlink(&checkout, cfg.join("git-templates")).expect("symlink");
+
+    let repo = s.path("repo");
+    init_repo(&repo);
+    let (code, out) = run_verb(&s, &repo, &["uninstall"]);
+
+    assert_eq!(code, 0, "refusing is not an error:\n{out}");
+    assert!(
+        out.contains("checkout") && out.contains("NOTHING"),
+        "the refusal must be explained:\n{out}"
+    );
+    assert!(
+        out.contains(
+            &checkout
+                .canonicalize()
+                .expect("canon")
+                .display()
+                .to_string()
+        ),
+        "and must name the RESOLVED path, not the symlink:\n{out}"
+    );
+    for name in ["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"] {
+        assert!(
+            hooks.join(name).is_file(),
+            "TRACKED FILE {name} WAS DELETED:\n{out}"
+        );
+    }
+}
+
 /// Once the block already matches what would be generated, `offer_agents_md`
 /// must skip silently — no prompt at all — the same way `offer_trust` skips
 /// once a manifest is already trusted.
