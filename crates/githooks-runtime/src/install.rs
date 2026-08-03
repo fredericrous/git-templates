@@ -167,6 +167,77 @@ fn absolute(p: &Path) -> PathBuf {
     }
 }
 
+/// The one directory an UNBAKED shim looks in, hardcoded in the shim itself.
+///
+/// Deliberately NOT `bin_dir()`, and the difference is the whole point of
+/// `warn_if_unbaked_cannot_resolve`. `bin_dir()` answers "where should install
+/// PUT the binary?" and honours `$GITHOOKS_BIN_DIR`. This answers "where will a
+/// shim that never got a path baked into it LOOK?", which is a constant in a
+/// POSIX sh file and cannot be configured at all.
+///
+/// `$GITHOOKS_BIN_DIR` is deliberately not wired into the shim to close that
+/// gap. It is an install-time question answered in the shell where `githooks
+/// install` ran; the shim runs inside git's environment during a commit, where
+/// that variable is almost never set — so honouring it there would ship a knob
+/// that looks like it works and silently does not. The runtime override already
+/// exists and is `$GIT_HOOKS_BIN`; a second variable able to redirect which
+/// binary executes on every commit would double that surface for nothing.
+///
+/// Not "XDG", either: the XDG Base Directory spec defines no binary directory.
+/// `~/.local/bin` is simply the widely-observed convention.
+fn unbaked_lookup_dir() -> PathBuf {
+    home().join(".local").join("bin")
+}
+
+/// Say so when the binary went somewhere an unbaked shim will never look.
+///
+/// Two supported choices stop composing when made together. A template dir that
+/// IS the checkout keeps the placeholder on purpose — those shims resolve the
+/// binary at run time from [`unbaked_lookup_dir`]. Install to a custom
+/// `$GITHOOKS_BIN_DIR` as well and nothing baked a path, while the one path the
+/// shim knows is not where the binary went.
+///
+/// Nothing is silently skipped — the shim prints what it looked at and exits 1,
+/// which fails the commit loudly. But it fails at somebody's next commit, in a
+/// repository they have not thought about since, and the cause is a decision
+/// made here. So it is said here.
+fn warn_if_unbaked_cannot_resolve(binary: &str) {
+    let looked = unbaked_lookup_dir();
+    let placed = Path::new(binary).parent();
+
+    // Compare RESOLVED paths, and require both to resolve. `a.ok() == b.ok()`
+    // would read `None == None` as "the same directory" — the shape of a bug
+    // this module has already had once, in `already_there`.
+    let reachable = placed.is_some_and(|p| {
+        matches!(
+            (p.canonicalize(), looked.canonicalize()),
+            (Ok(a), Ok(b)) if a == b
+        )
+    });
+    if reachable {
+        return;
+    }
+
+    println!();
+    println!(
+        "{} the binary is at {}, which an unbaked shim will not find.",
+        warning_sign(),
+        highlight(binary)
+    );
+    println!(
+        "    Shims here keep the placeholder, and they look only in {}.",
+        looked.display()
+    );
+    println!("    Either link it where they look:");
+    println!(
+        "      ln -s {} {}",
+        binary,
+        looked.join("githooks").display()
+    );
+    println!("    or set GIT_HOOKS_BIN in the environment git runs hooks with:");
+    println!("      export GIT_HOOKS_BIN={binary}");
+}
+
 /// `~/.local/bin`, or `$GITHOOKS_BIN_DIR`.
 pub fn bin_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("GITHOOKS_BIN_DIR") {
@@ -553,11 +624,17 @@ fn populate_template_dir(binary: &str, force: bool) -> Result<(), String> {
             );
             println!("    Its shims keep the placeholder deliberately and resolve");
             println!("    {binary} at run time. This is the intended setup.");
+            // …as long as run-time resolution can actually reach the binary,
+            // which the sentence above used to assert unconditionally.
+            warn_if_unbaked_cannot_resolve(binary);
         }
-        TemplateDir::InsideCheckout => println!(
-            "{} {shown} is inside a git checkout — leaving it alone.",
-            warning_sign()
-        ),
+        TemplateDir::InsideCheckout => {
+            println!(
+                "{} {shown} is inside a git checkout — leaving it alone.",
+                warning_sign()
+            );
+            warn_if_unbaked_cannot_resolve(binary);
+        }
         TemplateDir::NoGit => println!(
             "{} git is not on PATH — refusing to delete anything.",
             warning_sign()

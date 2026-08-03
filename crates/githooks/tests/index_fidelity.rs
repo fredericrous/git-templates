@@ -411,7 +411,12 @@ fn signal_mid_check_restores(signal: &str) {
     // does, immediately before the flag is set.
     let store = r.path(".git/githooks-held");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while tree(&r, "x.json") != VALID {
+    // A NON-panicking read: `checkout` replaces the file, so there is a moment
+    // where it does not exist, and `tree()` would panic on it rather than
+    // simply not-match-yet. That is the poll racing the thing it polls for.
+    let staged_content_is_on_disk =
+        || std::fs::read_to_string(r.path("x.json")).ok().as_deref() == Some(VALID);
+    while !staged_content_is_on_disk() {
         assert!(
             std::time::Instant::now() < deadline,
             "fixture: the unstaged change was never parked"
