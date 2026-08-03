@@ -18,22 +18,26 @@ use crate::ui::{error_sign, highlight, valid_sign, warning_sign};
 /// automatic rebase is exactly the wrong move. The COUNTS come back too, not
 /// just the fact: "how far apart" is the first thing anyone wants to know, and
 /// the predicate used to throw it away.
-pub fn divergence(status: &str) -> Option<(u64, u64)> {
-    fn count_after(s: &str, word: &str) -> Option<(u64, usize)> {
-        let i = s.find(word)?;
-        let after = &s[i + word.len()..];
-        let trimmed = after.trim_start_matches([' ', '\t']);
-        if trimmed.len() == after.len() {
-            return None; // `word` must be followed by whitespace
-        }
-        let digits: String = trimmed.chars().take_while(char::is_ascii_digit).collect();
-        if digits.is_empty() {
-            return None;
-        }
-        let consumed = i + word.len() + (after.len() - trimmed.len()) + digits.len();
-        Some((digits.parse().ok()?, consumed))
+/// `word[[:space:]]+N` at the first eligible occurrence in `s` — shared by
+/// [`divergence`] and [`behind_count`] so the question "does an `ahead`
+/// or `behind` token here actually mean a count" has exactly one answer
+/// rather than two copies that could drift.
+fn count_after(s: &str, word: &str) -> Option<(u64, usize)> {
+    let i = s.find(word)?;
+    let after = &s[i + word.len()..];
+    let trimmed = after.trim_start_matches([' ', '\t']);
+    if trimmed.len() == after.len() {
+        return None; // `word` must be followed by whitespace
     }
+    let digits: String = trimmed.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    let consumed = i + word.len() + (after.len() - trimmed.len()) + digits.len();
+    Some((digits.parse().ok()?, consumed))
+}
 
+pub fn divergence(status: &str) -> Option<(u64, u64)> {
     for line in status.lines() {
         let mut rest = line;
         while let Some((ahead, used)) = count_after(rest, "ahead") {
@@ -51,6 +55,20 @@ pub fn divergence(status: &str) -> Option<(u64, u64)> {
         }
     }
     None
+}
+
+/// `behind[[:space:]]+N` over `git status -sb`, present or not — UNLIKE
+/// [`divergence`], which only answers when `ahead` is ALSO on the line.
+///
+/// `git status -sb` prints a bare `[behind M]` (no `ahead` at all) when the
+/// branch has nothing of its own to push yet is missing upstream commits —
+/// exactly "a sync would do something", independent of whether the branch is
+/// also ahead. `divergence` cannot answer that question; it was built to
+/// answer a narrower one (are the two DIVERGED, which needs both counts).
+pub fn behind_count(status: &str) -> Option<u64> {
+    status
+        .lines()
+        .find_map(|line| count_after(line, "behind").map(|(n, _)| n))
 }
 
 /// `^[[:space:]*]+<name>$` over `git branch` output — the indentation git
@@ -163,7 +181,22 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
             highlight("git pull --rebase"),
             highlight("git merge")
         );
-    } else if !git::succeeds(&["pull", "--rebase", &remote, branch]) {
+    } else if behind_count(&status).unwrap_or(0) > 0
+        && !git::succeeds(&["pull", "--rebase", &remote, branch])
+    {
+        // `behind_count > 0` gates the attempt itself, not just its outcome:
+        // with nothing behind, the upstream has no commits to reconcile with,
+        // so `pull --rebase` has nothing to do BY DEFINITION — and attempting
+        // it anyway is not merely wasted work, it is a real subprocess rebase
+        // that can choke on the local branch's own history for a
+        // reconciliation nothing needed. A branch carrying a merge commit
+        // (recording a hand-resolved reconciliation with a THIRD branch, say)
+        // is exactly such a shape: `pull --rebase` tries to linearize it by
+        // full reachability rather than first-parent, replays commits that
+        // were already incorporated, and fails loudly over a push that was a
+        // clean fast-forward all along. Behind-only or diverged pushes still
+        // go through the real sync below; only the pointless case is skipped.
+        //
         // Explicit remote and branch, not a bare `pull --rebase` trusting
         // ambient `branch.*.remote`/`.merge` — `remote`/`branch` are already
         // the verified pair from 2a/2b, and repeating them here means this
@@ -216,7 +249,7 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{ahead_count, divergence, lists_branch};
+    use super::{ahead_count, behind_count, divergence, lists_branch};
 
     #[test]
     fn detects_divergence_only_when_both_counts_are_present() {
@@ -273,5 +306,36 @@ mod tests {
         assert_eq!(ahead_count("12\t3"), Some(12));
         assert_eq!(ahead_count("0\t5"), Some(0));
         assert_eq!(ahead_count(""), None);
+    }
+
+    /// The whole point: `behind_count`, unlike `divergence`, answers even
+    /// when `ahead` is not on the line at all.
+    #[test]
+    fn behind_count_does_not_require_ahead() {
+        assert_eq!(
+            behind_count("## feat/x...origin/feat/x [behind 2]"),
+            Some(2)
+        );
+        assert_eq!(
+            behind_count("## feat/x...origin/feat/x [ahead 1, behind 2]"),
+            Some(2)
+        );
+    }
+
+    /// Ahead-only, or fully in sync, is "nothing behind" — the shape that
+    /// means a sync has nothing to reconcile.
+    #[test]
+    fn behind_count_is_none_when_there_is_nothing_behind() {
+        assert_eq!(behind_count("## feat/x...origin/feat/x [ahead 3]"), None);
+        assert_eq!(behind_count("## feat/x...origin/feat/x"), None);
+        assert_eq!(behind_count(""), None);
+    }
+
+    /// The same false-positive guard `divergence` has: a branch merely
+    /// NAMED with "behind" in it, glued to non-whitespace, is not a count.
+    #[test]
+    fn behind_count_is_not_fooled_by_a_branch_name() {
+        assert!(behind_count("## my-behind-thing...origin/my-behind-thing").is_none());
+        assert!(behind_count("## a...b [behind4]").is_none());
     }
 }
