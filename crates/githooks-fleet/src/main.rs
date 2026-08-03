@@ -472,6 +472,38 @@ fn report_fix(plans: &[fix::FixPlan]) {
     println!("  DRY RUN — nothing was written.");
 }
 
+/// Every repository we declined to act on, and why.
+///
+/// A refusal used to be reported as a bare count in the summary line. `1
+/// refused` cannot be acted on: it does not say which repository, and it does
+/// not distinguish "an application's data repo, correctly left alone" from
+/// "git will not talk to this checkout and one `git config` would fix it".
+fn report_refusals(plans: &[fix::FixPlan]) {
+    let refused: Vec<&fix::FixPlan> = plans.iter().filter(|p| p.refused()).collect();
+    if refused.is_empty() {
+        return;
+    }
+    // `Unmanaged` is the overwhelmingly common one and is not news — most of a
+    // machine's repositories are somebody else's. Listing ninety of those would
+    // bury the four that mean something.
+    let interesting: Vec<&fix::FixPlan> = refused
+        .iter()
+        .copied()
+        .filter(|p| p.refuse.iter().any(|r| *r != fix::Refusal::Unmanaged))
+        .collect();
+    if interesting.is_empty() {
+        return;
+    }
+    println!();
+    println!("REFUSED (nothing in these repositories was touched):");
+    for p in interesting {
+        println!("  {}", shown(&p.repo));
+        for r in p.refuse.iter().filter(|r| **r != fix::Refusal::Unmanaged) {
+            println!("    {}", githooks_runtime::ui::sanitize(&r.explain()));
+        }
+    }
+}
+
 /// Everything found but not acted on, named.
 ///
 /// Its own block, and its own heading, because these are the two states this
@@ -480,6 +512,7 @@ fn report_fix(plans: &[fix::FixPlan]) {
 /// directory a scanned repository named. A count cannot say either of those; a
 /// path can.
 fn report_warnings(plans: &[fix::FixPlan]) {
+    report_refusals(plans);
     let warned: Vec<&fix::FixPlan> = plans.iter().filter(|p| !p.warn.is_empty()).collect();
     if warned.is_empty() {
         return;

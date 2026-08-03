@@ -107,6 +107,53 @@ pub enum Refusal {
     HooksDirUnknown { why: String },
 }
 
+impl Refusal {
+    /// One line, naming what stopped us and — where there is one — the command
+    /// that resolves it.
+    ///
+    /// This exists because a refusal used to be reported as a NUMBER. `1
+    /// refused` in a fleet-wide summary is indistinguishable from a bug: the
+    /// reader cannot tell an application data repository we correctly declined
+    /// from a repository we could not read because git will not talk to it. The
+    /// `TrackedUnknown` case is the sharpest — its fix is one `git config` away
+    /// and the old output did not even say which repository was affected.
+    pub fn explain(&self) -> String {
+        match self {
+            Refusal::Unmanaged => "no shim of ours here — not adopting it".to_string(),
+            Refusal::UnreadableHooks => "the hooks directory could not be read".to_string(),
+            Refusal::Tracked { path } => format!(
+                "{} is TRACKED by git — that is somebody's source, not our hook",
+                path.display()
+            ),
+            Refusal::TrackedUnknown { path, why } => format!(
+                "cannot tell whether {} is tracked ({why})\n      \
+                 If this is a repository you own: \
+                 git config --global --add safe.directory {}",
+                path.display(),
+                path.parent().unwrap_or(path).display()
+            ),
+            Refusal::ForeignHook { names } => format!(
+                "{} was written by somebody else — activating would overwrite it",
+                names.join(", ")
+            ),
+            Refusal::AgentsMdMalformed { path } => {
+                format!("{} carries an unpaired marker", path.display())
+            }
+            Refusal::UnbakeableBinary { binary } => {
+                format!("{binary} is not a path a shim will accept")
+            }
+            Refusal::HooksDirOutsideRepo { path } => format!(
+                "core.hooksPath resolves to {}, OUTSIDE the repository — \
+                 not creating or writing there",
+                path.display()
+            ),
+            Refusal::HooksDirUnknown { why } => {
+                format!("git would not say where the hooks are ({why})")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemovalReason {

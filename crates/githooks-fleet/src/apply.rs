@@ -19,12 +19,39 @@
 //! `make install` destroyed tracked source twice in this repo's history, both
 //! times because its guard failed OPEN. Nothing here deletes a path it has not
 //! positively established is safe.
-
-use std::path::Path;
+//!
+//! ## Rule 1 was a claim, not a fact
+//!
+//! For two releases the doc above said "verifies its refusals again" and only
+//! ONE of the five was re-checked. `Unmanaged`, `ForeignHook` and the hooks
+//! directory's location were all taken on trust from a plan built before the
+//! user was even shown a preview, and the write itself went through
+//! `std::fs::write`, which FOLLOWS SYMLINKS.
+//!
+//! The verified consequence: a repository with four tracked dispatchers under
+//! `shared/` and `.git/hooks/*` symlinked to them. `fix --apply` reported
+//! `4 written` and left all four TRACKED FILES MODIFIED. The plan's own
+//! symlink guard had never been asked, and the one guard that did run — the
+//! tracked check — was asking about the link, which is untracked, sits in
+//! `.git`, and has nothing alarming about it.
+//!
+//! So every write and every remove now goes through
+//! [`githooks_runtime::hookfile`], which is the single owner of "is this ours,
+//! and may we touch it?" — it never follows a link, never guesses, and stages
+//! every write to a sibling temporary that is `rename`d into place, so
+//! REPLACING a link is the only thing that can happen and writing THROUGH one
+//! is not a code path that exists. That is a stronger statement than "we check
+//! first", because a check can be raced and this cannot.
+//!
+//! Deleting `write_executable` in favour of `hookfile::stage` + `commit_all`
+//! also strengthens `written_shims_are_executable`: the mode is set on the
+//! temporary before the rename, so the file is never visible at its
+//! destination in a non-executable state — where git would silently not run it.
 
 use serde::Serialize;
 
-use crate::fix::{tracked_refusal, FixPlan};
+use crate::fix::{tracked_refusal, FixPlan, Intent};
+use crate::scan::HooksDir;
 use crate::shim;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -51,6 +78,9 @@ pub fn apply(plan: &FixPlan) -> Outcome {
     if plan.refused() {
         return Outcome::Refused;
     }
+    if let Some(outcome) = reverify(plan) {
+        return outcome;
+    }
     if plan.is_noop() {
         return Outcome::Unchanged;
     }
@@ -58,9 +88,9 @@ pub fn apply(plan: &FixPlan) -> Outcome {
     // Re-check tracked-ness at the moment of action, for a REMOVE and a
     // WRITE alike. The preview may be old, and this is the guard that failed
     // open twice before — both times on a delete, but a write that landed on
-    // tracked source (a repo whose `core.hooksPath`, say, points somewhere
-    // `is_tracked` did not expect when the plan was built) would overwrite
-    // it exactly as destructively, just without `rm` in the name.
+    // tracked source (a repo whose `core.hooksPath`, say, points somewhere the
+    // planner did not expect when the plan was built) would overwrite it
+    // exactly as destructively, just without `rm` in the name.
     for path in plan
         .remove
         .iter()
@@ -80,32 +110,73 @@ pub fn apply(plan: &FixPlan) -> Outcome {
         }
     }
 
+    // Removals first — writing first would leave a retired file beside its
+    // replacement, which is the double-run state. Each goes through
+    // `guard_remove` with `expect_ours = false`: the plan has already
+    // established what each of these is (ours-but-retired, the node-era
+    // `package.json`, or an explicitly opted-in stranger), and `guard_remove`
+    // is here for the question the plan cannot answer twice — whether the path
+    // is tracked NOW.
     let mut removed = 0;
     for r in &plan.remove {
-        match std::fs::remove_file(&r.path) {
-            Ok(()) => removed += 1,
-            // Already gone is the desired state, not a failure.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        if githooks_runtime::hookfile::classify(&r.path)
+            == githooks_runtime::hookfile::HookFile::Absent
+        {
+            // Already gone is the desired state, and must not be counted as
+            // work done.
+            continue;
+        }
+        if let Err(refuse) = githooks_runtime::hookfile::guard_remove(&r.path, false) {
+            return Outcome::Failed {
+                error: refuse.explain(),
+                at: refuse.path().display().to_string(),
+            };
+        }
+        if let Err(e) = githooks_runtime::hookfile::remove_regular(&r.path) {
+            return Outcome::Failed {
+                error: e.to_string(),
+                at: r.path.display().to_string(),
+            };
+        }
+        removed += 1;
+    }
+
+    // Every shim is STAGED before any of them lands. Guarding four paths and
+    // then writing four files leaves a window in which the third write fails
+    // and the repository holds two new dispatchers and two old ones; staging
+    // moves every anticipatable failure (no space, no permission, a read-only
+    // directory) before the first destination is touched. `commit_all` then
+    // `rename`s, which REPLACES a symlink rather than following it.
+    let mut staged = Vec::new();
+    for write in plan.write.iter().filter(|write| write.changes) {
+        // `force = false`, always. There is no `--force` on the fleet path and
+        // there should not be: a fleet-wide override is a decision made once
+        // about ninety-six repositories nobody looked at.
+        if let Err(refuse) = githooks_runtime::hookfile::guard_write(&write.path, false) {
+            return Outcome::Failed {
+                error: refuse.explain(),
+                at: refuse.path().display().to_string(),
+            };
+        }
+        match githooks_runtime::hookfile::stage(&write.path, &shim::render(&write.baked), true) {
+            Ok(s) => staged.push(s),
             Err(e) => {
                 return Outcome::Failed {
                     error: e.to_string(),
-                    at: r.path.display().to_string(),
+                    at: write.path.display().to_string(),
                 }
             }
         }
     }
-
-    let mut written = 0;
-    for write in plan.write.iter().filter(|write| write.changes) {
-        let body = shim::render(&write.baked);
-        if let Err(e) = write_executable(&write.path, &body) {
+    let mut written = match githooks_runtime::hookfile::commit_all(staged) {
+        Ok(landed) => landed.len(),
+        Err(failure) => {
             return Outcome::Failed {
-                error: e.to_string(),
-                at: write.path.display().to_string(),
-            };
+                error: failure.to_string(),
+                at: failure.at.display().to_string(),
+            }
         }
-        written += 1;
-    }
+    };
 
     if let Some(w) = &plan.write_agents_md {
         // Re-check at the moment of action, same rule as `is_tracked` above:
@@ -134,17 +205,45 @@ pub fn apply(plan: &FixPlan) -> Outcome {
     Outcome::Applied { removed, written }
 }
 
-/// Write the shim and make it executable. A hook git cannot execute is a hook
-/// that silently does not run — the failure mode this whole project exists to
-/// avoid — so the mode is set explicitly rather than inherited.
-fn write_executable(path: &Path, body: &str) -> std::io::Result<()> {
-    std::fs::write(path, body)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+/// Ask the plan's own refusals again, against the filesystem as it is NOW.
+///
+/// `Some(Outcome::Refused)` means the world stopped matching the plan between
+/// the scan and this moment — which is not a failure, it is the plan correctly
+/// declining to act on a world that no longer exists. `None` means proceed.
+///
+/// Each of the three was, until this function existed, taken on trust:
+///
+/// - **Unmanaged.** `plan` reads `repo.managed` out of a scan that may be
+///   minutes old and, in the TUI, may predate several keystrokes. A repository
+///   that stopped being ours in that window would be repaired anyway — the one
+///   thing standing between this tool and an application's data repository.
+/// - **ForeignHook.** Activation is the mode that writes four dispatchers into
+///   a repository nobody had installed into, and the check that somebody else's
+///   `pre-commit` is not sitting at one of those paths ran once, at plan time.
+/// - **The hooks directory.** Re-resolved rather than re-read from the plan,
+///   because `core.hooksPath` is config and config changes. If it now resolves
+///   anywhere other than where the plan resolved it, every path in the plan
+///   names a file in the wrong directory.
+fn reverify(plan: &FixPlan) -> Option<Outcome> {
+    let hooks = match crate::scan::hooks_dir_for(&plan.repo_abs) {
+        HooksDir::In { path } => path,
+        // Outside, or unresolvable. Either way not somewhere we write.
+        _ => return Some(Outcome::Refused),
+    };
+    if plan.hooks.inside() != Some(hooks.as_path()) {
+        return Some(Outcome::Refused);
     }
-    Ok(())
+    if plan.intent == Intent::Repair && !crate::scan::is_managed(&hooks) {
+        return Some(Outcome::Refused);
+    }
+    if plan.intent == Intent::Activate
+        && !shim::DISPATCHERS
+            .iter()
+            .all(|n| crate::fix::is_absent_or_ours(&hooks.join(n)))
+    {
+        return Some(Outcome::Refused);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -153,7 +252,7 @@ mod tests {
     use crate::fix::Intent;
     use crate::fix::{plan, FixPlan, Refusal, WriteShim};
     use crate::scan;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     /// Build a repo on disk and scan it, so the plan is derived the same way
     /// the real tool derives it rather than hand-assembled.
@@ -396,12 +495,20 @@ mod tests {
         std::fs::write(&target, "original\n").unwrap();
         git(&["add", "tracked-shim"]);
         git(&["commit", "-q", "--no-verify", "-m", "chore: seed"]);
+        // The repository has to be one `apply` will still act on after its
+        // re-verification pass — which is the point of that pass, and did not
+        // exist when this test was written. One real shim makes it managed.
+        let hooks = dir.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(hooks.join("pre-commit"), shim::render("/bin/gh")).unwrap();
 
         let p = FixPlan {
             repo: PathBuf::from("r"),
             repo_abs: dir.clone(),
             intent: Intent::Repair,
-            hooks: crate::scan::HooksDir::In { path: dir.clone() },
+            hooks: crate::scan::HooksDir::In {
+                path: hooks.clone(),
+            },
             refuse: Vec::new(),
             warn: Vec::new(),
             remove: Vec::new(),
@@ -426,5 +533,76 @@ mod tests {
             "a tracked file must never be overwritten by apply"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `Refusal::Unmanaged` is decided from a scan, and a scan is a photograph.
+    /// In the TUI it can predate several keystrokes; on the CLI it predates the
+    /// preview the user read. A repository that stopped being ours in that
+    /// window would have been repaired anyway, because `apply` took the plan's
+    /// word for it — and "never adopt a repo" is the rule standing between this
+    /// tool and an application's data repository.
+    ///
+    /// Lives here rather than in `tests/write_safety.rs` for one reason: the
+    /// window between plan and apply cannot be opened from outside the process.
+    /// `fix --apply` computes and applies in one breath, so a CLI-driven test
+    /// could only ever prove that the two layers agree.
+    #[test]
+    fn a_repo_that_became_unmanaged_between_plan_and_apply_is_refused() {
+        let (root, hooks) = fixture("unmanaged-race");
+        healthy_shims(&hooks, "/bin/gh");
+        std::fs::remove_file(hooks.join("pre-push")).unwrap();
+
+        let (repo, abs) = scan_one(&root, "/bin/gh");
+        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair, false, false);
+        assert!(!p.is_noop() && !p.refused(), "fixture: {p:?}");
+
+        // Somebody took our shims out — an `uninstall`, a `git clean`, a
+        // colleague — after the plan was built.
+        for n in shim::DISPATCHERS {
+            let _ = std::fs::remove_file(hooks.join(n));
+        }
+        std::fs::write(hooks.join("pre-commit"), "#!/bin/sh\necho mine\n").unwrap();
+        let before = std::fs::read_to_string(hooks.join("pre-commit")).unwrap();
+
+        assert_eq!(apply(&p), Outcome::Refused);
+        assert_eq!(
+            std::fs::read_to_string(hooks.join("pre-commit")).unwrap(),
+            before,
+            "a repo that stopped being ours must be left exactly as found"
+        );
+        assert!(
+            !hooks.join("pre-push").exists(),
+            "and nothing may be written into it"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same window, on the activation side. `install` is the mode that
+    /// writes four dispatchers into a repository nobody had installed into, and
+    /// the check that somebody else's `pre-commit` is not already sitting at one
+    /// of those paths ran once, at plan time.
+    #[test]
+    fn a_dispatcher_that_became_foreign_between_plan_and_apply_is_refused() {
+        let (root, hooks) = fixture("foreign-race");
+
+        let (repo, abs) = scan_one(&root, "/bin/gh");
+        let p = plan(&repo, &abs, "/bin/gh", Intent::Activate, false, false);
+        assert!(!p.is_noop() && !p.refused(), "fixture: {p:?}");
+
+        // Somebody wrote their own hook in the meantime.
+        let theirs = "#!/bin/sh\n# my own commit-msg, thanks\nexec my-linter \"$@\"\n";
+        std::fs::write(hooks.join("commit-msg"), theirs).unwrap();
+
+        assert_eq!(apply(&p), Outcome::Refused);
+        assert_eq!(
+            std::fs::read_to_string(hooks.join("commit-msg")).unwrap(),
+            theirs,
+            "activation must never overwrite a hook somebody wrote"
+        );
+        assert!(
+            !hooks.join("pre-commit").exists(),
+            "and one foreign dispatcher suppresses the WHOLE repo, not just itself"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
