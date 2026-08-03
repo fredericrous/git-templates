@@ -8,12 +8,12 @@ had.
 
 | § | what | status | where it lives |
 |---|---|---|---|
-| 0 | activation, `uninstall`, bulk install | **shipped** | `install.rs`, `githooks-fleet install/uninstall` |
-| 0b | manifest trust | **shipped** | `trust.rs`, `githooks trust [--show]` |
+| 0 | activation, `uninstall`, bulk install | **shipped** | `install.rs`, `amont-fleet install/uninstall` |
+| 0b | manifest trust | **shipped** | `trust.rs`, `amont trust [--show]` |
 | 1 | index fidelity (staged-only) | **shipped** | `staged_only.rs`, `dispatch::pre_commit` |
 | 2 | `stage_fixed` | **shipped** as `Fix::Rewrite` + `Outcome::Fixed` | `check.rs`, `hooks/common.rs::restage` |
 | 3 | `not_during` git-state conditions | **shipped** | `check.rs::GitState`, `registry.rs::MID_OPERATION` |
-| 4 | `githooks run [--all-files]` | **shipped** | `main.rs`, `dispatch::run_named` |
+| 4 | `amont run [--all-files]` | **shipped** | `main.rs`, `dispatch::run_named` |
 | 5 | shebang detection | **not built** | — |
 
 §5 is the only one still a proposal. Everything below the numbered sections —
@@ -42,14 +42,14 @@ backlog.
 
 ## 0. A cloned repository can run its own commands
 
-> **Shipped.** Per-repository activation is the default; `githooks install`
-> / `uninstall` and `githooks-fleet install` / `uninstall` are all real
-> verbs. `install.rs` carries the routine, and `crates/githooks/tests/
-> install.rs` and `crates/githooks-fleet/tests/uninstall.rs` carry the
+> **Shipped.** Per-repository activation is the default; `amont install`
+> / `uninstall` and `amont-fleet install` / `uninstall` are all real
+> verbs. `install.rs` carries the routine, and `crates/amont/tests/
+> install.rs` and `crates/amont-fleet/tests/uninstall.rs` carry the
 > guards. `uninstall` also removes the shims from the template directory
 > and says so loudly if `init.templateDir` is still set.
 
-`.githooks.conf` is committed, which is the point: a team shares a check by
+`.amont.conf` is committed, which is the point: a team shares a check by
 committing it. The consequence had not been written down.
 
 `git clone` seeds `.git/hooks` from `init.templateDir`, so a fresh clone arrives
@@ -82,7 +82,7 @@ Not from the manifest, and not from the shims. From one line in our own README:
 git config --global init.templatedir ~/.config/git/git-templates/templates
 ```
 
-We never set that key in code — `githooks install` writes files and touches no
+We never set that key in code — `amont install` writes files and touches no
 config. The README asks the user to make *every future clone on the machine*
 managed, and that ambient grant is what turns a committed manifest into a
 drive-by.
@@ -101,13 +101,13 @@ command is not a category.
 else:
 
 ```
-githooks install              # this repo
-githooks uninstall            # this repo — remove shims, leave the binary
-githooks-fleet install        # every managed-eligible repo under a root
-githooks-fleet uninstall
+amont install              # this repo
+amont uninstall            # this repo — remove shims, leave the binary
+amont-fleet install        # every managed-eligible repo under a root
+amont-fleet uninstall
 ```
 
-`githooks install` already does the per-repo half. `githooks-fleet` has `scan`,
+`amont install` already does the per-repo half. `amont-fleet` has `scan`,
 `fix` and `tui`, with `--apply` behind `fix` — bulk activation exists but is
 named after repair rather than intent, which is why nobody reaches for it when
 they mean "set this up".
@@ -144,33 +144,33 @@ Worth being precise, because it is tempting to stop here.
 Explicit installation removes the case where you clone something to read it.
 It does not remove the case that matters most in open source: you clone a
 stranger's repository **because you intend to contribute**, you run
-`githooks install` because you want your own checks while you work, and their
-`.githooks.conf` runs on your first commit.
+`amont install` because you want your own checks while you work, and their
+`.amont.conf` runs on your first commit.
 
-`githooks install` means *I want my hooks here*. It does not mean *I have read
+`amont install` means *I want my hooks here*. It does not mean *I have read
 this repository's committed commands and accept them*. Those are two different
 grants and only one of them was made.
 
 ### So: one prompt, at the moment of the deliberate act
 
-> **Shipped** — this is §0b. `crates/githooks-runtime/src/trust.rs`, surfaced as
-> `githooks trust` and `githooks trust --show`, with `githooks install` offering
+> **Shipped** — this is §0b. `crates/amont-runtime/src/trust.rs`, surfaced as
+> `amont trust` and `amont trust --show`, with `amont install` offering
 > it interactively. The record is keyed on the manifest's CONTENT (via
 > `git hash-object`, because the binary links no crates and `std`'s only hash is
 > a fixed-key SipHash a crafted manifest could collide), so a `git pull` that
 > adds a command does not inherit consent given to the file before it.
-> `crates/githooks/tests/trust_display.rs`.
+> `crates/amont/tests/trust_display.rs`.
 
 Which is where activation-as-the-boundary improves on the `direnv` design rather
 than replacing it. direnv must prompt lazily, on `cd`, because there is no
 install step to hang the question from. We have one:
 
 ```
-$ githooks install
-  ✓ installed /Users/me/.local/bin/githooks
+$ amont install
+  ✓ installed /Users/me/.local/bin/amont
   ✓ baked 4 shims into .git/hooks
 
-  ⚠ .githooks.conf declares 2 checks that would run on your commits:
+  ⚠ .amont.conf declares 2 checks that would run on your commits:
       shellcheck  pre-commit  *.sh  block  scripts/lint-shell.sh
       smoke       pre-push    *     warn   make smoke
     Trust them? [y/N]
@@ -182,7 +182,7 @@ untrusted, and reports as `Unavailable` with a reason rather than being silently
 skipped:
 
 ```
-⚠ .githooks.conf declares 2 checks and is not trusted here — `githooks trust`
+⚠ .amont.conf declares 2 checks and is not trusted here — `amont trust`
 ⚠ 2 check(s) could not run: shellcheck, smoke
 ```
 
@@ -213,14 +213,14 @@ what makes the `unmanaged` column earn its place. With `init.templateDir` set it
 is close to noise, because everything cloned since is managed and "unmanaged"
 records the date you ran a `git config` command. Without it, the column is the
 point of the tool: which of your ninety-six repositories are not covered, with
-`githooks-fleet install` as the fix.
+`amont-fleet install` as the fix.
 
 Both modes are legitimate. They trade a quiet failure for a loud grant, and the
 tool should let you pick which one you would rather explain.
 
 ### `uninstall`, which is missing regardless
 
-We can disable a check (`hook.skip`), downgrade one (`githooks.severity`) and
+We can disable a check (`hook.skip`), downgrade one (`amont.severity`) and
 install everything. There is no supported way to take it off — a user who wants
 out deletes four files by hand and leaves a stale binary in `~/.local/bin`.
 
@@ -243,10 +243,10 @@ hang from and is much smaller once it exists.
 
 ## 1. We name the staged files and then read the unstaged ones
 
-> **Shipped**, as `crates/githooks-runtime/src/staged_only.rs`, wrapped
+> **Shipped**, as `crates/amont-runtime/src/staged_only.rs`, wrapped
 > around the whole `pre-commit` check stage in `dispatch::pre_commit`.
 > The mechanism is NOT the one designed below — see *The design* and *The
-> danger* for what changed and why. `crates/githooks/tests/
+> danger* for what changed and why. `crates/amont/tests/
 > index_fidelity.rs` is its suite, including the Ctrl-C case.
 
 `staged_files()` asks the index for the path list, which is right:
@@ -343,7 +343,7 @@ struct StagedOnly { stash: Option<StashRef> }   // `git stash --keep-index`
 ```
 
 ```rust
-// WHAT SHIPS — crates/githooks-runtime/src/staged_only.rs
+// WHAT SHIPS — crates/amont-runtime/src/staged_only.rs
 pub struct StagedOnly { held: bool }
 impl StagedOnly {
     pub fn enter() -> Result<StagedOnly, String>;
@@ -367,25 +367,25 @@ So: **byte-exact copies**. Read the file, put it back. No patch to apply, no
 newline policy to agree about, and binary files need no special case. It costs a
 temporary copy of only the files that have unstaged changes.
 
-The store is `$GIT_DIR/githooks-held/`, and its layout is itself the result of an
+The store is `$GIT_DIR/amont-held/`, and its layout is itself the result of an
 incident:
 
 ```
-$GIT_DIR/githooks-held/
+$GIT_DIR/amont-held/
   index              NUL-delimited, one record per parked path:
                      format tag, then kind + path + (mode | symlink target)
   files/<rel>        the payloads, byte for byte
 ```
 
 Metadata used to be encoded in the payload FILENAMES —
-`<name>.githooks-absent`, `<name>.githooks-symlink` beside the copies — and a
+`<name>.amont-absent`, `<name>.amont-symlink` beside the copies — and a
 repository is allowed to contain files with those names. A repo tracking both
-`notes` and a modified `notes.githooks-absent` had `notes` DELETED from the
+`notes` and a modified `notes.amont-absent` had `notes` DELETED from the
 working tree on restore, because a suffix strip turned one file's payload into a
 statement about another. The symlink form was worse: the repo chose both the
 link name and an arbitrary absolute target, so committing in it planted a
 symlink pointing anywhere on the machine. Escaping cannot fix it, because
-`githooks restore` runs in a later process with only the filenames to go on. So
+`amont restore` runs in a later process with only the filenames to go on. So
 the metadata moved out of band into `index`, and everything repo-controlled
 moved under `files/`, where it cannot collide with `index` whatever it is
 called. The `index` carries each entry's KIND (modified / absent / symlink) and,
@@ -400,7 +400,7 @@ worse failure than any this repository has had, including the two that
 overwrote tracked files, because there is nothing on disk to recover from.
 
 Rules, all of which wanted tests and all of which now have them, in
-`crates/githooks/tests/index_fidelity.rs`:
+`crates/amont/tests/index_fidelity.rs`:
 
 - **Nothing unstaged → do nothing**, and silently. The common case must not
   touch the tree, and it is not a degraded run — there is no unstaged content
@@ -416,12 +416,12 @@ Rules, all of which wanted tests and all of which now have them, in
   call stack introduced a race with `enter()`, which `ENTER_LOCK` closes; the
   test that found it is
   `ctrl_c_mid_run_still_restores_and_dies_by_the_signal`.
-- **A recovery path for when even that fails**: `githooks restore` puts back
+- **A recovery path for when even that fails**: `amont restore` puts back
   what this tool parked. Belt and braces, because the handler can itself be
   interrupted.
 - **Restore failure is fatal and loud**: print the STORE'S PATH, do not swallow
   it, block the commit. Not `git stash list` — nothing here is a stash ref, so
-  the work is findable as files on disk under `$GIT_DIR/githooks-held/`.
+  the work is findable as files on disk under `$GIT_DIR/amont-held/`.
 - **Never park when the tree is already mid-operation** — merge, rebase,
   cherry-pick. §3's `GitState` predicate is what answers this, which is why it
   landed first.
@@ -439,7 +439,7 @@ Rules, all of which wanted tests and all of which now have them, in
 ```
 $ git show :x.json      # staged:      {"a": 2}       ← valid
 $ cat x.json            # working tree: { THIS IS NOT JSON
-$ githooks pre-commit
+$ amont pre-commit
   ✗ Invalid JSON: x.json
   🚨 Error raised by: pre-commit-lint-json-yaml
 ```
@@ -464,12 +464,12 @@ constraint.
 ## 2. `stage_fixed` — a formatter that fixes should re-stage
 
 > **Shipped**, under different names: the declaration is `Fix::Rewrite` on
-> a check in `registry.rs`, the opt-in is `git config githooks.fix true`,
+> a check in `registry.rs`, the opt-in is `git config amont.fix true`,
 > the re-staging is `hooks::common::restage`, and the result is
 > `Outcome::Fixed`. Three checks declare it — prettier, ruff and cargo-fmt
 > — and all three now genuinely repair; two of them declared the fix for a
-> while without having any fixing code, which `githooks list --json`
-> reported to agents as a capability. `crates/githooks/tests/fixing.rs`.
+> while without having any fixing code, which `amont list --json`
+> reported to agents as a capability. `crates/amont/tests/fixing.rs`.
 
 From lefthook's job options: *"automatically add modified files back to git
 staging"*.
@@ -506,7 +506,7 @@ pub enum Fix {
 }
 ```
 
-Enabled by config, off by default — `git config githooks.fix true` — because a
+Enabled by config, off by default — `git config amont.fix true` — because a
 hook that edits your files without being asked is a bigger surprise than one
 that complains. Reported as a new `Outcome::Fixed`, which is neither `Passed`
 (something happened) nor `Failed` (the commit proceeds).
@@ -522,7 +522,7 @@ Not eslint `--fix`: its fixes are semantic and occasionally wrong.
 > and `registry::MID_OPERATION` as the shared set applied to the checks
 > that need it. `lib.rs::git_states_in_progress` does the detection and
 > `dispatch.rs` consults it for BOTH stages, closing the pre-push gap the
-> section names. `crates/githooks/tests/git_state.rs`.
+> section names. `crates/amont/tests/git_state.rs`.
 
 lefthook:
 
@@ -569,16 +569,16 @@ comment about `parent()` being lexical while `join("..")` is not moves with it.
 **Only `not_during`, not lefthook's full set.** `ref:` conditions duplicate
 `hook.skip`, which is already per-repo and already visible in the dashboard;
 `run:` conditions are a shell escape hatch in a design that has deliberately
-refused shells (see `.githooks.conf`). Taking the useful third is not a failure
+refused shells (see `.amont.conf`). Taking the useful third is not a failure
 to copy the other two.
 
 ---
 
-## 4. `githooks run [--all-files]`
+## 4. `amont run [--all-files]`
 
 > **Shipped**, exactly as specified, plus `--hooks-dir`.
-> `githooks run`, `githooks run --all-files`, `githooks run <check>`.
-> `crates/githooks/tests/run_mode.rs`.
+> `amont run`, `amont run --all-files`, `amont run <check>`.
+> `crates/amont/tests/run_mode.rs`.
 
 `pre-commit run --all-files` runs every hook over the whole repository rather
 than the staged set. Two uses, both of which we currently cannot serve:
@@ -587,16 +587,16 @@ than the staged set. Two uses, both of which we currently cannot serve:
   is before you turn it on, and `git add .` is not an acceptable way to find out.
 - **CI parity** — running the same checks in CI over the whole tree.
 
-We have `githooks list` (would it run here?) and `githooks <check>` (run one,
+We have `amont list` (would it run here?) and `amont <check>` (run one,
 staged). We have no "run everything, over everything".
 
 `Scope::matches` already answers against an arbitrary path list, so the file
 selection is done. The work is:
 
 ```
-githooks run                 # every applicable check, staged files (what a commit does)
-githooks run --all-files     # …over `git ls-files` instead
-githooks run <check>         # one check, either way
+amont run                 # every applicable check, staged files (what a commit does)
+amont run --all-files     # …over `git ls-files` instead
+amont run <check>         # one check, either way
 ```
 
 `--all-files` skips the §1 stash: there is no staged/unstaged distinction to
@@ -609,12 +609,12 @@ protect when the answer is "all of it".
 > **The one section still unbuilt.** `Scope::files` is suffix-only today —
 > `matches()` in `check.rs` calls `path.ends_with(ext)` and nothing reads a
 > file head. Nothing is waiting on it; it is here because it is the gap
-> `.githooks.conf` inherits from `Scope`, not because it is next.
+> `.amont.conf` inherits from `Scope`, not because it is next.
 
 pre-commit classifies files with `identify`, which reads shebangs, so an
 extensionless `scripts/deploy` starting `#!/bin/sh` is a shell file.
 
-Our `Scope.files` is suffix-only, and `.githooks.conf`'s `*.sh` inherits that —
+Our `Scope.files` is suffix-only, and `.amont.conf`'s `*.sh` inherits that —
 a repository whose scripts have no extension cannot scope an external check onto
 them at all.
 
@@ -636,7 +636,7 @@ format inherits, not because anything is waiting on it.
 ## What we are not taking, and why
 
 **`core.hooksPath` (husky).** Husky sets one config key and ships no per-repo
-hook files. Our entire drift model — `githooks-fleet apply`, `BakeState`, the
+hook files. Our entire drift model — `amont-fleet apply`, `BakeState`, the
 `SHIMS` column, `recover_baked` — exists because we copy four files into
 ninety-six repositories. A global `core.hooksPath` deletes that problem class
 outright.
@@ -681,7 +681,7 @@ question "what stops an unformatted commit reaching the default branch" has no
 answer in this document, and `--all-files` naming CI parity as a use case is not
 one. That wants a documented exit-code contract and machine-readable output —
 SARIF would let the same checks feed code scanning, JUnit would let them feed a
-test report — and `githooks run --all-files` is where it belongs.
+test report — and `amont run --all-files` is where it belongs.
 
 **No DCO / `Signed-off-by` check.** `commit-msg` enforces a gitmoji prefix and
 length rules, which are house style. Any project that requires a Developer
@@ -703,7 +703,7 @@ precede `stage_fixed`, why `not_during` had to precede index fidelity — is the
 part worth keeping, and it reads as advice only in the future tense.
 
 **PR 0a — activation and `uninstall` (§0).** Add `uninstall` at both levels and
-name bulk activation `githooks-fleet install` rather than hiding it behind
+name bulk activation `amont-fleet install` rather than hiding it behind
 `fix --apply`. The README presents per-repository activation as the default and
 `init.templateDir` as a stated opt-in with its consequence spelled out. Closes
 the drive-by case for the default mode and makes the fleet's `unmanaged` column
@@ -715,7 +715,7 @@ untrusted manifest — and it is the **only** thing standing between a cloned
 repository and your shell for anyone who set `init.templateDir`, which is the
 convenient mode and therefore the popular one.
 
-**PR 1 — `githooks run [--all-files]`.** Small, useful immediately, no risk, and
+**PR 1 — `amont run [--all-files]`.** Small, useful immediately, no risk, and
 it gives the later work a way to be exercised over a whole repository.
 
 **PR 2 — `not_during` git-state conditions.** Generalises the `CHERRY_PICK_HEAD`
@@ -733,7 +733,7 @@ own decision: a worktree or `git archive` of the tip is more expensive than
 anything else here, and the cost is the whole question.
 
 Shipped as `pushed_tree.rs`, and the cost is what made it OPT-IN:
-`git config githooks.testPushedTree true`. The instrument is
+`git config amont.testPushedTree true`. The instrument is
 `git worktree add --detach <tip>`, not the stash — a push is not a staging
 operation, so the difference that matters is tree-versus-the-commit-you-are-
 sending, which includes staged-but-uncommitted work too. Holding all of that
@@ -748,7 +748,7 @@ solve*, which is a list of known gaps rather than a backlog.
 1. `--all-files` implies no stash. There is no staged/unstaged distinction to
    protect when the input set is `git ls-files`, so taking a stash would be
    surprising extra mutation with no correctness upside. If a future explicit
-   `--no-stash` flag exists for diagnostics, `githooks run --all-files
+   `--no-stash` flag exists for diagnostics, `amont run --all-files
    --no-stash` should be accepted as redundant rather than rejected.
 
    **Corollary, stated because it is the inverse of §1**: on a dirty tree,

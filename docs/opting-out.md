@@ -10,7 +10,7 @@ subject, the 50-character description budget, the body wrapping — none of the
 four answers below is the right one. Those are settings:
 
 ```sh
-githooks setup      # walks you through them, with the current values
+amont setup      # walks you through them, with the current values
 ```
 
 This matters most for `commit-msg`, which is the one hook `--no-verify` and
@@ -69,8 +69,8 @@ everyone believes is running.
 ### Usually better: warn instead of skip
 
 ```sh
-git config githooks.severity.clippy warn
-git config githooks.severity.pre-commit warn
+git config amont.severity.clippy warn
+git config amont.severity.pre-commit warn
 ```
 
 The check still runs and still reports; it just stops failing the commit. You
@@ -80,15 +80,15 @@ first move when adopting a check into an existing repository with a backlog.
 ## 4. Remove the hooks entirely
 
 ```sh
-githooks uninstall              # this repository
-githooks uninstall --binary     # …and the binary from ~/.local/bin
-githooks-fleet uninstall --root ~/Developer
+amont uninstall              # this repository
+amont uninstall --binary     # …and the binary from ~/.local/bin
+amont-fleet uninstall --root ~/Developer
 ```
 
 This removes **our four shims and nothing else**. A hook you wrote yourself is
 left alone and named in the output, whatever it is; a hook it cannot even read
 is named too, rather than passed over in silence. `hook.skip` and
-`githooks.severity` are never touched — those are your statements about your
+`amont.severity` are never touched — those are your statements about your
 repository.
 
 If `init.templateDir` is still set, uninstall says so loudly and gives you the
@@ -103,17 +103,17 @@ git config --global --unset init.templateDir
 
 That glob deletes **every** hook in the
 directory — including ones other tools installed and ones you wrote — in order
-to remove four files that belong to us. `githooks uninstall` exists precisely
+to remove four files that belong to us. `amont uninstall` exists precisely
 so that removing our hooks never means removing yours.
 
 ## A repository is asking to run its own checks
 
-If `githooks list` shows a check with:
+If `amont list` shows a check with:
 
 ```
-declared in an untrusted .githooks.conf — review it, then `githooks trust`
+declared in an untrusted .amont.conf — review it, then `amont trust`
 ```
 
 then that repository has declared checks and they are **already not running**.
-There is nothing to opt out of. Opting *in* is `githooks trust`, after reading
+There is nothing to opt out of. Opting *in* is `amont trust`, after reading
 the file. See [the trust model](trust.md).

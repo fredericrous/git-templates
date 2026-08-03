@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-    Install the githooks binary on Windows. Nothing else.
+    Install the amont binary on Windows. Nothing else.
 
 .DESCRIPTION
-    irm https://raw.githubusercontent.com/fredericrous/githooks/main/install/install.ps1 | iex
+    irm https://raw.githubusercontent.com/fredericrous/amont/main/install/install.ps1 | iex
 
     The counterpart to install/install.sh, which is POSIX sh and therefore
     reaches Windows only through Git Bash. This one runs in the PowerShell
@@ -22,19 +22,19 @@
 .PARAMETER BinDir
     Where to put the executables. Defaults to $HOME\.local\bin, and not
     arbitrarily: that is candidate 3 in the shim's own resolution order, and
-    the shim tries both `githooks` and `githooks.exe` there — so a binary in
+    the shim tries both `amont` and `amont.exe` there — so a binary in
     that directory is found even by a shim whose path was never baked.
 #>
 [CmdletBinding()]
 param(
-    [string]$Version = $env:GITHOOKS_VERSION,
-    [string]$BinDir  = $env:GITHOOKS_BIN_DIR
+    [string]$Version = $env:AMONT_VERSION,
+    [string]$BinDir  = $env:AMONT_BIN_DIR
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$Repo = 'fredericrous/githooks'
+$Repo = 'fredericrous/amont'
 if (-not $BinDir)  { $BinDir  = Join-Path $HOME '.local\bin' }
 if (-not $Version) { $Version = 'latest' }
 
@@ -53,7 +53,7 @@ try {
 }
 
 Write-Host ''
-Write-Host '  githooks installer'
+Write-Host '  amont installer'
 Write-Host ''
 
 # Only x86_64 is published today. Windows on ARM runs x64 binaries through
@@ -68,7 +68,7 @@ if ($arch -eq 'ARM64') {
 if ($Version -eq 'latest') {
     try {
         $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" `
-            -Headers @{ 'User-Agent' = 'githooks-installer' }
+            -Headers @{ 'User-Agent' = 'amont-installer' }
         $Version = $release.tag_name
     } catch {
         Fail "could not determine the latest release (rate limited? pass -Version v1.2.3): $_"
@@ -76,7 +76,7 @@ if ($Version -eq 'latest') {
 }
 $v = $Version -replace '^v', ''
 
-$name = "githooks-$v-$target"
+$name = "amont-$v-$target"
 $base = "https://github.com/$Repo/releases/download/v$v"
 
 Write-Host "  version:  $v"
@@ -84,7 +84,7 @@ Write-Host "  platform: $target"
 Write-Host "  into:     $BinDir"
 Write-Host ''
 
-$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("githooks-" + [guid]::NewGuid().ToString('N'))
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("amont-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 
 try {
@@ -124,13 +124,13 @@ try {
     $src = Join-Path $tmp $name
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
 
-    foreach ($exe in @('githooks.exe', 'githooks-fleet.exe')) {
+    foreach ($exe in @('amont.exe', 'amont-fleet.exe')) {
         $from = Join-Path $src $exe
         if (Test-Path $from) {
             $to = Join-Path $BinDir $exe
             # Copy beside the destination and move it into place: replacing a
             # RUNNING executable in place fails on Windows with a sharing
-            # violation, and a move is atomic, so a half-copied githooks.exe
+            # violation, and a move is atomic, so a half-copied amont.exe
             # never exists.
             $staged = "$to.new"
             Copy-Item -Path $from -Destination $staged -Force
@@ -155,9 +155,9 @@ if ($userPath -notlike "*$BinDir*") {
 
 Write-Host '  Nothing is enabled yet, on purpose. To turn the hooks on:'
 Write-Host ''
-Write-Host '    cd <your-repo>; githooks install     # this repository only'
-Write-Host '    githooks list                        # what would run here'
-Write-Host '    githooks uninstall                   # and back out again'
+Write-Host '    cd <your-repo>; amont install     # this repository only'
+Write-Host '    amont list                        # what would run here'
+Write-Host '    amont uninstall                   # and back out again'
 Write-Host ''
-Write-Host '  Across many repositories at once:  githooks-fleet install --root $HOME\source'
+Write-Host '  Across many repositories at once:  amont-fleet install --root $HOME\source'
 Write-Host ''

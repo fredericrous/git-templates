@@ -7,13 +7,13 @@ convention this repository enforces on itself.
 By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md). To
 report a vulnerability, do **not** open an issue: see [SECURITY.md](SECURITY.md).
 For questions and ideas that are not yet defects, use
-[Discussions](https://github.com/fredericrous/githooks/discussions).
+[Discussions](https://github.com/fredericrous/amont/discussions).
 
 ## Setup
 
 ```sh
-git clone https://github.com/fredericrous/githooks.git
-cd githooks
+git clone https://github.com/fredericrous/amont.git
+cd amont
 make check
 ```
 
@@ -35,7 +35,7 @@ for passing tests, and a silent skip is indistinguishable from a pass.
 | `make lint` | Exactly what CI's `rust` job gates on: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`. |
 | `make test` | `scripts/check-no-deps.sh` plus `cargo test`. Deliberately lint-free so the inner loop stays fast. `make test RUN=<suite>` runs one. |
 | `make deps` | The dependency guard on its own. |
-| `make install` | Builds and runs `githooks install`. |
+| `make install` | Builds and runs `amont install`. |
 | `make install-fleet` | The dashboard, installed separately and on purpose. |
 | `make propagate` | Push the shim **set** to every repo. Dry run; `APPLY=1` writes. Only needed when a hook is added, removed or renamed. |
 
@@ -49,7 +49,7 @@ whichever line you happened to be looking at.
 
 ## The one hard rule: the commit path takes no dependencies
 
-`githooks` and `githooks-runtime` link **no external crates**, and
+`amont` and `amont-runtime` link **no external crates**, and
 `scripts/check-no-deps.sh` fails a build that changes that. CI runs it as its
 own job.
 
@@ -72,34 +72,34 @@ that crate's tree against the code it replaces, and make the case in the PR. A
 rule nobody may question is just superstition with CI attached.
 
 The guard checks the **resolved dependency tree**, not the manifest, because a
-dependency reaches the commit path through `githooks-runtime` as easily as
+dependency reaches the commit path through `amont-runtime` as easily as
 directly. Every step of it fails **closed**: cargo missing, registry
 unreachable, run from outside the workspace — all of those are failures, not
 passes. It used to send stderr to `/dev/null` and end with `|| true`, and a
 job named "hook binary has no external dependencies" would have stayed green
 through every one of them. A guard that cannot fail is decoration.
 
-`githooks-fleet` takes dependencies quite happily — ratatui, crossterm, serde.
+`amont-fleet` takes dependencies quite happily — ratatui, crossterm, serde.
 It is installed separately and runs when asked. **If your feature needs a
 crate, that is where it goes.**
 
 ## Layout
 
 ```
-crates/githooks-runtime/   the checks, registry and dispatchers. std only.
-crates/githooks/           the hook binary. Runs on every commit. std only.
-crates/githooks-fleet/     the dashboard and the fleet fixer. Opt-in.
+crates/amont-runtime/   the checks, registry and dispatchers. std only.
+crates/amont/           the hook binary. Runs on every commit. std only.
+crates/amont-fleet/     the dashboard and the fleet fixer. Opt-in.
 ```
 
 A new check is **a module plus one registry entry** in
-`crates/githooks-runtime/src/registry.rs` — not a script. Name, stage, scope,
+`crates/amont-runtime/src/registry.rs` — not a script. Name, stage, scope,
 severity and function are declared together in one table, and a consistency
 test fails if a registered name has no shim or a shim has no handler. See
 [docs/hook-architecture.md](docs/hook-architecture.md).
 
 Before adding a built-in, ask whether it belongs in everybody's binary. A check
 that is right for *one* repository can be declared in that repository's
-`.githooks.conf` today, no fork required. See
+`.amont.conf` today, no fork required. See
 [docs/custom-checks.md](docs/custom-checks.md).
 
 ## Tests

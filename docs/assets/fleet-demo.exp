@@ -1,4 +1,4 @@
-# The keyboard for fleet-demo.sh's recording: drives `githooks-fleet tui`
+# The keyboard for fleet-demo.sh's recording: drives `amont-fleet tui`
 # over the synthetic fleet on a fixed schedule, inside the pty asciinema
 # provides. See fleet-demo.sh for the full recipe.
 #
@@ -11,8 +11,8 @@ set timeout 30
 set repo_root [file dirname [file dirname [file dirname [file normalize $argv0]]]]
 
 log_user 0
-spawn $repo_root/target/release/githooks-fleet tui --root /tmp/fleet-root --depth 2 \
-    --binary $env(HOME)/.local/bin/githooks
+spawn $repo_root/target/release/amont-fleet tui --root /tmp/fleet-root --depth 2 \
+    --binary $env(HOME)/.local/bin/amont
 log_user 1
 
 expect -timeout 4 eof

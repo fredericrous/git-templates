@@ -27,7 +27,7 @@ not understood yet.
 
 - [ ] `make check` passes locally (fmt, clippy `-D warnings`, the full suite)
 - [ ] A behaviour change arrives with a test that fails without it
-- [ ] Anything touching the commit path (`githooks`, `githooks-runtime`) adds no
+- [ ] Anything touching the commit path (`amont`, `amont-runtime`) adds no
       external crate — or makes the argument for reopening that rule, per
       `scripts/check-no-deps.sh`
 - [ ] Docs under `docs/` updated, and any new page added to `docs/SUMMARY.md`

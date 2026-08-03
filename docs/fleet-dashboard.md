@@ -1,9 +1,9 @@
-# `githooks-fleet` — a TUI for the 96-repo hook fleet
+# `amont-fleet` — a TUI for the 96-repo hook fleet
 
 Status: **built**. PRs #41-#47 implement v1 and v2; `scripts/propagate.sh` is
-gone, replaced by `githooks-fleet fix`.
+gone, replaced by `amont-fleet fix`.
 
-![the githooks-fleet dashboard over a small fleet: overview, repo detail, and the hook-centric view](assets/fleet-demo.gif)
+![the amont-fleet dashboard over a small fleet: overview, repo detail, and the hook-centric view](assets/fleet-demo.gif)
 
 The recording is real: real repositories, shims written by the release binary,
 scanned by the shipped dashboard — rebuilt any time with
@@ -143,8 +143,8 @@ Repo {
   languages         : Vec<String>    // manifests at the repo root — DISPLAY ONLY
   applicable        : Vec<String>    // checks that would ever fire here, from each Scope
   skips             : Vec<SkipEntry> // hook.skip, resolved: what it hits and where it came from
-  severities        : Vec<SeverityOverride>  // githooks.severity.*, and which one git applies
-  declared          : Vec<DeclaredCheck>     // this repo's own .githooks.conf checks
+  severities        : Vec<SeverityOverride>  // amont.severity.*, and which one git applies
+  declared          : Vec<DeclaredCheck>     // this repo's own .amont.conf checks
   trusted           : Option<bool>   // None when there is no manifest at all
   agents_md         : AgentsMdState  // UpToDate | Missing | Drifted | Malformed
   hooks_dir         : HooksDir       // where the hooks are, and whether we may touch them
@@ -162,7 +162,7 @@ ShimState = Ok            // installed bytes match the expected baked template
           | Unreadable{why}    // a binary, a directory, a permissions error, a hard link
 BakeState = Current       // == installed binary path
           | Stale(path)   // points somewhere else — the GUI-client failure mode
-          | Unbaked       // __GITHOOKS_BIN__ placeholder intact
+          | Unbaked       // __AMONT_BIN__ placeholder intact
           | Mixed         // shims disagree with each other
 HooksDir  = In{path}      // inside the repo's worktree, or its git common dir
           | Outside{path} // reported, never created, never written to
@@ -247,7 +247,7 @@ absolute path anywhere on the disk, and activation used to `create_dir_all` it
 and write four 0o755 files into it. The fleet now refuses anything that does not
 resolve inside the repository's own worktree or its git common directory.
 
-Note the deliberate asymmetry: **per-repo `githooks install` keeps honouring its
+Note the deliberate asymmetry: **per-repo `amont install` keeps honouring its
 own repository's `core.hooksPath`**, absolute or not — you are standing in that
 repository and configured it yourself. The fleet refuses, because it is walking
 ninety-six repositories it did not configure.
@@ -266,12 +266,12 @@ false problems out of `pre-commit-cargo-fmt`.
 
 Shim comparison is against the rendered template for the intended binary path,
 not the raw tracked template. A correctly baked shim must never be reported as
-drifted merely because `__GITHOOKS_BIN__` was replaced.
+drifted merely because `__AMONT_BIN__` was replaced.
 
 ## Screen 1 — Fleet overview (default)
 
 ```
-┌ githooks fleet ──────────────────── scanning 98/98 · 8.1s ── /Users/me/Developer ┐
+┌ amont fleet ──────────────────── scanning 98/98 · 8.1s ── /Users/me/Developer ┐
 │ 96 managed · 2 unmanaged (skipped) · 384 shims · 20 checks                       │
 │ consistency  commit-msg 96/1 ✓   pre-commit 96/1 ✓   pre-push 96/1 ✓             │
 │              prepare-commit-msg 96/1 ✓          ← copies/distinct blobs          │
@@ -307,7 +307,7 @@ drifted merely because `__GITHOOKS_BIN__` was replaced.
 - A repository whose dispatchers are SYMLINKS no longer counts as `managed`,
   even when the link points at one of our own shims. That is the intended
   trade: `fix` reports it instead of writing through the link.
-- `DECL` counts the checks a repository declares in `.githooks.conf`, and reads
+- `DECL` counts the checks a repository declares in `.amont.conf`, and reads
   `2!1` when one of those lines cannot be parsed — a check somebody committed
   that has never once run. `2` and `2!1` describing the same repository is the
   distinction the column exists for.
@@ -350,7 +350,7 @@ a failure in words. This single screen is the reason the tool exists.
 │   ✓ commit-msg           blob 7914a85  matches template                         │
 │   ✓ pre-commit           blob 7914a85  matches template                         │
 │   ✓ pre-push             blob 7914a85  matches template                         │
-│   ✗ prepare-commit-msg   MISSING       → `githooks fleet fix`                    │
+│   ✗ prepare-commit-msg   MISSING       → `amont fleet fix`                    │
 │                                                                                 │
 │ CHECKS (20)                        pre-commit                                   │
 │   ● ban-terms      ● merge-conflict   ● package-lock   ● usual-name              │
@@ -436,11 +436,11 @@ is the interesting absence — see below.
 rather than by a confirmation prompt.** There is no `f`. What ships is:
 
 ```sh
-githooks-fleet fix                    # DRY RUN — prints the plan, writes nothing
-githooks-fleet fix --apply            # carries it out
-githooks-fleet install                # implies applying; named after intent
-githooks-fleet fix --apply --agents-md          # opt in, per invocation
-githooks-fleet fix --apply --remove-unrecognized
+amont-fleet fix                    # DRY RUN — prints the plan, writes nothing
+amont-fleet fix --apply            # carries it out
+amont-fleet install                # implies applying; named after intent
+amont-fleet fix --apply --agents-md          # opt in, per invocation
+amont-fleet fix --apply --remove-unrecognized
 ```
 
 `fix` with no `--apply` is the preview, built from the same typed `FixPlan` the
@@ -457,7 +457,7 @@ Two flags are opt-in **per invocation** and never bundled into a plain
 tool did not write. The second is spelled that way rather than `--remove-stale`
 on purpose — "stale" means our own retired shims, which are removed by default
 and are a different thing entirely. `--binary <path>` chooses what the shims are
-baked to point at, defaulting to `$HOME/.local/bin/githooks`.
+baked to point at, defaulting to `$HOME/.local/bin/amont`.
 
 Given `make install` has destroyed tracked source twice in this repo's
 history, the dashboard's write path gets the same fail-closed treatment: it
@@ -469,7 +469,7 @@ guard that reads that as "untracked" fails open in exactly the environment where
 the user cannot see what happened.
 
 Every write and every remove — in `fix`, in `install`, and in `uninstall` — goes
-through `githooks_runtime::hookfile`, the single owner of "is this ours, and may
+through `amont_runtime::hookfile`, the single owner of "is this ours, and may
 we touch it?". It never follows a symlink, never treats an unreadable file as
 absent, and stages each write to a sibling temporary that is `rename`d into
 place, so replacing a link is the only thing that can happen and writing through
@@ -496,7 +496,7 @@ one is not a code path that exists.
   `DECL` together; below 60, fall back to a single-column list. Never horizontal
   scrolling.
 - **Screen readers do not meaningfully work with TUIs.** The accessible path is
-  therefore `githooks fleet --json`, emitting the full data model for scripting
+  therefore `amont fleet --json`, emitting the full data model for scripting
   and assistive tooling. This is a first-class output, not a debug flag, and the
   TUI is a renderer over it.
 
@@ -506,17 +506,17 @@ A cargo **workspace**, so the commit path keeps its posture:
 
 ```
 crates/
-  githooks-runtime/ # registry + hook logic. std-only.
-  githooks/         # the hook binary. ZERO external dependencies.
-  githooks-fleet/   # scanner, fixer, JSON, TUI. ratatui + crossterm.
+  amont-runtime/ # registry + hook logic. std-only.
+  amont/         # the hook binary. ZERO external dependencies.
+  amont-fleet/   # scanner, fixer, JSON, TUI. ratatui + crossterm.
 ```
 
-`githooks` must not gain an external dependency, directly or transitively; that
+`amont` must not gain an external dependency, directly or transitively; that
 property is the reason the Rust migration happened at all. The TUI is a separate
 artifact that a developer opts into, and `make install` continues to install
 only the hook binary.
 
-Extracting `githooks-runtime` has an independent benefit: there is currently no
+Extracting `amont-runtime` has an independent benefit: there is currently no
 lib target, which is why `cargo test --lib` fails outright. Unit tests for hook
 logic would move into a library where they belong, without letting TUI
 dependencies into the commit path.
@@ -527,15 +527,15 @@ dependencies into the commit path.
 
 Build the minimum useful tool, but build it in the final architecture:
 
-- Workspace split into `githooks-runtime`, `githooks`, and `githooks-fleet`.
+- Workspace split into `amont-runtime`, `amont`, and `amont-fleet`.
 - Rust scanner for `--root` and `--depth`, with explicit counters for found git
   dirs, seen hook dirs, managed/unmanaged repos, unreadable paths, and excluded
   directories.
 - Rust shim inspection: four dispatcher states, baked path state, stale managed
   files, foreign sub-hooks, vestigial hook `package.json`, languages, skips.
-- `githooks-fleet --json`, emitting `FleetScan`.
+- `amont-fleet --json`, emitting `FleetScan`.
 - Default TUI overview and repo detail views.
-- Rust `githooks-fleet fix [repo|--all] --dry-run`, producing a `FixPlan`.
+- Rust `amont-fleet fix [repo|--all] --dry-run`, producing a `FixPlan`.
   *Shipped inverted, and better: dry run is the DEFAULT and `--apply` is the
   flag, so the writing form is the one you have to type.*
 - Rust apply path for that exact `FixPlan`, with a second confirmation in the
@@ -581,12 +581,12 @@ after a differential has proven the model it destroys with, and the TUI is last
 because it is the least risky part and the least useful if the data beneath it
 is wrong.
 
-**1. Workspace split, zero behaviour change.** `githooks-runtime` (lib,
-std-only) and `githooks` (bin), no features. The proof is that all 174 tests
+**1. Workspace split, zero behaviour change.** `amont-runtime` (lib,
+std-only) and `amont` (bin), no features. The proof is that all 174 tests
 pass UNCHANGED, plus a differential running every hook over the same fixtures
 before and after, comparing bytes and exit codes — the technique that caught
 four bugs during the zsh port. This PR must also land the **zero-dependency CI
-guard** (`cargo tree` for `githooks` shows nothing external); without it the
+guard** (`cargo tree` for `amont` shows nothing external); without it the
 packaging rule is a comment, and ratatui arrives transitively three PRs later.
 Highest mechanical risk, no feature value, therefore alone.
 
@@ -621,9 +621,9 @@ practical use.
 
 ### Two details settled before starting
 
-- **Invocation is `githooks-fleet`, not `githooks fleet`.** A subcommand would
+- **Invocation is `amont-fleet`, not `amont fleet`.** A subcommand would
   require the hook binary to locate and exec the TUI binary, coupling the commit
-  path to a tool it must never know about. The screens' `githooks fleet` prompt
+  path to a tool it must never know about. The screens' `amont fleet` prompt
   is shorthand for the separate binary.
 - **Templates are embedded** with `include_str!` against the workspace root, so
   the tool reports correctly from any directory rather than only inside a

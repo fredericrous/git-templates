@@ -1,8 +1,8 @@
 # Summary
 
-[githooks](index.md)
+[amont](index.md)
 
-# Using githooks
+# Using amont
 
 - [Installing and activating](install.md)
 - [The checks](checks.md)

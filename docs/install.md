@@ -9,20 +9,20 @@ repository. Nothing about the first does the second.
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fredericrous/githooks/main/install/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/fredericrous/amont/main/install/install.sh | sh
 ```
 
 Windows, in PowerShell — the line above is POSIX `sh`, so on Windows it runs
 only under Git Bash:
 
 ```powershell
-irm https://raw.githubusercontent.com/fredericrous/githooks/main/install/install.ps1 | iex
+irm https://raw.githubusercontent.com/fredericrous/amont/main/install/install.ps1 | iex
 ```
 
 The installer resolves the latest release, downloads the archive for your
 platform, verifies it against the published `SHA256SUMS`, and writes the binary
-to `$GITHOOKS_BIN_DIR` (default `~/.local/bin`) by atomic rename, so a
-half-copied `githooks` never exists.
+to `$AMONT_BIN_DIR` (default `~/.local/bin`) by atomic rename, so a
+half-copied `amont` never exists.
 
 It refuses to guess. If the checksum does not match it exits rather than
 installing; if `SHA256SUMS` is missing or there is no sha256 tool on the
@@ -37,27 +37,27 @@ path is wrong — and it is the same convention systemd, pipx and uv observe.
 
 ### Where the binary ends up
 
-`githooks install` copies the running binary somewhere stable and bakes that
+`amont install` copies the running binary somewhere stable and bakes that
 path into every shim it writes — **unless the binary is already on your
 `PATH`**, in which case it bakes it where it is and copies nothing.
 
-That split matters for package managers. `./target/release/githooks install`
+That split matters for package managers. `./target/release/amont install`
 must copy, because `cargo clean` deletes that directory and the shims would
 stop resolving. A binary from `brew install`, `cargo install` or a distro
 package must **not** be copied: the copy is a second, unmanaged binary that the
-package manager will never update again, so `brew upgrade githooks` refreshes
+package manager will never update again, so `brew upgrade amont` refreshes
 one file while every repository stays baked to a frozen one. That is the same
 staleness the copy exists to prevent, arrived at from the other side.
 
 The path baked for a package-managed binary is the one **`PATH` exposes**, not
-the resolved one. Homebrew's `/usr/local/bin/githooks` is a symlink into
-`/usr/local/Cellar/githooks/<version>/bin/`, and that versioned directory is
+the resolved one. Homebrew's `/usr/local/bin/amont` is a symlink into
+`/usr/local/Cellar/amont/<version>/bin/`, and that versioned directory is
 deleted on the next upgrade — baking it would pin every repository to a path
 about to stop existing. The same is true of nix, asdf and mise.
 
 ### Installing somewhere else
 
-`$GITHOOKS_BIN_DIR` moves the binary, and `install` bakes wherever it landed
+`$AMONT_BIN_DIR` moves the binary, and `install` bakes wherever it landed
 into the shims it writes — so a custom location resolves through the baked path
 and needs nothing further.
 
@@ -65,25 +65,25 @@ The exception is the setup where shims are deliberately left **unbaked**:
 `init.templateDir` pointed at a checkout. Those shims resolve at run time from
 `~/.local/bin`, which is a constant inside a POSIX `sh` file. Choose both and
 they stop composing — nothing baked a path, and the one path the shims know is
-not where the binary went. `githooks install` says so when it sees the
+not where the binary went. `amont install` says so when it sees the
 combination, and offers the two ways out: link the binary where the shims look,
 or set `$GIT_HOOKS_BIN`.
 
-`$GITHOOKS_BIN_DIR` is an install-time setting only; the shim never reads it.
+`$AMONT_BIN_DIR` is an install-time setting only; the shim never reads it.
 The runtime override is `$GIT_HOOKS_BIN` — one variable able to redirect which
 binary executes on every commit is enough surface.
 
 Pin a version, or install elsewhere:
 
 ```sh
-GITHOOKS_VERSION=v1.0.0 GITHOOKS_BIN_DIR=~/bin \
-  curl -fsSL https://raw.githubusercontent.com/fredericrous/githooks/main/install/install.sh | sh
+AMONT_VERSION=v1.0.0 AMONT_BIN_DIR=~/bin \
+  curl -fsSL https://raw.githubusercontent.com/fredericrous/amont/main/install/install.sh | sh
 ```
 
 ### Without the installer
 
 Download an archive and its checksum from
-[Releases](https://github.com/fredericrous/githooks/releases/latest). Prebuilt
+[Releases](https://github.com/fredericrous/amont/releases/latest). Prebuilt
 targets: `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`,
 `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`,
 `x86_64-pc-windows-msvc`.
@@ -91,16 +91,16 @@ targets: `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`,
 Or build it:
 
 ```sh
-git clone https://github.com/fredericrous/githooks.git
-cd githooks && cargo build --release
-./target/release/githooks install
+git clone https://github.com/fredericrous/amont.git
+cd amont && cargo build --release
+./target/release/amont install
 ```
 
-Or from [crates.io](https://crates.io/crates/githooks), which builds the same
+Or from [crates.io](https://crates.io/crates/amont), which builds the same
 source:
 
 ```sh
-cargo install githooks
+cargo install amont
 ```
 
 Or with Homebrew:
@@ -108,7 +108,7 @@ Or with Homebrew:
 ```sh
 brew tap fredericrous/tap
 brew trust fredericrous/tap
-brew install githooks
+brew install amont
 ```
 
 The `brew trust` line is Homebrew's policy for every tap outside its own core,
@@ -133,8 +133,8 @@ opted into that check: a repository with no `ruff.toml` never needs ruff.
 ### Per repository — the default
 
 ```sh
-cd <your-repo> && githooks install
-githooks list                        # what would run here, and why not
+cd <your-repo> && amont install
+amont list                        # what would run here, and why not
 ```
 
 That writes four shims into `.git/hooks` — `pre-commit`, `pre-push`,
@@ -145,18 +145,18 @@ in.
 Across many repositories at once:
 
 ```sh
-githooks-fleet install --root ~/Developer
-githooks-fleet                              # report the fleet
-githooks-fleet tui                          # the dashboard
+amont-fleet install --root ~/Developer
+amont-fleet                              # report the fleet
+amont-fleet tui                          # the dashboard
 ```
 
-`githooks-fleet` is installed separately and on purpose: it pulls ratatui,
+`amont-fleet` is installed separately and on purpose: it pulls ratatui,
 crossterm and serde, and keeping the two installs apart is what stops "I wanted
 the dashboard" from becoming "every commit now depends on a TUI library".
 
 ### `--force`, and what it will not do
 
-`githooks install --force` replaces a hook the installer would otherwise
+`amont install --force` replaces a hook the installer would otherwise
 refuse:
 
 - one that is **present but carries no marker of ours** — somebody else's hook,
@@ -178,7 +178,7 @@ Two refusals `--force` does not override:
 
 Neither ever deletes a hook it did not write. A `pre-commit-*` or `pre-push-*`
 file in `.git/hooks` without our marker is reported and left exactly where it
-is. `githooks-fleet --remove-unrecognized` opts into removing them, and is
+is. `amont-fleet --remove-unrecognized` opts into removing them, and is
 spelled that way rather than `--remove-stale` because "stale" means our own
 retired shims, which are a different thing entirely.
 
@@ -186,7 +186,7 @@ retired shims, which are a different thing entirely.
 
 ```sh
 mkdir -p ~/.config/git
-git clone https://github.com/fredericrous/githooks.git ~/.config/git/git-templates
+git clone https://github.com/fredericrous/amont.git ~/.config/git/git-templates
 git config --global init.templateDir ~/.config/git/git-templates/templates
 git config --global commit.template ~/.config/git/git-templates/message
 ```
@@ -194,19 +194,19 @@ git config --global commit.template ~/.config/git/git-templates/message
 Git copies that directory into `.git/hooks` on every `init` **and every
 clone**, so from then on every repository you clone runs these hooks without
 being asked again. That is the convenience, and it is worth having: you never
-forget to install, and `githooks-fleet` never shows you an uncovered repo.
+forget to install, and `amont-fleet` never shows you an uncovered repo.
 
 It is also a standing grant, and worth stating in full. A cloned repository can
-declare its own checks in `.githooks.conf`. With this key set, those
+declare its own checks in `.amont.conf`. With this key set, those
 declarations are present in every repository you clone — including one you
-cloned only to read — and are one `githooks trust` away from running. They do
+cloned only to read — and are one `amont trust` away from running. They do
 **not** run before that; see [the trust model](trust.md). But if you set this
 key, trust deliberately, rather than letting installation be the moment you
 decided:
 
 ```sh
-githooks trust          # show what this repo declares, and accept it
-githooks trust --show   # what is trusted here
+amont trust          # show what this repo declares, and accept it
+amont trust --show   # what is trusted here
 ```
 
 Full reasoning: [index fidelity and run modes](index-fidelity-and-run-modes.md) §0.
@@ -214,15 +214,15 @@ Full reasoning: [index fidelity and run modes](index-fidelity-and-run-modes.md) 
 ## 3. Turn them off again
 
 ```sh
-githooks uninstall              # this repository
-githooks uninstall --binary     # …and remove the binary from ~/.local/bin
-githooks-fleet uninstall --root ~/Developer
+amont uninstall              # this repository
+amont uninstall --binary     # …and remove the binary from ~/.local/bin
+amont-fleet uninstall --root ~/Developer
 ```
 
 Uninstall removes **our four shims and nothing else**. A hook you wrote
 yourself is left alone and named in the output, whatever it is — a hook it
 cannot even read is named too, rather than passed over in silence. `hook.skip`
-and `githooks.severity` are never touched, because those are your statements
+and `amont.severity` are never touched, because those are your statements
 about your repository, not ours.
 
 It also takes the shims back out of the template directory, and — if
@@ -235,7 +235,7 @@ source and belong to the checkout.
 This is also why the documentation never tells you to run
 `rm $(git rev-parse --git-dir)/hooks/*`. That glob deletes every hook in the
 directory — including ones other tools installed and ones you wrote — in order
-to remove four files that belong to us. `githooks uninstall` exists precisely
+to remove four files that belong to us. `amont uninstall` exists precisely
 so that removing our hooks never means removing yours.
 
 For bypassing a single commit, or disabling one check without uninstalling
@@ -247,16 +247,16 @@ Ordinary binary updates need nothing per repository: every shim points at the
 one binary, so replacing the binary reaches every repo at once.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fredericrous/githooks/main/install/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/fredericrous/amont/main/install/install.sh | sh
 ```
 
 Re-installing is only needed when the shim **set** changes — a hook added,
 removed or renamed:
 
 ```sh
-cd <your-repo> && githooks install        # re-bake the shims here
-githooks-fleet fix --root ~/Developer     # or see what the whole fleet needs
-githooks-fleet fix --apply --root ~/Developer
+cd <your-repo> && amont install        # re-bake the shims here
+amont-fleet fix --root ~/Developer     # or see what the whole fleet needs
+amont-fleet fix --apply --root ~/Developer
 ```
 
 ## Windows
@@ -266,12 +266,12 @@ Everything works, with one setup difference: there is no symlink.
 The one-liner for this platform is PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/fredericrous/githooks/main/install/install.ps1 | iex
+irm https://raw.githubusercontent.com/fredericrous/amont/main/install/install.ps1 | iex
 ```
 
-It writes `githooks.exe` and `githooks-fleet.exe` into
+It writes `amont.exe` and `amont-fleet.exe` into
 `%USERPROFILE%\.local\bin`, which is where the shims look — they try both
-`githooks` and `githooks.exe` there, so a binary in that directory resolves
+`amont` and `amont.exe` there, so a binary in that directory resolves
 even in a shim whose path was never baked. CI runs this script on a real
 Windows runner against a real published release, because a documented install
 path nobody executes is one you find out about from a bug report.
@@ -281,7 +281,7 @@ not `make`:
 
 ```sh
 cargo build --release
-./target/release/githooks install
+./target/release/amont install
 ```
 
 On macOS and Linux `~/.config/git/git-templates` is usually a symlink to the
@@ -290,10 +290,10 @@ not create symlinks without Developer Mode or elevation, so point git straight
 at the checkout:
 
 ```sh
-git config --global init.templateDir 'C:/path/to/githooks/templates'
+git config --global init.templateDir 'C:/path/to/amont/templates'
 ```
 
 Nothing else changes. The shims never need the symlink: they resolve the binary
-at run time, trying `$GIT_HOOKS_BIN`, the baked path, `~/.local/bin/githooks`
-and `~/.local/bin/githooks.exe`, then `PATH`. The installer detects the `.exe`
+at run time, trying `$GIT_HOOKS_BIN`, the baked path, `~/.local/bin/amont`
+and `~/.local/bin/amont.exe`, then `PATH`. The installer detects the `.exe`
 suffix on its own.

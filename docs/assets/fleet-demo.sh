@@ -7,7 +7,7 @@
 #
 # To re-record (needs `asciinema`, `agg`, and the `expect` every macOS ships):
 #
-#     cargo build --release --bin githooks --bin githooks-fleet
+#     cargo build --release --bin amont --bin amont-fleet
 #     sh docs/assets/fleet-demo.sh                # builds /tmp/fleet-root
 #     HOME=/tmp/fleet-home XDG_CONFIG_HOME=/tmp/fleet-home/.config \
 #     GIT_CONFIG_GLOBAL=/tmp/fleet-home/.gitconfig GIT_CONFIG_SYSTEM=/dev/null \
@@ -36,7 +36,7 @@ export GIT_CONFIG_SYSTEM=/dev/null
 
 rm -rf /tmp/fleet-root /tmp/fleet-home
 mkdir -p /tmp/fleet-root "$HOME/.local/bin"
-cp "$BIN_DIR/githooks" "$HOME/.local/bin/githooks"
+cp "$BIN_DIR/amont" "$HOME/.local/bin/amont"
 git config --global user.email dev@example.com
 git config --global user.name Dev
 
@@ -79,8 +79,8 @@ for r in shop api infra cli web blog data; do
 done
 
 # Shims into every repository, from the fleet binary itself.
-"$BIN_DIR/githooks-fleet" install --root /tmp/fleet-root --depth 2 \
-    --binary "$HOME/.local/bin/githooks" < /dev/null
+"$BIN_DIR/amont-fleet" install --root /tmp/fleet-root --depth 2 \
+    --binary "$HOME/.local/bin/amont" < /dev/null
 
 # One repository opted a check out — the dashboard announces it rather than
 # letting the line rot in .git/config unread.

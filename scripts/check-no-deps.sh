@@ -14,7 +14,7 @@
 #      commit in 96 repos, with the developer's credentials, reading every
 #      staged file, while nobody is watching. Every transitive crate is code
 #      executing in that position. Zero dependencies means that code is std and
-#      ours. The argument is about THIS binary; githooks-fleet pulls ratatui and
+#      ours. The argument is about THIS binary; amont-fleet pulls ratatui and
 #      a dozen crates quite happily, because it is opt-in and runs when asked.
 #
 #   2. OFFLINE REPRODUCIBILITY. A std-only crate builds indefinitely without a
@@ -26,7 +26,7 @@
 #      ever genuinely needs a parser, weigh that crate's tree against the code
 #      it replaces and decide. Do not treat this file as a prohibition.
 #
-# A dependency reaches the commit path through githooks-runtime as easily as
+# A dependency reaches the commit path through amont-runtime as easily as
 # directly, so the check is on the RESOLVED tree rather than on a manifest.
 #
 # Every step below fails CLOSED. This script used to send cargo's stderr to
@@ -39,7 +39,7 @@
 # decoration.
 set -eu
 
-if ! tree_out=$(cargo tree -p githooks --edges normal --prefix none); then
+if ! tree_out=$(cargo tree -p amont --edges normal --prefix none); then
   echo "check-no-deps: cargo tree failed — the commit path is UNVERIFIED." >&2
   echo "That is a failure, not a pass: see the error above." >&2
   exit 1
@@ -55,8 +55,8 @@ crates=$(printf '%s\n' "$tree_out" | sed 's/ (\*)$//' | awk '{print $1}' | sort 
 # The root crate must be in its own tree. If it is not, we are reading
 # something other than what we think we are, and an empty `ext` below would
 # mean nothing.
-if ! printf '%s\n' "$crates" | grep -qx 'githooks'; then
-  echo "check-no-deps: 'githooks' is absent from its own dependency tree." >&2
+if ! printf '%s\n' "$crates" | grep -qx 'amont'; then
+  echo "check-no-deps: 'amont' is absent from its own dependency tree." >&2
   echo "Refusing to conclude anything from that. Output was:" >&2
   printf '%s\n' "$tree_out" | sed 's/^/  /' >&2
   exit 1
@@ -64,13 +64,13 @@ fi
 
 # The one legitimate `|| true` in this file: `grep -v` exits 1 when nothing
 # matches, and nothing matching IS the success case here.
-ext=$(printf '%s\n' "$crates" | grep -vE '^(githooks|githooks-runtime)$' || true)
+ext=$(printf '%s\n' "$crates" | grep -vE '^(amont|amont-runtime)$' || true)
 
 if [ -n "$ext" ]; then
-  echo "githooks gained external dependencies:" >&2
+  echo "amont gained external dependencies:" >&2
   echo "$ext" | sed 's/^/  /' >&2
   echo "" >&2
-  echo "The commit path must stay dependency-free. Put this in githooks-fleet." >&2
+  echo "The commit path must stay dependency-free. Put this in amont-fleet." >&2
   exit 1
 fi
-echo "githooks: no external dependencies"
+echo "amont: no external dependencies"

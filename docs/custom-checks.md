@@ -1,6 +1,6 @@
-# Custom checks — `.githooks.conf`
+# Custom checks — `.amont.conf`
 
-A repository can declare checks of its own. Put a `.githooks.conf` at the
+A repository can declare checks of its own. Put a `.amont.conf` at the
 repository root, **commit it**, and the hooks run it alongside the built-ins.
 
 ```
@@ -29,7 +29,7 @@ dashboard.
 `<stage>-<name>`, exactly as a built-in has: a line reading
 `pre-commit  shellcheck  …` declares `pre-commit-shellcheck`.
 
-That id is what `githooks list` and the dashboard show, and either the id or the
+That id is what `amont list` and the dashboard show, and either the id or the
 short name addresses it in `hook.skip` and in a severity override — the same
 three-way vocabulary the built-ins take:
 
@@ -74,7 +74,7 @@ A command that **cannot be started at all** — a typo'd path, a tool nobody
 installed — is neither. It is reported as a gap:
 
 ```
-⚠ .githooks.conf: shellcheck could not run scripts/lint-shel.sh — No such file
+⚠ .amont.conf: shellcheck could not run scripts/lint-shel.sh — No such file
 ⚠ 1 check(s) could not run: shellcheck
 ```
 
@@ -89,7 +89,7 @@ The same rule applies to the manifest itself. A malformed line still produces a
 check — one that reports on every commit and says which line and what was wrong:
 
 ```
-⚠ .githooks.conf: oops — line 3: severity "LOUD" must be `block` or `warn`
+⚠ .amont.conf: oops — line 3: severity "LOUD" must be `block` or `warn`
 ```
 
 Silently ignoring it would mean a check somebody committed months ago has never
@@ -121,23 +121,23 @@ does not get a turn.
 ## A manifest is inert until you trust it
 
 A repository you cloned can declare checks, and running them is a decision you
-make — not one `git clone` makes for you. So nothing in `.githooks.conf` runs
+make — not one `git clone` makes for you. So nothing in `.amont.conf` runs
 until somebody accepts it here:
 
 ```sh
-githooks trust            # shows what it declares, then records it
-githooks trust --show     # what it declares, and whether it is trusted
-githooks trust --revoke
+amont trust            # shows what it declares, then records it
+amont trust --show     # what it declares, and whether it is trusted
+amont trust --revoke
 ```
 
-`githooks install` asks once, with the declarations in view. Declining still
+`amont install` asks once, with the declarations in view. Declining still
 installs the built-ins.
 
 Until then the checks are **reported, not dropped** — the point is that you can
 see there is a decision waiting:
 
 ```
-⚠ .githooks.conf: shellcheck — declared in an untrusted .githooks.conf …
+⚠ .amont.conf: shellcheck — declared in an untrusted .amont.conf …
 ⚠ 1 check(s) could not run: shellcheck
 ```
 
@@ -163,7 +163,7 @@ pre-commit  format  *.js  block  fix npx prettier --write
 
 Two conditions, both deliberate:
 
-- **Off unless you ask.** `git config githooks.fix true`, per repository. A hook
+- **Off unless you ask.** `git config amont.fix true`, per repository. A hook
   that edits your files without being asked is a larger surprise than one that
   complains.
 - **pre-commit only.** `fix` on a `pre-push` line is a parse error, reported on
@@ -176,7 +176,7 @@ aside first, so the tree contains what you staged and nothing else — anything 
 formatter touches is by definition part of this commit. Work you deliberately
 kept back is never swept in.
 
-The built-in `prettier` check does this too, under the same `githooks.fix` gate.
+The built-in `prettier` check does this too, under the same `amont.fix` gate.
 
 ## Turning one off
 
@@ -184,7 +184,7 @@ Exactly as for a built-in:
 
 ```sh
 git config hook.skip shellcheck                 # do not run it
-git config githooks.severity.shellcheck warn    # run it, do not let it block
+git config amont.severity.shellcheck warn    # run it, do not let it block
 ```
 
 Both surfaces read the same three names, and **nothing matches by substring**:
@@ -197,7 +197,7 @@ and skipping `lint-js` leaves `lint-json-yaml` alone.
 
 | | runs | reports | blocks |
 |---|---|---|---|
-| `githooks.severity.<key> warn` | yes | yes | no |
+| `amont.severity.<key> warn` | yes | yes | no |
 | `hook.skip <key>` | no | no (only that it was skipped) | no |
 
 A downgrade keeps the check working and keeps you looking at what it finds; you
@@ -210,7 +210,7 @@ it applies but should not be a gate.
 ## Seeing what you declared
 
 ```sh
-githooks list
+amont list
 ```
 
 ```
@@ -218,7 +218,7 @@ pre-commit
   ● pre-commit-merge-conflict
   ○ pre-commit-clippy               inert here — needs .rs + Cargo.toml
   ● shellcheck (declared)
-  ✗ oops (declared)                 .githooks.conf line 3: severity "LOUD" …
+  ✗ oops (declared)                 .amont.conf line 3: severity "LOUD" …
 pre-push
   ● pre-push-branch-protect
   ● smoke (declared)
@@ -226,7 +226,7 @@ pre-push
   ● runs here   ○ inert   ⊘ skipped via hook.skip   ✗ declaration unusable
 ```
 
-Across the fleet, `githooks-fleet` has a `DECL` column — `2` for two declared
+Across the fleet, `amont-fleet` has a `DECL` column — `2` for two declared
 checks, `2!1` when one of them cannot run — and lists them per repository in the
 detail pane.
 

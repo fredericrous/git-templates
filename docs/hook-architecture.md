@@ -12,10 +12,10 @@ before this landed, not the state now.
 
 | table | where | holds |
 |---|---|---|
-| `REGISTRY` | `githooks-runtime/registry.rs` | name → fn pointer |
+| `REGISTRY` | `amont-runtime/registry.rs` | name → fn pointer |
 | `PRE_COMMIT_CHECKS` | same file | order, pre-commit |
 | `PRE_PUSH_CHECKS` | same file | order, pre-push |
-| `LANGUAGES` | `githooks-fleet/checks.rs` | name → language scope |
+| `LANGUAGES` | `amont-fleet/checks.rs` | name → language scope |
 
 Adding a check means editing three of them and writing a module. The tests that
 keep them aligned are good tests, but they exist to police a shape that should
@@ -150,7 +150,7 @@ check that finds something must not stop the chain — it has not invalidated
 anything.
 
 **A severity override is a better escape hatch than `hook.skip`.**
-`git config githooks.severity.<check> warn` downgrades a check instead of
+`git config amont.severity.<check> warn` downgrades a check instead of
 disabling it. `hook.skip` is all-or-nothing and, as measured, invisible enough
 that a one-line config edit could disable everything unnoticed. A downgrade keeps
 the signal
@@ -175,7 +175,7 @@ exists to replace.
 **And the dashboard has to show it.** A downgrade is quieter than a skip: the
 check runs, prints its failure in red, and the commit passes. Nothing on screen
 distinguishes it from enforcement, so the fleet view carries a `WARN` column and
-a per-repo `githooks.severity` block. That block separates three cases a config
+a per-repo `amont.severity` block. That block separates three cases a config
 line cannot: a real downgrade, an explicit `block` (the default written out), and
 a line that changes nothing because the check name or the value is misspelt.
 
@@ -241,7 +241,7 @@ worse flaw than the lexicographic ordering usually cited against the old
 filename-prefix mechanism.
 
 ```
-# .githooks.conf — stage  name        scope     severity  command
+# .amont.conf — stage  name        scope     severity  command
 pre-commit        shellcheck  *.sh      block     scripts/lint-shell.sh
 pre-push          smoke       *         warn      make smoke
 ```
@@ -275,22 +275,22 @@ third-party command should not be able to delay `branch-protect`.
 
 ## Developer experience
 
-- `githooks list` — every check, stage, scope, severity, and whether it would
+- `amont list` — every check, stage, scope, severity, and whether it would
   run *here*. Externals are listed too, marked `(declared)`, and a line that
   could not be parsed gets its own glyph: correctly-inert, disabled, and
   unusable are three different things and none may look like another.
 - Adding a built-in: one module plus one descriptor; the compiler names what is
   missing.
 - Adding an external: edit a committed file, no rebuild.
-- `githooks-fleet` gains third-party checks in its views, which it cannot see
+- `amont-fleet` gains third-party checks in its views, which it cannot see
   today at all.
 
-### Named future: `githooks explain <check>`
+### Named future: `amont explain <check>`
 
 Not built. It was in the list above, among shipped DX, which made "why didn't
 prettier run" look like a question the tool answers.
 
-Half of it exists: `githooks list` says whether a check would run HERE and why
+Half of it exists: `amont list` says whether a check would run HERE and why
 not — inert, skipped, or an unusable declaration, as three distinct glyphs. What
 is missing is the other half, the retrospective one: why a check did or did not
 fire on the commit you just made. Today that is a code-reading exercise.
@@ -307,7 +307,7 @@ classified one at a time: 12 `Unavailable`, 2 `Warned` (a waived-past lockfile, 
 first-time author identity), 1 left `Passed` (unpinned ruff, which ran). Config
 override shipped. Dashboard shows downgrades apart from enforcement.
 
-**PR 3 — external checks.** DONE. Manifest, parser, `External`, `githooks list`,
+**PR 3 — external checks.** DONE. Manifest, parser, `External`, `amont list`,
 and the fleet views. Two things the sketch did not anticipate:
 
 *`Scope` had to gate externals at RUN time.* For a built-in it is a declaration
@@ -343,6 +343,6 @@ did not notice.
    or flaky one.
 2b. ~~**Can an external run before a built-in?**~~ RESOLVED: no, and not
    configurably. Externals are appended to each stage.
-3. **Does `githooks list` belong in the hook binary or the fleet tool?** The
+3. **Does `amont list` belong in the hook binary or the fleet tool?** The
    fleet tool has the nicer output; the hook binary is what is installed
    everywhere.

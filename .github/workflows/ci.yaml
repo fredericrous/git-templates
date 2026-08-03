@@ -44,7 +44,7 @@ jobs:
       # Supply chain: this binary runs on every commit with the developer's
       # credentials, so every transitive crate is code running in that
       # position. A dependency reaches the commit path through
-      # githooks-runtime as easily as directly, so this checks the RESOLVED
+      # amont-runtime as easily as directly, so this checks the RESOLVED
       # tree. See scripts/check-no-deps.sh for why, and for when overriding it
       # is a reasonable call rather than a violation.
       - run: ./scripts/check-no-deps.sh
@@ -92,7 +92,7 @@ jobs:
   # string in a manifest that nothing ever tests, and the first use of a 1.80
   # API would sail through every other job here.
   #
-  # Only the COMMIT PATH is checked, and deliberately: `githooks-fleet` declares
+  # Only the COMMIT PATH is checked, and deliberately: `amont-fleet` declares
   # a floor of its own (1.88, forced by ratatui's tree) and could not build here.
   msrv:
     # Literal, not `${{ env.MSRV }}` — the `env` context is not available in a
@@ -107,7 +107,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install "$MSRV" --profile minimal --no-self-update
-      - name: cargo +MSRV check (githooks, githooks-runtime)
+      - name: cargo +MSRV check (amont, amont-runtime)
         run: |
           set -euo pipefail
           # Cargo 1.74 cannot PARSE a v4 lock file ("lock file version `4` was
@@ -118,12 +118,12 @@ jobs:
           # exists to enforce — so there is nothing for a lock file to pin.
           # The checkout is disposable; nothing is committed back.
           rm -f Cargo.lock
-          cargo "+$MSRV" check -p githooks -p githooks-runtime
+          cargo "+$MSRV" check -p amont -p amont-runtime
 
   # The workspace's one dependency tree, watched.
   #
-  # `githooks` is dependency-free by policy and `deps` proves it, so the only
-  # crate with a supply chain to monitor is `githooks-fleet` (~57 packages:
+  # `amont` is dependency-free by policy and `deps` proves it, so the only
+  # crate with a supply chain to monitor is `amont-fleet` (~57 packages:
   # ratatui, crossterm, serde). Leaving the single crate that HAS a tree
   # unwatched, in a repository whose headline dependency argument is supply
   # chain, is the asymmetry this closes.
@@ -207,8 +207,8 @@ jobs:
   #
   # This job used to bill itself as a "cheap backstop for the hooks no test file
   # covers (argo-lint, kube-linter, kubeconform, yamllint)". Those four have
-  # been Rust since phase 3 and are covered by crates/githooks/tests/k8s.rs and
-  # crates/githooks/tests/linters.rs; the comment outlived its subject by three
+  # been Rust since phase 3 and are covered by crates/amont/tests/k8s.rs and
+  # crates/amont/tests/linters.rs; the comment outlived its subject by three
   # phases. It also dispatched on the shebang across four arms, of which the
   # `*zsh` and `*node` ones could never fire — no hook has been either since the
   # rename.
@@ -322,10 +322,18 @@ jobs:
             exit 0
           }
 
-          $bin = Join-Path $env:RUNNER_TEMP 'githooks-bin'
+          # Same skip for a latest release that predates the rename to amont:
+          # its assets carry the old name, and the script under test fetches
+          # the new one. The first amont release reactivates this on its own.
+          if (-not ($latest.assets | Where-Object { $_.name -like 'amont-*' })) {
+            Write-Host '::notice::latest release predates the amont rename - skipping the installer test'
+            exit 0
+          }
+
+          $bin = Join-Path $env:RUNNER_TEMP 'amont-bin'
           & "$PWD\install\install.ps1" -BinDir $bin -Version $latest.tag_name
 
-          $exe = Join-Path $bin 'githooks.exe'
+          $exe = Join-Path $bin 'amont.exe'
           if (-not (Test-Path $exe)) { throw "install.ps1 did not produce $exe" }
 
           # It has to RUN, not merely exist — and answer as itself.
@@ -351,8 +359,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --release
-          BIN="$PWD/target/release/githooks.exe"
-          [ -x "$BIN" ] || BIN="$PWD/target/release/githooks"
+          BIN="$PWD/target/release/amont.exe"
+          [ -x "$BIN" ] || BIN="$PWD/target/release/amont"
 
           repo=$(mktemp -d)/r && mkdir -p "$repo" && cd "$repo"
           # --template= (empty): without it `git init` copies the MACHINE's
@@ -364,7 +372,7 @@ jobs:
           mkdir -p .git/hooks
           for h in commit-msg prepare-commit-msg pre-commit; do
             cp "$GITHUB_WORKSPACE/templates/hooks/$h" ".git/hooks/$h"
-            sed -i "s|__GITHOOKS_BIN__|$BIN|g" ".git/hooks/$h"
+            sed -i "s|__AMONT_BIN__|$BIN|g" ".git/hooks/$h"
             chmod +x ".git/hooks/$h"
           done
 
@@ -374,7 +382,7 @@ jobs:
           # useless as proof that anything ran. This also exercises the config
           # read itself on the one platform where its `git config` calls have
           # never been tried.
-          git config githooks.commit.gitmoji prefix
+          git config amont.commit.gitmoji prefix
 
           echo "hello" > a.txt && git add a.txt
           git commit -m "feat: a windows commit through the rust hooks"
@@ -395,28 +403,28 @@ jobs:
           [ "$subject" = "feat: a windows commit through the rust hooks" ] \
             && { echo "::error::gitmoji prefix missing — hook did not rewrite"; exit 1; }
 
-          # And the settings are readable through the CLI here too — `githooks
+          # And the settings are readable through the CLI here too — `amont
           # setup` with no terminal must print the keys rather than hang or
           # fail, which is the path a Windows provisioning script would take.
-          "$BIN" setup | grep -q "githooks.commit.gitmoji" \
-            || { echo "::error::githooks setup printed no keys"; exit 1; }
+          "$BIN" setup | grep -q "amont.commit.gitmoji" \
+            || { echo "::error::amont setup printed no keys"; exit 1; }
           echo "windows end-to-end OK"
 
       # The case the baked run above cannot see. `make install` puts the binary
       # in ~/.local/bin, and a repo created from a template dir that IS the
-      # checkout keeps the __GITHOOKS_BIN__ placeholder — so the shim has to
+      # checkout keeps the __AMONT_BIN__ placeholder — so the shim has to
       # resolve the binary itself, with PATH deliberately emptied because that
       # is what a GUI git client hands a hook.
       #
-      # Windows builds githooks.exe, and `[ -x .../githooks ]` is false for it,
+      # Windows builds amont.exe, and `[ -x .../amont ]` is false for it,
       # so this path fell through to PATH — the one thing the test removes. That
       # is the bug this step exists to keep fixed.
       - name: An UNBAKED shim resolves the binary without PATH
         shell: bash
         run: |
           set -euo pipefail
-          BIN_SRC="$PWD/target/release/githooks.exe"
-          [ -f "$BIN_SRC" ] || BIN_SRC="$PWD/target/release/githooks"
+          BIN_SRC="$PWD/target/release/amont.exe"
+          [ -f "$BIN_SRC" ] || BIN_SRC="$PWD/target/release/amont"
           mkdir -p "$HOME/.local/bin"
           cp "$BIN_SRC" "$HOME/.local/bin/$(basename "$BIN_SRC")"
 
@@ -429,7 +437,7 @@ jobs:
           cp "$GITHUB_WORKSPACE/templates/hooks/pre-commit" .git/hooks/pre-commit
           chmod +x .git/hooks/pre-commit
           # Unbaked on purpose — this is what git init from the checkout gives.
-          grep -q '__GITHOOKS_BIN__' .git/hooks/pre-commit \
+          grep -q '__AMONT_BIN__' .git/hooks/pre-commit \
             || { echo "::error::fixture was baked; the test proves nothing"; exit 1; }
 
           # A PATH with git and the shell on it, and NOTHING else — git lives
@@ -440,8 +448,8 @@ jobs:
           # The test is only worth anything if the binary is unreachable by the
           # LAST fallback. If PATH can still find it, fallback 4 answers and the
           # .exe branch this step exists for is never taken.
-          if PATH="$MIN_PATH" command -v githooks > /dev/null 2>&1; then
-            echo "::error::githooks is still on the reduced PATH — test proves nothing"
+          if PATH="$MIN_PATH" command -v amont > /dev/null 2>&1; then
+            echo "::error::amont is still on the reduced PATH — test proves nothing"
             exit 1
           fi
 
@@ -450,7 +458,7 @@ jobs:
             || { echo "$out"; echo "::error::unbaked shim could not find the binary"; exit 1; }
           echo "$out"
           case "$out" in
-            *"githooks binary not found"*)
+            *"amont binary not found"*)
               echo "::error::shim fell through every fallback"; exit 1 ;;
           esac
           git rev-parse --verify HEAD > /dev/null 2>&1 \
@@ -697,7 +705,7 @@ jobs:
             exit 1
           fi
 
-          # `missing()` in crates/githooks/tests/common/mod.rs prints exactly
+          # `missing()` in crates/amont/tests/common/mod.rs prints exactly
           # `  ! <tool> unavailable — skipping`. Pull the tool name out of that.
           skipped=$(grep -o '! [A-Za-z0-9_.+-]* unavailable — skipping' /tmp/hooks-test.log \
                     | awk '{print $2}' | sort -u || true)

@@ -1,7 +1,7 @@
 #!/bin/sh
-# Install the githooks binary. Nothing else.
+# Install the amont binary. Nothing else.
 #
-#   curl -fsSL https://raw.githubusercontent.com/fredericrous/githooks/main/install/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/fredericrous/amont/main/install/install.sh | sh
 #
 # This script deliberately does NOT turn any hooks on. It downloads a verified
 # binary, puts it somewhere your shims can find it, and tells you what to run
@@ -14,12 +14,12 @@
 # this has to run wherever git does.
 set -eu
 
-REPO="fredericrous/githooks"
+REPO="fredericrous/amont"
 # `$HOME/.local/bin` by default, and not arbitrarily: it is candidate 3 in the
 # shim's own resolution order, so a binary here is found even by a shim whose
 # path was never baked.
-BIN_DIR="${GITHOOKS_BIN_DIR:-$HOME/.local/bin}"
-VERSION="${GITHOOKS_VERSION:-latest}"
+BIN_DIR="${AMONT_BIN_DIR:-$HOME/.local/bin}"
+VERSION="${AMONT_VERSION:-latest}"
 
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; OFF='\033[0m'
 if [ -n "${NO_COLOR:-}" ] || [ ! -t 1 ]; then RED=''; GREEN=''; YELLOW=''; OFF=''; fi
@@ -56,7 +56,7 @@ target() {
             if ldd --version 2>&1 | grep -qi musl; then libc=musl; else libc=gnu; fi
             case "$arch" in
                 x86_64|amd64)  echo "x86_64-unknown-linux-$libc" ;;
-                aarch64|arm64) [ "$libc" = "musl" ] && die "no aarch64 musl build yet — build from source with cargo install githooks"
+                aarch64|arm64) [ "$libc" = "musl" ] && die "no aarch64 musl build yet — build from source with cargo install amont"
                                echo "aarch64-unknown-linux-gnu" ;;
                 *) die "unsupported architecture: $arch" ;;
             esac
@@ -90,16 +90,16 @@ resolve_version() {
     # handing you a tarball full of HTML.
     tag=$(fetch "https://api.github.com/repos/$REPO/releases/latest" \
         | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -n 1)
-    [ -n "$tag" ] || die "could not determine the latest release (rate limited? set GITHOOKS_VERSION=vX.Y.Z)"
+    [ -n "$tag" ] || die "could not determine the latest release (rate limited? set AMONT_VERSION=vX.Y.Z)"
     echo "${tag#v}"
 }
 
 main() {
-    printf '\n  githooks installer\n\n'
+    printf '\n  amont installer\n\n'
 
     t=$(target)
     v=$(resolve_version)
-    name="githooks-${v}-${t}"
+    name="amont-${v}-${t}"
     base="https://github.com/$REPO/releases/download/v${v}"
 
     say "version:  $v"
@@ -143,11 +143,11 @@ main() {
 
     tar xzf "$tmp/${name}.tar.gz" -C "$tmp"
     mkdir -p "$BIN_DIR"
-    for b in githooks githooks-fleet; do
+    for b in amont amont-fleet; do
         if [ -f "$tmp/$name/$b" ]; then
             # Write to a temporary name and rename over the destination:
             # replacing a RUNNING binary in place fails on some platforms, and
-            # rename is atomic, so a half-copied githooks never exists.
+            # rename is atomic, so a half-copied amont never exists.
             cp "$tmp/$name/$b" "$BIN_DIR/.$b.new"
             chmod 755 "$BIN_DIR/.$b.new"
             mv "$BIN_DIR/.$b.new" "$BIN_DIR/$b"
@@ -162,10 +162,10 @@ main() {
     esac
 
     printf '  Nothing is enabled yet, on purpose. To turn the hooks on:\n\n'
-    printf '    cd <your-repo> && githooks install     # this repository only\n'
-    printf '    githooks list                          # what would run here\n'
-    printf '    githooks uninstall                     # and back out again\n\n'
-    printf '  Across many repositories at once:  githooks-fleet install --root ~/Developer\n\n'
+    printf '    cd <your-repo> && amont install     # this repository only\n'
+    printf '    amont list                          # what would run here\n'
+    printf '    amont uninstall                     # and back out again\n\n'
+    printf '  Across many repositories at once:  amont-fleet install --root ~/Developer\n\n'
 }
 
 main "$@"

@@ -8,7 +8,7 @@ document is longer than a contact address.
 ## Reporting a vulnerability
 
 **Use GitHub's private vulnerability reporting:**
-<https://github.com/fredericrous/githooks/security/advisories/new>
+<https://github.com/fredericrous/amont/security/advisories/new>
 
 That opens a private advisory visible only to the maintainer. Please do not
 open a public issue, a discussion, or a pull request that demonstrates the
@@ -21,7 +21,7 @@ Useful in a report, in rough order of usefulness:
 - a **reproduction**: the smallest repository, config or sequence of commands
   that shows it. Every finding in the v1.0.0 review landed with one, and it is
   what makes a fix verifiable rather than plausible;
-- the version (`githooks --help` names the binary; `git log -1` if you built
+- the version (`amont --help` names the binary; `git log -1` if you built
   from source), OS, and git version.
 
 Expect an acknowledgement within a week. If you have not heard anything in two
@@ -41,11 +41,11 @@ version.
 Two guarantees this project actually makes. Everything else in it is a
 convenience.
 
-### 1. A repository you clone cannot run code without `githooks trust`
+### 1. A repository you clone cannot run code without `amont trust`
 
 Cloning a repository, opening it, and committing to it are not acts anybody
 performs *as a decision about trust*. So a repository's own declared checks —
-`.githooks.conf`, which is committed, because that is how a team shares a check
+`.amont.conf`, which is committed, because that is how a team shares a check
 — are **inert until explicitly trusted**.
 
 The consent is bound to the file's **content**, fingerprinted with
@@ -64,7 +64,7 @@ a declaration from the person consenting to it.
 Full reasoning: [docs/trust.md](docs/trust.md).
 
 **In scope:** anything that runs a repository-controlled command, or influences
-what the trust prompt displays, without a matching `githooks trust`. Anything
+what the trust prompt displays, without a matching `amont trust`. Anything
 that lets a repository's contents (file names, config values, manifest fields,
 branch names, commit messages) escape into a shell, a path, or a terminal
 control sequence.
@@ -92,7 +92,7 @@ file, or writes outside the worktree.
   path.
 - **Shim resolution** picking up a binary from an attacker-controlled location
   — a relative path, a writable directory, an inherited environment variable.
-- **`githooks uninstall` or `githooks-fleet` deleting a file it did not write.**
+- **`amont uninstall` or `amont-fleet` deleting a file it did not write.**
   The promise is that only our own shims are removed; a way to make either
   remove somebody else's hook, or a tracked file, is a vulnerability.
 - Anything in the commit path that gains an **external crate dependency**
@@ -103,9 +103,9 @@ file, or writes outside the worktree.
 
 Not because they do not matter, but so a report is not wasted:
 
-- **Trust is a review gate, not a sandbox.** Once you run `githooks trust`, the
+- **Trust is a review gate, not a sandbox.** Once you run `amont trust`, the
   declared commands run with your privileges. That is the intended behaviour.
-- **Checks you configured.** If `.githooks.conf` in your own repository runs
+- **Checks you configured.** If `.amont.conf` in your own repository runs
   something dangerous, that is your manifest.
 - **The tools the checks invoke.** A vulnerability in `ruff`, `prettier`,
   `eslint` or `kubeconform` belongs upstream. How this project *invokes* them
@@ -142,14 +142,14 @@ the question read as "no external dependencies".
 
 ```sh
 # what the installer checks for you
-curl -fsSLO https://github.com/fredericrous/githooks/releases/latest/download/SHA256SUMS
-sha256sum githooks-<version>-<target>.tar.gz
+curl -fsSLO https://github.com/fredericrous/amont/releases/latest/download/SHA256SUMS
+sha256sum amont-<version>-<target>.tar.gz
 
 # what you trusted in a given repository
-git hash-object --no-filters .githooks.conf
-git config --local --get githooks.trusted
+git hash-object --no-filters .amont.conf
+git config --local --get amont.trusted
 
 # what is actually installed here
-githooks list
-githooks trust --show
+amont list
+amont trust --show
 ```

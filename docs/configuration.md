@@ -1,6 +1,6 @@
 # Configuration
 
-Everything is `git config`. There is no config file of ours, no `.githooksrc`,
+Everything is `git config`. There is no config file of ours, no `.amontrc`,
 nothing to keep in sync — the settings live where a git user already looks for
 settings, and `--local`/`--global` mean what they always mean.
 
@@ -47,15 +47,15 @@ For one commit only, without touching config:
 git -c hook.skip=clippy commit -m "fix: …"
 ```
 
-## `githooks.severity.<key>` — run it, but do not block
+## `amont.severity.<key>` — run it, but do not block
 
 Takes the same three spellings, and keeps the signal: the check still runs and
 still reports, it just stops failing the commit.
 
 ```sh
-git config githooks.severity.clippy warn       # runs, reports, does not block
-git config githooks.severity.pre-commit warn   # the whole trigger
-git config githooks.severity.clippy block      # back to blocking
+git config amont.severity.clippy warn       # runs, reports, does not block
+git config amont.severity.pre-commit warn   # the whole trigger
+git config amont.severity.clippy block      # back to blocking
 ```
 
 `warn` is usually the right first move when adopting a check into an existing
@@ -63,26 +63,26 @@ repository: you get the report immediately and pay down the backlog on your own
 schedule, rather than choosing between a blocked commit and a `hook.skip` you
 will forget to remove.
 
-## `githooks.commit.*` — what a commit message must look like
+## `amont.commit.*` — what a commit message must look like
 
-Four keys, and `githooks setup` walks you through all of them:
+Four keys, and `amont setup` walks you through all of them:
 
 | key | default | means |
 |---|---|---|
-| `githooks.commit.gitmoji` | `none` | where the type's emoji goes |
-| `githooks.commit.subjectMax` | `72` | longest the whole subject may be |
-| `githooks.commit.descriptionMax` | `50` | longest the part after `type: ` may be |
-| `githooks.commit.bodyWrap` | `72` | column the body is hard-wrapped at; `0` never wraps |
+| `amont.commit.gitmoji` | `none` | where the type's emoji goes |
+| `amont.commit.subjectMax` | `72` | longest the whole subject may be |
+| `amont.commit.descriptionMax` | `50` | longest the part after `type: ` may be |
+| `amont.commit.bodyWrap` | `72` | column the body is hard-wrapped at; `0` never wraps |
 
 These matter more than they look, because `commit-msg` is the one hook
-`hook.skip` and `githooks.severity` do **not** reach, and git exempts it from
+`hook.skip` and `amont.severity` do **not** reach, and git exempts it from
 `--no-verify`. Without these keys the only answers to "I do not want a gitmoji
 in every subject" were to comply or to uninstall.
 
 ### The four placements
 
 ```sh
-git config githooks.commit.gitmoji prefix
+git config amont.commit.gitmoji prefix
 ```
 
 | | stored as | |
@@ -104,8 +104,8 @@ its own output — an amend, a rebase reword — changes nothing.
 ### The limits
 
 ```sh
-git config githooks.commit.descriptionMax 68
-git config githooks.commit.bodyWrap 0
+git config amont.commit.descriptionMax 68
+git config amont.commit.bodyWrap 0
 ```
 
 `68` is the useful number if 50 feels tight: it still fits a 72-column subject
@@ -117,24 +117,24 @@ A value git cannot parse, or one outside `1..=1000`, takes the shipped default
 **and says so on the commit it happened on** — because a limit you believe you
 raised and did not is the whole failure mode this project refuses to be quiet
 about. A pairing that cannot do anything (a description budget the subject
-limit can never accommodate) is reported by `githooks list`, not by the hook:
+limit can never accommodate) is reported by `amont list`, not by the hook:
 the commit path says what is in effect, and the config-reading commands say
 what makes no sense.
 
-## `githooks.fix` — let a check repair what it finds
+## `amont.fix` — let a check repair what it finds
 
 ```sh
-git config githooks.fix true
+git config amont.fix true
 ```
 
 Off unless you ask. A hook that edits your files without being asked is a
 larger surprise than one that complains. See
 [custom checks](custom-checks.md#letting-a-check-fix-what-it-finds).
 
-## `githooks.testPushedTree` — test what you are pushing
+## `amont.testPushedTree` — test what you are pushing
 
 ```sh
-git config githooks.testPushedTree true
+git config amont.testPushedTree true
 ```
 
 By default `pre-push` runs your suite against the **working tree**, and says
@@ -146,9 +146,9 @@ pushed, and your tree is not touched. It costs a second checkout and a build
 that cannot reuse your `target/` cache, which is why it is opt-in rather than
 the default.
 
-## `githooks.trusted`
+## `amont.trusted`
 
-Set by `githooks trust`, read by everything that decides whether a declared
+Set by `amont trust`, read by everything that decides whether a declared
 external may run. `--local` only, never committed. Do not set it by hand — see
 [the trust model](trust.md).
 
@@ -166,14 +166,14 @@ git config --global commit.template ~/.config/git/git-templates/message
 | variable | effect |
 |---|---|
 | `GIT_HOOKS_BIN` | Absolute path to the binary a shim should use. First candidate in the shim's resolution order. |
-| `GITHOOKS_BIN_DIR` | Where `githooks install` and the installer script put binaries. Default `~/.local/bin`. |
-| `GITHOOKS_VERSION` | Pins the version the installer script fetches. |
+| `AMONT_BIN_DIR` | Where `amont install` and the installer script put binaries. Default `~/.local/bin`. |
+| `AMONT_VERSION` | Pins the version the installer script fetches. |
 | `NO_COLOR` | Honoured, as is a non-tty stdout. |
 
 ## Repository-declared checks
 
 A repository can add checks of its own without anybody forking anything, in a
-committed `.githooks.conf`. They obey every control on this page, addressed the
+committed `.amont.conf`. They obey every control on this page, addressed the
 same three ways, and they are inert until trusted.
 
 Full reference: [custom checks](custom-checks.md) ·
@@ -182,26 +182,26 @@ Full reference: [custom checks](custom-checks.md) ·
 ## Seeing the result
 
 ```sh
-githooks list              # what would run here, and why not
-githooks list --json       # the same, machine-readable
-githooks setup             # walk the commit-style keys, with the current values
-githooks-fleet             # the same, across every repository
+amont list              # what would run here, and why not
+amont list --json       # the same, machine-readable
+amont setup             # walk the commit-style keys, with the current values
+amont-fleet             # the same, across every repository
 ```
 
-`githooks list` ends with the commit style in effect, and names the key and the
+`amont list` ends with the commit style in effect, and names the key and the
 scope of anything you set:
 
 ```
 commit style
-  gitmoji            suffix     githooks.commit.gitmoji (global)
+  gitmoji            suffix     amont.commit.gitmoji (global)
   subject max        72
-  description max    68         githooks.commit.descriptionMax (global)
-  body wrap          off        githooks.commit.bodyWrap (local)
+  description max    68         amont.commit.descriptionMax (global)
+  body wrap          off        amont.commit.bodyWrap (local)
 
-  `githooks setup` to change any of these
+  `amont setup` to change any of these
 ```
 
-`githooks list` reports the **effective** severity, after overrides — so a
+`amont list` reports the **effective** severity, after overrides — so a
 check you downgraded three months ago is visible as downgraded rather than
-having to be inferred from config. Across a fleet, `githooks-fleet` shows
+having to be inferred from config. Across a fleet, `amont-fleet` shows
 skips and severities per repository, with `TRIGGER` as its own column.

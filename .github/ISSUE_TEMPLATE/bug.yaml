@@ -5,12 +5,12 @@ body:
   - type: markdown
     attributes:
       value: |
-        **If this is a security issue — a repository running code without `githooks trust`, or anything that destroyed uncommitted work — stop and use
-        [private vulnerability reporting](https://github.com/fredericrous/githooks/security/advisories/new) instead.**
-        See [SECURITY.md](https://github.com/fredericrous/githooks/blob/main/SECURITY.md).
+        **If this is a security issue — a repository running code without `amont trust`, or anything that destroyed uncommitted work — stop and use
+        [private vulnerability reporting](https://github.com/fredericrous/amont/security/advisories/new) instead.**
+        See [SECURITY.md](https://github.com/fredericrous/amont/blob/main/SECURITY.md).
 
         In the meantime, the escape hatches: `git commit --no-verify` bypasses a stage for one run,
-        `git -c hook.skip=<check> commit` skips one check, and `githooks uninstall` removes the hooks
+        `git -c hook.skip=<check> commit` skips one check, and `amont uninstall` removes the hooks
         from this repository without touching anything you wrote.
 
   - type: textarea
@@ -20,7 +20,7 @@ body:
       description: What the hooks did, and what you expected instead.
       placeholder: |
         `pre-commit-ruff` blocked a commit that touches no Python files.
-        I expected it to be inert here — `githooks list` says it needs `.py` + a ruff config.
+        I expected it to be inert here — `amont list` says it needs `.py` + a ruff config.
     validations:
       required: true
 
@@ -34,7 +34,7 @@ body:
       render: shell
       placeholder: |
         git init /tmp/repro && cd /tmp/repro
-        githooks install
+        amont install
         touch a.txt && git add a.txt
         git commit -m "feat: a file"
     validations:
@@ -52,7 +52,7 @@ body:
   - type: textarea
     id: list
     attributes:
-      label: "`githooks list` in the affected repository"
+      label: "`amont list` in the affected repository"
       description: This says what should run there and why the rest does not, which is usually where the answer is.
       render: text
     validations:
@@ -61,7 +61,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: githooks version
+      label: amont version
       description: The release tag you installed, or `git log -1` if you built from source.
       placeholder: v1.0.0
     validations:
@@ -82,8 +82,8 @@ body:
       label: Relevant configuration
       description: |
         Optional, but often decisive:
-        `git config --get-all hook.skip`, `git config --get-regexp '^githooks\.'`,
-        `git config --global init.templateDir`, and whether the repository has a `.githooks.conf`.
+        `git config --get-all hook.skip`, `git config --get-regexp '^amont\.'`,
+        `git config --global init.templateDir`, and whether the repository has a `.amont.conf`.
       render: shell
     validations:
       required: false

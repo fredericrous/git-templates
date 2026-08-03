@@ -2,12 +2,12 @@
 
 One commit, start to finish, with every place a hook steps in.
 
-![githooks catching a commit and letting the fixed one through](assets/githooks-demo.gif)
+![amont catching a commit and letting the fixed one through](assets/amont-demo.gif)
 
 ## You hit `git commit`
 
 If you set `commit.template`, the
-[footer scaffold](https://github.com/fredericrous/githooks/blob/main/message)
+[footer scaffold](https://github.com/fredericrous/amont/blob/main/message)
 opens in your editor to help you write something meaningful. Or you are in a
 hurry and write `git commit -m "Add to Cart"`, which is the interesting case,
 because that is the one that gets stopped.
@@ -20,7 +20,7 @@ the other fourteen still report.
 
 Most of them will say nothing, because most are inert in any given repository:
 a check fires only when the commit touches files it understands *and* the
-repository carries the configuration that opts into that tool. `githooks list`
+repository carries the configuration that opts into that tool. `amont list`
 tells you which ones are live where you are standing.
 
 Some checks **fix** rather than complain — `cargo fmt`, `prettier`, `ruff` —
@@ -43,7 +43,7 @@ This is the hook that rejects `Add to Cart`: no type prefix. `git commit -m
 
 `--no-verify` does not bypass `commit-msg` — that is git's behaviour, not ours
 — and neither `hook.skip` nor a severity override names it. So this is the one
-hook whose rules are adjustable in themselves: `githooks setup` sets the
+hook whose rules are adjustable in themselves: `amont setup` sets the
 subject and description limits, the body wrap, and where the type's gitmoji
 goes (nowhere, by default).
 
@@ -61,7 +61,7 @@ your commits actually touched.
 
 By default that suite runs against your **working tree**, and says so — which
 is fast, and is not what you are pushing. `git config
-githooks.testPushedTree true` runs it against a throwaway checkout of the
+amont.testPushedTree true` runs it against a throwaway checkout of the
 commits being pushed instead. See [the checks](checks.md).
 
 Where a check can only recommend rather than act, it recommends. `pull-rebase`
@@ -74,9 +74,9 @@ The hooks are not the only way to run the checks, and during adoption they are
 the wrong way:
 
 ```sh
-githooks run                 # would my commit pass? (the staged set)
-githooks run --all-files     # does my working tree pass? (git ls-files)
-githooks run pre-commit-prettier
+amont run                 # would my commit pass? (the staged set)
+amont run --all-files     # does my working tree pass? (git ls-files)
+amont run pre-commit-prettier
 ```
 
 Those two questions differ on purpose. `--all-files` on a dirty tree reports on
