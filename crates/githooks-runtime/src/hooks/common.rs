@@ -23,10 +23,39 @@ use std::sync::OnceLock;
 /// Same shape as `PushRefs`: read once, lent to every check that asks.
 static OVERRIDE: OnceLock<Vec<String>> = OnceLock::new();
 
+/// Set once the file set stops being the index.
+///
+/// `restage`'s own doc says what makes re-staging safe: the pre-commit stage
+/// holds the unstaged changes aside, so the tree contains the staged content
+/// and nothing else, and anything a formatter touched is by definition part of
+/// this commit. `githooks run --all-files` replaces the file set with every
+/// tracked path — which is that precondition being FALSE.
+///
+/// With `githooks.fix true`, every fixer's `restage(&files)` would then `git
+/// add` everything in the working tree that differs from the index, turning a
+/// read-only "does my tree pass" query into `git add .`. That is the hazard §2
+/// of docs/index-fidelity-and-run-modes.md names.
+///
+/// The gate hangs off the OVERRIDE rather than off a flag threaded through
+/// twenty check signatures, because the override IS the fact that matters. It
+/// therefore covers built-ins and `manifest::External::run` (which consults
+/// `fixing_enabled` in two places) in one change, and a future check cannot
+/// forget it.
+static NOT_THE_INDEX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Make every subsequent `staged_files` answer from `files` instead of the
 /// index. Only the first call counts.
 pub fn override_file_set(files: Vec<String>) {
+    // Set unconditionally, even if a set already won the `OnceLock`: the
+    // statement "the file set is not the index" is true from the first call
+    // onwards regardless of which one supplied the paths.
+    NOT_THE_INDEX.store(true, std::sync::atomic::Ordering::SeqCst);
     let _ = OVERRIDE.set(files);
+}
+
+/// Whether the file set every check sees is something other than the index.
+pub fn not_the_index() -> bool {
+    NOT_THE_INDEX.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// An empty `exts` returns them all.
@@ -272,6 +301,16 @@ pub fn run_quiet(root: &str, argv: &[String], extra: &[String]) -> bool {
 /// the repair lands in the commit you are making, which is a bigger claim to
 /// make on somebody's behalf than printing an error.
 pub fn fixing_enabled() -> bool {
+    // Never while the file set is not the index — see `NOT_THE_INDEX`.
+    !not_the_index() && fixing_requested()
+}
+
+/// What the CONFIG says, ignoring whether the current run may act on it.
+///
+/// Split out so `run_all` can tell the difference between "fixing is off" and
+/// "you asked for fixing and this mode will not do it", and say the second out
+/// loud instead of silently ignoring the key.
+pub fn fixing_requested() -> bool {
     matches!(
         git::stdout(&["config", "--get", "githooks.fix"]).as_deref(),
         Some("true") | Some("1") | Some("yes")
@@ -318,6 +357,11 @@ static INDEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// touched is by definition part of this commit. Without that, re-staging would
 /// sweep in work the author deliberately kept back.
 pub fn restage(paths: &[String]) -> Restaged {
+    // Belt and braces alongside `fixing_enabled`: a future fixer that forgets
+    // the gate still cannot turn `githooks run --all-files` into `git add .`.
+    if not_the_index() {
+        return Restaged::Nothing;
+    }
     let changed: Vec<String> = paths
         .iter()
         .filter(|p| !git::succeeds(&["diff", "--quiet", "--", p]))

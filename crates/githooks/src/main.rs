@@ -321,23 +321,12 @@ fn run_mode(args: &[OsString]) -> i32 {
         hooks_dir: &hooks_dir,
         push: &push,
     };
-    if all_files {
-        let files = std::process::Command::new("git")
-            .args(["ls-files"])
-            .output()
-            .ok()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        githooks_runtime::hooks::common::override_file_set(files);
-    }
     let verdict = match named {
-        Some(check) => match registry::lookup(&check) {
-            Some(run_check) => run_check(&ctx),
+        // `run_named` lives in the runtime so `registry::lookup` — and the
+        // decision about whether a named check takes the index-fidelity hold —
+        // stay in one place rather than being re-derived here.
+        Some(check) => match githooks_runtime::dispatch::run_named(&ctx, &check, all_files) {
+            Some(v) => v,
             None => {
                 eprintln!("githooks: unknown check {check:?} — try `githooks list`");
                 return 2;

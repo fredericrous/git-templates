@@ -371,18 +371,16 @@ pub fn print_json(stage_filter: Option<check::Stage>, pushed: bool, listings: &[
 
 /// `git ls-files` — every check's default scope evaluation, unchanged from
 /// what `list_checks` always did.
+///
+/// Through `git::stdout_paths`, i.e. with `-z`. A raw `ls-files` QUOTES any
+/// path holding an unusual byte: `é.json` comes back as the nine-byte literal
+/// `"\303\251.json"`, which ends with a quote rather than an extension, so
+/// `Scope::matches` reports a check as irrelevant to a repository it plainly
+/// covers. Cosmetic here (this only decides what `list` prints) and not
+/// cosmetic in `dispatch::enter_all_files_mode`, which is the same bug — so
+/// both ask the same way.
 fn tracked_paths() -> Vec<String> {
-    Command::new("git")
-        .args(["ls-files"])
-        .output()
-        .ok()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
+    git::stdout_paths(&["ls-files"]).unwrap_or_default()
 }
 
 /// The pushed-range file list, computed standalone rather than from a real
