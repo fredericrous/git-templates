@@ -476,13 +476,58 @@ mod tests {
         let filtered_b = raw_hash(&d, &manifest);
         let ours_b = fingerprint(&d, &manifest).expect("fingerprint b");
 
-        assert_eq!(
-            filtered_a, filtered_b,
-            "fixture: the clean filter should have collapsed both manifests"
-        );
+        // The collision has to EXIST before its absence means anything. A
+        // clean filter is an external program run through git's own shell, and
+        // whether `echo` resolves that way is the platform's business, not
+        // ours — Git for Windows does not collapse these. Say so and stop,
+        // rather than report a fixture that would not build as a defect in the
+        // code under test. `an_eol_conversion_cannot_...` below covers the same
+        // property with no external program involved and runs everywhere.
+        if filtered_a != filtered_b {
+            println!(
+                "! clean filters do not apply here — collision not reproducible, \
+                 see an_eol_conversion_cannot_make_two_manifests_share_a_fingerprint"
+            );
+            return;
+        }
         assert_ne!(
             ours_a, ours_b,
             "the fingerprint followed a repo-controlled filter"
+        );
+    }
+
+    /// The same property, with git's own eol conversion instead of an external
+    /// filter — so it holds on every platform.
+    ///
+    /// `.gitattributes` is COMMITTED, so the repository chooses the conversion.
+    /// Under `text eol=lf`, git's clean step normalises CRLF to LF, and two
+    /// files differing only in line endings hash identically. That is a weaker
+    /// lever than a clean filter (the parser reads both the same way), but it
+    /// is the same mistake: the id names content-after-a-repo-controlled
+    /// transform rather than the bytes we read.
+    #[test]
+    fn an_eol_conversion_cannot_make_two_manifests_share_a_fingerprint() {
+        let d = repo("eol");
+        std::fs::write(d.join(".gitattributes"), ".githooks.conf text eol=lf\n")
+            .expect("write attributes");
+        let manifest = d.join(crate::manifest::MANIFEST);
+
+        // Byte-different, line-ending-identical-after-normalisation.
+        std::fs::write(&manifest, b"pre-commit  a  *  block  echo one\r\n").expect("crlf");
+        let filtered_crlf = raw_hash(&d, &manifest);
+        let ours_crlf = fingerprint(&d, &manifest).expect("fingerprint crlf");
+
+        std::fs::write(&manifest, b"pre-commit  a  *  block  echo one\n").expect("lf");
+        let filtered_lf = raw_hash(&d, &manifest);
+        let ours_lf = fingerprint(&d, &manifest).expect("fingerprint lf");
+
+        if filtered_crlf != filtered_lf {
+            println!("! eol conversion does not apply here — collision not reproducible");
+            return;
+        }
+        assert_ne!(
+            ours_crlf, ours_lf,
+            "the fingerprint followed a repo-controlled eol conversion"
         );
     }
 
