@@ -32,7 +32,9 @@ githooks list --json --stage pre-push --pushed  # exactly what pushing next gate
 ```\n\
 \n\
 Each check reports its *effective* severity (`block`/`warn`, including any\n\
-`githooks.severity.*` override) and whether it fires here.\n\
+`githooks.severity.*` override) and whether it fires here. The same output\n\
+carries `commit_style`: the subject and description limits `commit-msg`\n\
+enforces, and where the type's gitmoji is placed.\n\
 \n\
 Never bypass with `--no-verify`. To change enforcement, downgrade it\n\
 intentionally instead:\n\
@@ -40,6 +42,10 @@ intentionally instead:\n\
 ```sh\n\
 git config githooks.severity.<check-id> warn\n\
 ```\n\
+\n\
+`commit-msg` takes neither `hook.skip` nor a severity override, and git\n\
+exempts it from `--no-verify`. Write the message it asks for, or change what\n\
+it asks for — `githooks setup`, or `githooks.commit.*` directly.\n\
 {END}\n"
     )
 }

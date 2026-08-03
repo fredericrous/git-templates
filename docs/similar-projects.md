@@ -16,7 +16,7 @@ what you give up.
 | A cloned repo's committed config runs code… | **only after you review it and `githooks trust`** | after `pre-commit install`, unreviewed | after `lefthook install` — often automatic via a package `postinstall` | after `npm install` — the `prepare` script activates it |
 | Your unstaged work during a run | held aside without `git stash`, restored even if a check panics | `git stash` around the run | untouched — checks see the worktree, not the staged set | your problem — hooks are your scripts |
 | Uninstall | removes exactly the four files it wrote, names everything else | `pre-commit uninstall` | `lefthook uninstall` | delete `.husky/`, unset `core.hooksPath` |
-| Commit-message conventions | built in — validated, gitmoji'd, wrapped | via a separate hook | via commitlint etc. | via commitlint etc. |
+| Commit-message conventions | built in — validated, wrapped, limits and gitmoji configurable | via a separate hook | via commitlint etc. | via commitlint etc. |
 | One view across all your repos | **`githooks-fleet`** — bulk install, report, dashboard | per repo | per repo | per repo |
 | Machine-readable state for coding agents | **`githooks list --json`, `githooks agents-md`** | no | no | no |
 
@@ -71,9 +71,11 @@ advertisement:
 - **husky is nearly nothing**, which is a real virtue: two lines of shell in a
   committed file and you are done. An all-Node team that reviews everything may
   never fall into the gaps husky leaves open.
-- **The built-ins carry opinions** — conventional commits, gitmoji, branch
-  naming. Every one can be [downgraded or skipped](opting-out.md) with exact,
-  announced config, but a blank slate is the one thing this tool is not.
+- **The built-ins carry opinions** — conventional commits, branch naming, a
+  set of commit types. Every check can be [downgraded or
+  skipped](opting-out.md) with exact, announced config, and the commit-message
+  rules are themselves [tunable](commit-convention.md#if-the-defaults-do-not-fit)
+  — but a blank slate is the one thing this tool is not.
 
 ## Credit where due
 

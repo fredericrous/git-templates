@@ -40,11 +40,13 @@ Validates the summary line and reformats the message. Cannot be bypassed with
 [conventional type prefix](commit-convention.md); a description follows the
 prefix; the description is at most 50 characters.
 
-**Formats:** prepends the type's gitmoji, hard-wraps the body at 72 columns,
-and groups the trailing footers with one blank line before them.
+**Formats:** hard-wraps the body at 72 columns, groups the trailing footers
+with one blank line before them, and places the type's gitmoji wherever you
+asked for it — nowhere, by default.
 
-Write the bare subject with no emoji of your own — the gitmoji is prepended for
-you, and a manually added one eats into the 50-character budget.
+Every number above and the gitmoji placement are `githooks.commit.*` settings;
+`githooks setup` walks them. See
+[if the defaults do not fit](commit-convention.md#if-the-defaults-do-not-fit).
 
 ## `prepare-commit-msg`
 

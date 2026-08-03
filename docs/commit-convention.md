@@ -25,9 +25,50 @@ Enforced by `commit-msg`, which **cannot** be bypassed with `--no-verify`:
 An optional scope is a noun in parentheses naming a section of the codebase:
 `fix(parser): …`. A `!` before the colon marks a breaking change.
 
-**Write the bare subject with no emoji.** `prepare-commit-msg`/`commit-msg`
-prepend the type's gitmoji for you; one you add by hand eats into the
-50-character description budget and can push you over.
+Both numbers are defaults, not laws — see
+[if the defaults do not fit](#if-the-defaults-do-not-fit) below.
+
+## If the defaults do not fit
+
+`commit-msg` is the one hook `hook.skip` and `githooks.severity` do not reach,
+and git exempts it from `--no-verify`. So it is the one hook whose opinions
+have to be adjustable in themselves, and they are — four `git config` keys,
+walked by `githooks setup` and listed in
+[configuration](configuration.md#githookscommit--what-a-commit-message-must-look-like):
+
+```sh
+githooks setup                                   # ask me the four questions
+git config githooks.commit.descriptionMax 68     # or set one directly
+```
+
+**68 is the number worth knowing** if 50 feels tight. It is the longest
+description that still fits a 72-column subject after a short type and a colon,
+so it buys you eighteen characters without breaking the line-length convention
+that the 72 comes from.
+
+By default **nothing decorates your subject**: you write `feat: add a cart` and
+that is what is stored. If you want the type's gitmoji, choose where it goes:
+
+```sh
+git config githooks.commit.gitmoji suffix
+```
+
+| | stored as |
+|---|---|
+| `none` | `feat: add a cart` |
+| `prefix` | `✨  feat: add a cart` |
+| `suffix` | `feat: add a cart ✨` |
+| `replace` | `✨  add a cart` |
+
+Prefer `suffix` over `replace` unless you have decided otherwise on purpose:
+it keeps a clean conventional subject at the start of the line, where
+commitlint, changelog generators and `git log --grep '^feat'` look for it.
+`replace` puts the emoji where the type word was, which is a real trade — an
+emoji is not something conventional-commit tooling knows how to parse.
+
+**Write the bare subject with no emoji of your own.** The limits measure what
+you wrote, so a gitmoji this hook adds never counts against your budget — but
+one you type yourself is yours, and does.
 
 ## The types
 
@@ -54,9 +95,14 @@ authority — what you read here is what the hook enforces and prepends.
 `commit-msg` also reformats what you wrote, rather than rejecting it for
 whitespace:
 
-- hard-wraps the body at 72 columns;
+- hard-wraps the body at 72 columns (`githooks.commit.bodyWrap`, or `0` to
+  leave a pasted stack trace or a fenced code block exactly as it is);
 - ensures one blank line after the subject;
 - groups the trailing footers, with one blank line before them.
+
+Reformatting is idempotent: an amend, a rebase reword and a `--no-verify`
+retry all hand the hook a message it wrote itself, and it gives the same one
+back.
 
 `prepare-commit-msg` appends an issue id found in the branch name — JIRA first
 (`ABC-1234`), else a bare Kanbanize id (`1234`) — but only for a commit you are

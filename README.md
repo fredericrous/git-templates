@@ -201,6 +201,31 @@ A skipped check is announced on every commit, so a config line nobody remembers
 writing cannot go on silently disabling things. More in
 [opting out](docs/opting-out.md) and [configuration](docs/configuration.md).
 
+## Making the commit convention yours
+
+`commit-msg` is the one hook `hook.skip` and `--no-verify` cannot reach, so its
+opinions are adjustable in themselves:
+
+```sh
+githooks setup     # four questions, current values as the defaults
+```
+
+It asks where the type's gitmoji goes — `none` (the default: your subject,
+untouched), `prefix`, `suffix` or `replace` — and for the subject limit, the
+description budget and the body wrap column. Then it prints the exact
+`git config` lines it wrote, so you can paste them into your dotfiles or hand
+them to a teammate.
+
+```sh
+git config githooks.commit.gitmoji suffix        # feat: add a cart ✨
+git config githooks.commit.descriptionMax 68     # still fits a 72-col subject
+git config githooks.commit.bodyWrap 0            # leave my stack traces alone
+```
+
+The limits measure what you wrote, so a gitmoji never eats your budget, and
+re-running over an amended message changes nothing. Full reference:
+[commit conventions](docs/commit-convention.md#if-the-defaults-do-not-fit).
+
 ## Custom checks
 
 A repository can declare checks of its own in a committed `.githooks.conf`:

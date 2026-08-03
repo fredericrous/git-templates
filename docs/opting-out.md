@@ -3,6 +3,21 @@
 Four different things get called "turning it off". They are listed here
 smallest first, because the right answer is usually the smallest one.
 
+## 0. Tune it instead of turning it off
+
+If what you want gone is a *rule* rather than a *check* — the gitmoji in every
+subject, the 50-character description budget, the body wrapping — none of the
+four answers below is the right one. Those are settings:
+
+```sh
+githooks setup      # walks you through them, with the current values
+```
+
+This matters most for `commit-msg`, which is the one hook `--no-verify` and
+`hook.skip` genuinely cannot reach (see below). Changing what it asks for is
+the only lever there is, and it is a real one. See
+[commit conventions](commit-convention.md#if-the-defaults-do-not-fit).
+
 ## 1. One command: `--no-verify`
 
 ```sh
@@ -13,7 +28,11 @@ git push --no-verify
 Skips the whole `pre-commit` or `pre-push` stage for that one invocation.
 
 `commit-msg` and `prepare-commit-msg` are **not** bypassable this way — that is
-git's behaviour, not ours. To get a message past `commit-msg`, fix the message.
+git's behaviour, not ours. Nor do they take `hook.skip` or a severity override:
+they are entrypoints rather than checks, so the keys below do not name them.
+
+To get a message past `commit-msg`, fix the message — or change what it asks
+for, which is what §0 is about.
 
 ## 2. One run, one check: `-c`
 
