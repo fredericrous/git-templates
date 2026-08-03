@@ -181,10 +181,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            dist/*
+          # Idempotent, because re-running a release is a normal thing to want.
+          # `gh release create` fails outright on "a release with the same tag
+          # name already exists", which took down the whole run — and with it
+          # `publish-crates`, which needs this job. That is precisely backwards:
+          # the reason to re-run is usually that a LATER step failed.
+          if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists — refreshing its assets"
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              dist/*
+          fi
       - name: Dry run summary
         if: needs.guard.outputs.dry_run == 'true'
         run: |

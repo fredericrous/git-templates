@@ -298,6 +298,47 @@ jobs:
       # which does install them and now fails if any of them is missing.
       - run: cargo test -- --show-output
 
+      # The Windows installer, run for real on Windows.
+      #
+      # `install.sh` is POSIX sh and reaches this platform only through Git
+      # Bash, so `install.ps1` is the documented path here — and a documented
+      # install path nobody executes is how you find out it was broken from a
+      # user's bug report. It installs the LATEST PUBLISHED release rather than
+      # this build: the script is what is under test, the binary is a fixture,
+      # and pinning it to the PR would test a tarball no user will ever fetch.
+      #
+      # Skipped until a release exists, since there is nothing to install from.
+      - name: install.ps1 installs a real release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $latest = $null
+          try {
+            $latest = Invoke-RestMethod `
+              -Uri 'https://api.github.com/repos/${{ github.repository }}/releases/latest' `
+              -Headers @{ 'User-Agent' = 'ci' }
+          } catch {
+            Write-Host '::notice::no published release yet - skipping the installer test'
+            exit 0
+          }
+
+          $bin = Join-Path $env:RUNNER_TEMP 'githooks-bin'
+          & "$PWD\install\install.ps1" -BinDir $bin -Version $latest.tag_name
+
+          $exe = Join-Path $bin 'githooks.exe'
+          if (-not (Test-Path $exe)) { throw "install.ps1 did not produce $exe" }
+
+          # It has to RUN, not merely exist — and answer as itself.
+          $help = & $exe --help 2>&1 | Out-String
+          if ($help -notmatch 'agents-md') { throw "the installed binary did not answer --help:`n$help" }
+
+          # And it must have enabled nothing: no hooks anywhere, no global
+          # init.templateDir. That restraint is the script's whole contract.
+          $tpl = & git config --global --get init.templateDir 2>$null
+          if ($LASTEXITCODE -eq 0 -and $tpl) { throw "install.ps1 set init.templateDir to $tpl" }
+
+          Write-Host 'install.ps1: installed, runs, and enabled nothing'
+
       - name: And a real commit runs end to end through the shims
         shell: bash
         run: |

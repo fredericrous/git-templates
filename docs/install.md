@@ -6,8 +6,17 @@ repository. Nothing about the first does the second.
 
 ## 1. Get the binary
 
+Linux and macOS:
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/fredericrous/githooks/main/install/install.sh | sh
+```
+
+Windows, in PowerShell — the line above is POSIX `sh`, so on Windows it runs
+only under Git Bash:
+
+```powershell
+irm https://raw.githubusercontent.com/fredericrous/githooks/main/install/install.ps1 | iex
 ```
 
 The installer resolves the latest release, downloads the archive for your
@@ -199,7 +208,20 @@ githooks-fleet fix --apply --root ~/Developer
 
 Everything works, with one setup difference: there is no symlink.
 
-Install with the binary itself — Git for Windows ships `bash` and coreutils but
+The one-liner for this platform is PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/fredericrous/githooks/main/install/install.ps1 | iex
+```
+
+It writes `githooks.exe` and `githooks-fleet.exe` into
+`%USERPROFILE%\.local\bin`, which is where the shims look — they try both
+`githooks` and `githooks.exe` there, so a binary in that directory resolves
+even in a shim whose path was never baked. CI runs this script on a real
+Windows runner against a real published release, because a documented install
+path nobody executes is one you find out about from a bug report.
+
+To build it yourself instead — Git for Windows ships `bash` and coreutils but
 not `make`:
 
 ```sh
