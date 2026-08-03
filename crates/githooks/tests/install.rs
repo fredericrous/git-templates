@@ -799,3 +799,109 @@ fn an_up_to_date_agents_md_is_not_re_offered() {
         "an already up-to-date block must not be offered again:\n{out}"
     );
 }
+
+/// Run the installer with a custom `$GITHOOKS_BIN_DIR`, the way somebody who
+/// keeps their tools outside `~/.local/bin` would.
+fn install_with_bin_dir(s: &Sandbox, cwd: &Path, bin_dir: &Path) -> (i32, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("install")
+        .current_dir(cwd)
+        .env("HOME", &s.0)
+        .env("USERPROFILE", &s.0)
+        .env("XDG_CONFIG_HOME", s.path(".config"))
+        .env("GITHOOKS_BIN_DIR", bin_dir)
+        .output()
+        .expect("run githooks install");
+    (
+        out.status.code().unwrap_or(-1),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+/// A template dir that is a checkout, with the binary somewhere else.
+///
+/// Both halves are supported and they stop composing together: the checkout's
+/// shims keep the placeholder on purpose and resolve at run time from
+/// `$HOME/.local/bin`, which the shim hardcodes — so a binary installed
+/// elsewhere is one the shims will never find.
+#[cfg(unix)]
+fn checkout_template_dir(s: &Sandbox) -> Option<std::path::PathBuf> {
+    let checkout = s.path("checkout");
+    init_repo(&checkout);
+    let hooks = checkout.join("templates/hooks");
+    std::fs::create_dir_all(&hooks).expect("mkdir");
+    std::fs::write(hooks.join("pre-commit"), "precious __GITHOOKS_BIN__\n").expect("write");
+    git(&checkout, &["add", "-A"]);
+    git(&checkout, &["commit", "-qm", "seed"]);
+
+    let cfg = s.path(".config/git");
+    std::fs::create_dir_all(&cfg).expect("mkdir");
+    std::os::unix::fs::symlink(&checkout, cfg.join("git-templates")).ok()?;
+    Some(checkout)
+}
+
+/// The combination is flagged where it is created, not at somebody's next
+/// commit in a repository they have not thought about since.
+#[cfg(unix)]
+#[test]
+fn a_binary_an_unbaked_shim_cannot_find_is_named() {
+    let s = Sandbox::new("binhint");
+    if checkout_template_dir(&s).is_none() {
+        println!("  ! symlinks unavailable — skipping");
+        return;
+    }
+    let repo = s.path("repo");
+    init_repo(&repo);
+    let elsewhere = s.path("opt/tools");
+    std::fs::create_dir_all(&elsewhere).expect("mkdir");
+
+    let (code, out) = install_with_bin_dir(&s, &repo, &elsewhere);
+
+    assert_eq!(code, 0, "the install itself should still succeed:\n{out}");
+    assert!(
+        out.contains("unbaked shim will not find"),
+        "the unreachable binary was not flagged:\n{out}"
+    );
+    // Both halves of the fix, and both ways out.
+    assert!(
+        out.contains("opt/tools"),
+        "did not name where it went:\n{out}"
+    );
+    assert!(
+        out.contains(".local/bin"),
+        "did not name where shims look:\n{out}"
+    );
+    assert!(out.contains("ln -s"), "offered no link:\n{out}");
+    assert!(
+        out.contains("GIT_HOOKS_BIN"),
+        "did not name the runtime override:\n{out}"
+    );
+}
+
+/// …and it must stay quiet for everybody else, or it is just noise on every
+/// install. The default bin dir IS the directory the shims look in.
+#[cfg(unix)]
+#[test]
+fn the_default_bin_dir_is_not_flagged() {
+    let s = Sandbox::new("binhint-default");
+    if checkout_template_dir(&s).is_none() {
+        println!("  ! symlinks unavailable — skipping");
+        return;
+    }
+    let repo = s.path("repo");
+    init_repo(&repo);
+
+    // No GITHOOKS_BIN_DIR: the binary lands in $HOME/.local/bin, where an
+    // unbaked shim looks. `HOME` is the sandbox, so this is self-contained.
+    let (code, out) = s.install(&repo);
+
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        !out.contains("unbaked shim will not find"),
+        "warned about the default layout, which is the whole fleet:\n{out}"
+    );
+}
