@@ -1,0 +1,12 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/fredericrous/githooks/security/advisories/new
+    about: >-
+      Report privately, never as an issue. Especially anything letting a cloned repository run
+      code without `githooks trust`, or anything that destroyed uncommitted work.
+  - name: Documentation
+    url: https://github.com/fredericrous/githooks/tree/main/docs
+    about: >-
+      Installing, the full list of checks, configuration, opting out, and the trust model.
+      `githooks list` answers "what runs in my repository" better than any of it.

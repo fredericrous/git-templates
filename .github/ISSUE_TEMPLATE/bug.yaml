@@ -1,0 +1,89 @@
+name: Bug report
+description: A hook did the wrong thing — blocked what it should not have, let through what it should not have, or misbehaved.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **If this is a security issue — a repository running code without `githooks trust`, or anything that destroyed uncommitted work — stop and use
+        [private vulnerability reporting](https://github.com/fredericrous/githooks/security/advisories/new) instead.**
+        See [SECURITY.md](https://github.com/fredericrous/githooks/blob/main/SECURITY.md).
+
+        In the meantime, the escape hatches: `git commit --no-verify` bypasses a stage for one run,
+        `git -c hook.skip=<check> commit` skips one check, and `githooks uninstall` removes the hooks
+        from this repository without touching anything you wrote.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What the hooks did, and what you expected instead.
+      placeholder: |
+        `pre-commit-ruff` blocked a commit that touches no Python files.
+        I expected it to be inert here — `githooks list` says it needs `.py` + a ruff config.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: |
+        The smallest sequence that shows it. A throwaway repository is ideal — this project fixes
+        things it can reproduce far faster than things it has to infer.
+      render: shell
+      placeholder: |
+        git init /tmp/repro && cd /tmp/repro
+        githooks install
+        touch a.txt && git add a.txt
+        git commit -m "feat: a file"
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Hook output
+      description: The full output of the failing command. Paste it as-is; do not summarise it.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: list
+    attributes:
+      label: "`githooks list` in the affected repository"
+      description: This says what should run there and why the rest does not, which is usually where the answer is.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: githooks version
+      description: The release tag you installed, or `git log -1` if you built from source.
+      placeholder: v1.0.0
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: OS and git version
+      description: "`uname -sm` and `git --version`."
+      placeholder: Darwin arm64 / git 2.44.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant configuration
+      description: |
+        Optional, but often decisive:
+        `git config --get-all hook.skip`, `git config --get-regexp '^githooks\.'`,
+        `git config --global init.templateDir`, and whether the repository has a `.githooks.conf`.
+      render: shell
+    validations:
+      required: false
