@@ -3,16 +3,27 @@
 Status: **built**. PRs #41-#47 implement v1 and v2; `scripts/propagate.sh` is
 gone, replaced by `githooks-fleet fix`.
 
-Two items from the plan are deliberately unbuilt: the `s` toggle for `hook.skip`
-and the `:` command palette. Both are useful, neither is load-bearing, and a
-named gap is better than a half-built one.
+**The `s` toggle for `hook.skip` is BUILT.** This paragraph called it
+deliberately unbuilt for longer than it was true. `s` toggles the highlighted
+check in the repo detail pane and `u` takes it back; it writes to that
+repository's `.git/config` and refuses to touch an entry that is global or from
+another config file. It is specified in
+[`hook-skip-management.md`](hook-skip-management.md), which is also where the
+one genuine gap is recorded — there is no way to write a FLEET-WIDE skip, and a
+loop over 96 local writes is not one.
 
-The skip toggle is specified separately in
-[`hook-skip-management.md`](hook-skip-management.md) — it was specified as a
-safety feature rather than an ergonomic one, back when `hook.skip` matched by
-SUBSTRING and `hook.skip = e` silently disabled all 20 checks. Matching is exact
-now: a value names a check by its full id, its trigger, or its short name, and
-`e` reaches nothing.
+It was specified as a safety feature rather than an ergonomic one, back when
+`hook.skip` matched by SUBSTRING and `hook.skip = e` silently disabled all 20
+checks. Matching is exact now: a value names a check by its full id, its
+trigger, or its short name, and `e` reaches nothing. The friction the original
+design carried — typing a check's name whenever a skip reached more than one —
+went with the rule that made it necessary.
+
+**Unbuilt, and named rather than half-built:** the `:` command palette, `r`
+(rescan), `?` (a key sheet), and `f` (fix from inside the TUI). `f` is
+deliberate rather than pending: the dry-run/`--apply` split on the `fix` CLI
+already enforces the property `f` was designed to give, and does it without a
+modal confirmation. See *Interaction model*.
 
 ## Why this exists
 
@@ -102,44 +113,145 @@ an explicit action.
 
 ```
 FleetScan {
-  root             : PathBuf
-  depth            : usize
-  git_dirs_found   : usize
-  hook_dirs_seen   : usize
-  managed_seen     : usize
-  unmanaged_seen   : usize
-  unreadable       : Vec<PathBuf>
-  excluded_dirs    : usize
-  repos            : Vec<Repo>
+  root               : PathBuf
+  depth              : usize
+  git_dirs_found     : usize
+  hook_dirs_seen     : usize
+  managed_seen       : usize
+  unmanaged_seen     : usize
+  unreadable         : Vec<PathBuf>
+  hooks_outside_seen : usize      // repos whose hooks resolve somewhere we will not touch
+  excluded_dirs      : usize
+  dirs_visited       : usize      // how much of the tree was actually walked
+  repos              : Vec<Repo>
 }
 
 Repo {
-  path         : PathBuf        // displayed repo-relative to the scan root
-  managed      : bool           // ≥1 shim dispatches to the binary
-  shims        : [ShimState; 4] // commit-msg, pre-commit, pre-push, prepare-commit-msg
-  stale_ours   : Vec<String>    // our old shims/check shims that are no longer shipped
-  foreign_subs : Vec<String>    // hand-written pre-commit-* / pre-push-* sub-hooks
-  hook_pkgjson : Option<String> // vestigial hooks/package.json from the node era
-  baked        : BakeState      // which binary path the shims point at
-  languages    : LangSet        // rust | js | python | k8s — from manifest presence
-  skips        : Vec<String>    // git config --get-all hook.skip
+  path              : PathBuf        // displayed repo-relative to the scan root
+  managed           : bool           // ≥1 shim dispatches to the binary
+  shims             : Vec<ShimState> // one per git-invoked hook, in DISPATCHERS order
+  baked             : BakeState      // which binary path the shims point at
+  stale_ours        : Vec<String>    // OUR old shims that are no longer shipped
+  foreign_subs      : Vec<String>    // hand-written pre-commit-* / pre-push-* sub-hooks
+  hook_pkgjson      : bool           // a vestigial hooks/package.json from the node era
+  languages         : Vec<String>    // manifests at the repo root — DISPLAY ONLY
+  applicable        : Vec<String>    // checks that would ever fire here, from each Scope
+  skips             : Vec<SkipEntry> // hook.skip, resolved: what it hits and where it came from
+  severities        : Vec<SeverityOverride>  // githooks.severity.*, and which one git applies
+  declared          : Vec<DeclaredCheck>     // this repo's own .githooks.conf checks
+  trusted           : Option<bool>   // None when there is no manifest at all
+  agents_md         : AgentsMdState  // UpToDate | Missing | Drifted | Malformed
+  hooks_dir         : HooksDir       // where the hooks are, and whether we may touch them
+  shares_hooks_with : Option<PathBuf> // a repo already seen that owns this hooks dir
 }
 
+SkipEntry        { value, scope: Local|Global|Other{origin}, suppresses: Vec<&str> }
+SeverityOverride { check, value, level, scope, effective: bool }
+DeclaredCheck    { name, stage, state: Usable{severity, exts} | unusable }
+
 ShimState = Ok            // installed bytes match the expected baked template
-          | Drifted(hash) // present, but not the expected baked template
+          | Drifted       // present, readable text, not the expected baked template
           | Missing
+          | Symlink{target}    // a link — writing here would rewrite something else
+          | Unreadable{why}    // a binary, a directory, a permissions error, a hard link
 BakeState = Current       // == installed binary path
           | Stale(path)   // points somewhere else — the GUI-client failure mode
           | Unbaked       // __GITHOOKS_BIN__ placeholder intact
           | Mixed         // shims disagree with each other
+HooksDir  = In{path}      // inside the repo's worktree, or its git common dir
+          | Outside{path} // reported, never created, never written to
+          | Unknown{why}  // git would not say — not a state to guess out of
 
 FixPlan {
-  repo    : PathBuf
-  refuse  : Vec<Refusal> // tracked files, unreadable hooks dir, non-managed repo, ...
-  remove  : Vec<Removal>
-  write   : Vec<WriteShim>
+  repo      : PathBuf
+  repo_abs  : PathBuf
+  intent    : "repair" | "activate"
+  hooks     : HooksDir
+  refuse    : Vec<Refusal> // suppresses the WHOLE repo
+  warn      : Vec<Warning> // printed; suppresses NOTHING
+  remove    : Vec<Removal>
+  write     : Vec<WriteShim>
 }
+
+Refusal = unmanaged | unreadable_hooks | tracked{path}
+        | tracked_unknown{path, why}      // git could not answer — never read as "no"
+        | foreign_hook{names} | agents_md_malformed{path} | unbakeable_binary{binary}
+        | hooks_dir_outside_repo{path} | hooks_dir_unknown{why}
+Warning = unrecognized_sub_hook{path}     // a hook we did not write. NOT deleted.
+        | hooks_dir_outside_repo{path}
 ```
+
+Four of these fields deserve a sentence, because each exists to make something
+that was invisible visible:
+
+- **`languages` is display only**, and `applicable` is the real answer. Language
+  detection used to double as "would a check fire here", which made it a fourth
+  copy of a rule that lives in each check's `Scope`. `applicable` now evaluates
+  those scopes against the repo's tracked files; `languages` is a column a human
+  reads.
+- **`skips` is `Vec<SkipEntry>`, not `Vec<String>`.** Bare strings hid both
+  halves of what a reader needs: a value need not be a check id (a trigger
+  silences fifteen), and once `git config --get-all` has merged local and global
+  they are indistinguishable.
+- **`severities` exists because a downgrade leaves no trace on screen.** A
+  skipped check is announced on every commit; a check downgraded to `warn` runs,
+  prints its failure, and lets the commit through, so a repository that enforces
+  nothing reads exactly like one that enforces everything. `effective` matters
+  too — `--get-regexp` lists every entry while the dispatcher asks `--get` and
+  takes the last, so listing both as authoritative reported a downgrade git does
+  not apply.
+- **`declared` and `trusted` are the manifest.** A repo could be running a
+  command on every commit that no column mentioned; and `trusted: None` (there
+  is no manifest) must read differently from `Some(false)` (it declared
+  something and that something is not running).
+
+### Two channels, and why a warning is not a weak refusal
+
+A **refusal** suppresses the whole repository: a half-applied fix is how a repo
+ends up with both `pre-commit-ruff.zsh` and `pre-commit-ruff`, running ruff
+twice. A **warning** prints and changes nothing about what gets done — a
+stranger's `pre-push-mine.sh` must not block repairing four broken dispatchers
+in the same directory.
+
+Folding the two together forces a choice between "say nothing" and "do nothing",
+and this tool has been on both sides of it. `hooks_dir_outside_repo` is the one
+condition on both channels, deliberately: the warning names the directory so
+somebody can go and look at their `core.hooksPath`, the refusal is what stops
+the write.
+
+### `foreign_subs` is REPORTED, not removed
+
+`install` and `fix --apply` used to delete every `.git/hooks` file matching
+`pre-commit-*` / `pre-push-*` that did not carry our marker, in repositories
+they had never touched, reported only as a number. That was inherited wholesale
+from a one-time migration sweep in `scripts/propagate.sh` (see
+`git show 90b0d30^:scripts/propagate.sh`, around lines 82-87) and then pinned as
+golden by `tests/parity.rs`.
+
+They are now `Warning::UnrecognizedSubHook` and are left exactly where they are.
+`--remove-unrecognized` puts them back on the removal list, and is deliberately
+not spelled `--remove-stale`: "stale" means `stale_ours`, which IS ours and is
+still removed by default, and reusing that word for other people's files is
+what would get somebody to type it casually.
+
+### `hooks_dir` and `shares_hooks_with`
+
+`hooks_dir` exists because a scanned repository's `core.hooksPath` may be an
+absolute path anywhere on the disk, and activation used to `create_dir_all` it
+and write four 0o755 files into it. The fleet now refuses anything that does not
+resolve inside the repository's own worktree or its git common directory.
+
+Note the deliberate asymmetry: **per-repo `githooks install` keeps honouring its
+own repository's `core.hooksPath`**, absolute or not — you are standing in that
+repository and configured it yourself. The fleet refuses, because it is walking
+ninety-six repositories it did not configure.
+
+`shares_hooks_with` exists because a submodule's and a linked worktree's hooks
+live in the superproject/main repo. Both now appear in `repos` (their `.git` is a
+FILE, which the walk used to skip outright, making every submodule on the machine
+invisible), so one hooks directory is reachable from two rows. The first
+repository seen in the walk's sorted order owns it; the others plan nothing and
+display as covered-by.
 
 `languages` matters because a check that never fires is not the same as a check
 that is broken: `pre-commit-clippy` in a Python repo is *correctly* inert. The
@@ -175,10 +287,20 @@ drifted merely because `__GITHOOKS_BIN__` was replaced.
   number that actually proves fleet health, and it is the number the text script
   got wrong. It is always `N/M`, never a bare adjective.
 - `SHIMS` is four glyphs, one per dispatcher, in fixed order. `●` ok, `◐`
-  drifted, `○` missing. Position encodes *which* hook without spending a column
-  on its name.
+  drifted, `○` missing, `!` a symlink, `?` unreadable. Position encodes *which*
+  hook without spending a column on its name. `!` and `?` are deliberately OFF
+  the ●◐○ scale: those three run from healthy to absent, and a dispatcher that
+  is a link to a tracked file is not "somewhat installed" — writing there
+  rewrites the other file, and it must not read as a milder `◐`.
 - `STATE` is a redundant text summary of the same information, so the screen
-  survives `NO_COLOR` and CVD.
+  survives `NO_COLOR` and CVD. It also carries the two states that are not about
+  the shims at all: `covered by <path>` (a linked worktree or submodule whose
+  hooks another row owns) and `! hooks elsewhere` (a `core.hooksPath` we will not
+  follow), both of which would otherwise read as `! unmanaged` and send somebody
+  looking for a missing install.
+- A repository whose dispatchers are SYMLINKS no longer counts as `managed`,
+  even when the link points at one of our own shims. That is the intended
+  trade: `fix` reports it instead of writing through the link.
 - `DECL` counts the checks a repository declares in `.githooks.conf`, and reads
   `2!1` when one of those lines cannot be parsed — a check somebody committed
   that has never once run. `2` and `2!1` describing the same repository is the
@@ -243,6 +365,24 @@ The `● / ○ / ⊘` distinction is the important one. A Python repo showing `�
 clippy` is healthy; the same glyph must never be used for "broken". Three states,
 three glyphs, three words in the legend — no colour required to read it.
 
+The detail pane also carries, above the dispatchers, the resolved `hooks dir`
+(always, not only when something is wrong with it — a reader who cannot see the
+directory cannot tell a repo we declined to touch from one that had nothing to
+do) and, when set, `shares hooks  covered by <path>`.
+
+Below them, leftovers are TWO blocks, not one:
+
+```
+│ LEFTOVERS OF OURS (nothing dispatches these — fix removes them)                 │
+│   pre-commit-ruff                                                               │
+│                                                                                 │
+│ NOT OURS (left alone — nothing dispatches these either)                         │
+│   pre-push-branch-protect.sh                                                    │
+```
+
+They shared a heading for two releases while `fix --apply` silently deleted the
+second list. Same word, opposite fates.
+
 ## Screen 3 — Hook-centric view (`h`)
 
 Transposes the matrix. Answers "where does `pre-commit-pyright` actually apply,
@@ -267,26 +407,67 @@ misconfigured — and that is invisible in today's text output.
 Modal and keyboard-first, following k9s and helix. No mouse dependency; mouse
 scroll may be supported but nothing is mouse-only.
 
-| Key | Action |
-|---|---|
-| `↑↓` `jk` | move selection |
-| `Enter` | detail of selected row |
-| `Esc` | back / clear filter |
-| `/` | incremental filter (path, language, state) — match count always shown |
-| `:` | command palette (`:fix`, `:rescan`, `:root <path>`, `:export json`) |
-| `h` | toggle fleet ↔ hook-centric view |
-| `s` | toggle `hook.skip` for the selected check (detail view) |
-| `f` | fix selected repo — **always previews, never applies silently** |
-| `r` | rescan |
-| `?` | full key sheet |
-| `q` | quit |
+**The keys that exist.** This table was aspirational and is now a list of what
+`tui.rs` actually binds; the footer of each screen shows the same set.
 
-**Destructive actions are diff-first.** `f` opens a confirmation listing exactly
-what would be removed and written, per file, from a typed Rust `FixPlan`.
-Nothing in this tool deletes a file without showing the list and taking a second
-keypress. Given `make install` has destroyed tracked source twice in this repo's
+| Key | Where | Action |
+|---|---|---|
+| `↑↓` `j` `k` | everywhere | move selection |
+| `Enter` | fleet | detail of the selected repo |
+| `Esc` | everywhere | back, or clear the filter |
+| `/` then text, `Backspace` | fleet | incremental filter — match count always shown |
+| `h` | fleet | toggle fleet ↔ hook-centric view |
+| `s` | detail | toggle `hook.skip` for the highlighted check |
+| `u` | detail | take that toggle back |
+| `q` | everywhere | quit — including during a scan |
+
+**And the ones that do not, removed from this table rather than left as
+promises**: `:` (a command palette), `f` (fix from inside the TUI), `r`
+(rescan), `?` (a key sheet). Three of the four are still reasonable ideas. `f`
+is the interesting absence — see below.
+
+**Destructive actions are diff-first, and the split is enforced by the CLI
+rather than by a confirmation prompt.** There is no `f`. What ships is:
+
+```sh
+githooks-fleet fix                    # DRY RUN — prints the plan, writes nothing
+githooks-fleet fix --apply            # carries it out
+githooks-fleet install                # implies applying; named after intent
+githooks-fleet fix --apply --agents-md          # opt in, per invocation
+githooks-fleet fix --apply --remove-unrecognized
+```
+
+`fix` with no `--apply` is the preview, built from the same typed `FixPlan` the
+apply consumes, so the preview cannot drift from the act. That is the property
+the `f`-plus-confirmation design was after, obtained more cheaply: the default
+invocation cannot write at all, so there is no keystroke that could skip the
+preview and no modal state where "yes" means something different from what was
+last on screen. `install` is the one verb that implies `--apply`, because
+requiring both would be ceremony over an unambiguous intent.
+
+Two flags are opt-in **per invocation** and never bundled into a plain
+`--apply`: `--agents-md`, which writes into a tracked file, and
+`--remove-unrecognized`, which deletes `pre-commit-*` / `pre-push-*` files this
+tool did not write. The second is spelled that way rather than `--remove-stale`
+on purpose — "stale" means our own retired shims, which are removed by default
+and are a different thing entirely. `--binary <path>` chooses what the shims are
+baked to point at, defaulting to `$HOME/.local/bin/githooks`.
+
+Given `make install` has destroyed tracked source twice in this repo's
 history, the dashboard's write path gets the same fail-closed treatment: it
-refuses any path git reports as tracked.
+refuses any path git reports as tracked — **and any path git will not answer
+about**, which is a distinct state (`tracked_unknown`) and not a "no". `fatal:
+detected dubious ownership` is what git says about every repository owned by
+another uid, which is every repository inside a container bind mount, and a
+guard that reads that as "untracked" fails open in exactly the environment where
+the user cannot see what happened.
+
+Every write and every remove — in `fix`, in `install`, and in `uninstall` — goes
+through `githooks_runtime::hookfile`, the single owner of "is this ours, and may
+we touch it?". It never follows a symlink, never treats an unreadable file as
+absent, and stages each write to a sibling temporary that is `rename`d into
+place, so replacing a link is the only thing that can happen and writing through
+one is not a code path that exists.
 
 ## Performance
 
@@ -349,8 +530,12 @@ Build the minimum useful tool, but build it in the final architecture:
 - `githooks-fleet --json`, emitting `FleetScan`.
 - Default TUI overview and repo detail views.
 - Rust `githooks-fleet fix [repo|--all] --dry-run`, producing a `FixPlan`.
+  *Shipped inverted, and better: dry run is the DEFAULT and `--apply` is the
+  flag, so the writing form is the one you have to type.*
 - Rust apply path for that exact `FixPlan`, with a second confirmation in the
-  TUI and tracked-file refusal before any remove/write.
+  TUI and tracked-file refusal before any remove/write. *The tracked-file
+  refusal shipped. The TUI confirmation did not, because there is no `f` — the
+  CLI split does the same job; see* Interaction model.
 - Tests for broken root, too-shallow depth, baked-template comparison, managed
   detection, stale file classification, tracked-file refusal, and dry-run/apply
   parity.

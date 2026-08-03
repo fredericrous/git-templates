@@ -23,10 +23,39 @@ use std::sync::OnceLock;
 /// Same shape as `PushRefs`: read once, lent to every check that asks.
 static OVERRIDE: OnceLock<Vec<String>> = OnceLock::new();
 
+/// Set once the file set stops being the index.
+///
+/// `restage`'s own doc says what makes re-staging safe: the pre-commit stage
+/// holds the unstaged changes aside, so the tree contains the staged content
+/// and nothing else, and anything a formatter touched is by definition part of
+/// this commit. `githooks run --all-files` replaces the file set with every
+/// tracked path — which is that precondition being FALSE.
+///
+/// With `githooks.fix true`, every fixer's `restage(&files)` would then `git
+/// add` everything in the working tree that differs from the index, turning a
+/// read-only "does my tree pass" query into `git add .`. That is the hazard §2
+/// of docs/index-fidelity-and-run-modes.md names.
+///
+/// The gate hangs off the OVERRIDE rather than off a flag threaded through
+/// twenty check signatures, because the override IS the fact that matters. It
+/// therefore covers built-ins and `manifest::External::run` (which consults
+/// `fixing_enabled` in two places) in one change, and a future check cannot
+/// forget it.
+static NOT_THE_INDEX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Make every subsequent `staged_files` answer from `files` instead of the
 /// index. Only the first call counts.
 pub fn override_file_set(files: Vec<String>) {
+    // Set unconditionally, even if a set already won the `OnceLock`: the
+    // statement "the file set is not the index" is true from the first call
+    // onwards regardless of which one supplied the paths.
+    NOT_THE_INDEX.store(true, std::sync::atomic::Ordering::SeqCst);
     let _ = OVERRIDE.set(files);
+}
+
+/// Whether the file set every check sees is something other than the index.
+pub fn not_the_index() -> bool {
+    NOT_THE_INDEX.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// An empty `exts` returns them all.
@@ -48,8 +77,39 @@ pub fn staged_files(exts: &[&str]) -> Vec<String> {
 }
 
 /// Repo root, or "." when git cannot say.
+///
+/// **For CHECK BODIES ONLY.** The fallback is safe there and nowhere else: git
+/// invokes a hook with the working tree as the current directory, so a check
+/// that reaches this line is already standing in the repository, and "." is the
+/// right answer rather than a guess.
+///
+/// Anything a user types — `githooks agents-md`, `install`, `trust`, `restore`
+/// — can be typed from any directory on the machine, and there the fallback is
+/// not a fallback but a wrong answer that reads as a right one. Use
+/// [`repo_root_checked`] at every command entry point.
 pub fn repo_root() -> String {
     git::stdout(&["rev-parse", "--show-toplevel"]).unwrap_or_else(|| ".".into())
+}
+
+/// Repo root, or an error naming the problem.
+///
+/// The same question as [`repo_root`] without the "." — because "." is a
+/// PLAUSIBLE root, and that is what made it dangerous. `githooks agents-md`
+/// run outside a repository did not fail; it resolved the root to the current
+/// directory and wrote `./AGENTS.md` into whatever directory the user happened
+/// to be standing in, then printed `wrote ./AGENTS.md` as if that were the
+/// answer. Same shape in `install`'s two prompts, in `trust` (which then
+/// looked for a manifest, and would have recorded trust, under `.`) and in
+/// `restore`.
+///
+/// Every one of those is a command somebody types, and a command somebody
+/// types is a command they can type from `~`. There is no correct behaviour
+/// available to this function when git cannot answer, so it does not invent
+/// one.
+pub fn repo_root_checked() -> Result<String, String> {
+    git::stdout(&["rev-parse", "--show-toplevel"])
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "not inside a git repository".to_string())
 }
 
 /// Resolve a tool, preferring the repo's PINNED copy so the hook matches CI.
@@ -213,6 +273,26 @@ pub fn run(root: &str, argv: &[String], extra: &[String]) -> bool {
     cmd.status().map(|s| s.success()).unwrap_or(false)
 }
 
+/// As [`run`], but with the tool's own output discarded.
+///
+/// For a pass whose only job is to decide something — prettier's `--check`,
+/// ruff's `--fix` sweep — where the offenders are printed once, by the pass
+/// that reports them, rather than twice.
+pub fn run_quiet(root: &str, argv: &[String], extra: &[String]) -> bool {
+    let Some((program, rest)) = argv.split_first() else {
+        return true;
+    };
+    let mut cmd = Command::new(program);
+    cmd.args(rest)
+        .args(extra)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    strip_git_env(&mut cmd);
+    cmd.status().map(|s| s.success()).unwrap_or(false)
+}
+
 /// Whether the user asked for checks to repair what they find.
 ///
 /// OFF by default. `git config githooks.fix true` turns it on, per repository,
@@ -221,30 +301,95 @@ pub fn run(root: &str, argv: &[String], extra: &[String]) -> bool {
 /// the repair lands in the commit you are making, which is a bigger claim to
 /// make on somebody's behalf than printing an error.
 pub fn fixing_enabled() -> bool {
+    // Never while the file set is not the index — see `NOT_THE_INDEX`.
+    !not_the_index() && fixing_requested()
+}
+
+/// What the CONFIG says, ignoring whether the current run may act on it.
+///
+/// Split out so `run_all` can tell the difference between "fixing is off" and
+/// "you asked for fixing and this mode will not do it", and say the second out
+/// loud instead of silently ignoring the key.
+pub fn fixing_requested() -> bool {
     matches!(
         git::stdout(&["config", "--get", "githooks.fix"]).as_deref(),
         Some("true") | Some("1") | Some("yes")
     )
 }
 
-/// Re-stage exactly the paths a fixer rewrote, and say whether anything moved.
+/// What a re-stage actually did. THREE answers, because the old `bool`
+/// conflated two of them and the conflation shipped unformatted code.
+///
+/// `prettier.rs` read `if run_quiet(write) && restage(&files) { … Fixed }`. When
+/// `git add` FAILED, `restage` returned `false` — indistinguishable from
+/// "nothing needed staging" — so control fell through to a second `--check`
+/// pass, which inspected the NOW-FORMATTED WORKING TREE, passed, printed
+/// "Prettier passed" and returned `Outcome::Passed`. The index still held the
+/// unformatted content, so the commit contained unformatted code and the hook
+/// said it had passed. `manifest.rs` had the same shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Restaged {
+    /// No path differed from the index — nothing to do, and nothing wrong.
+    Nothing,
+    /// `git add` succeeded; the index now holds the repair.
+    Staged,
+    /// `git add` failed, carrying the paths it could not stage. The index
+    /// holds content the fixer has already replaced on disk, so this MUST be
+    /// loud at every call site — and naming the files is the difference
+    /// between a message somebody can act on and one they cannot.
+    Failed(Vec<String>),
+}
+
+/// Serialises this process's own `git add` calls.
+///
+/// pre-commit runs its checks concurrently (`dispatch.rs`), and up to three of
+/// them can re-stage. git takes `$GIT_DIR/index.lock` exclusively, so two
+/// concurrent `git add`s in the same repository make one of them fail — which,
+/// before `Restaged`, was silently read as "nothing moved". Holding this across
+/// the `git add` removes self-contention entirely; the retry below is only for
+/// OTHER processes.
+static INDEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Re-stage exactly the paths a fixer rewrote, and say what happened.
 ///
 /// Safe ONLY because the pre-commit stage holds unstaged changes aside: the
 /// tree contains the staged content and nothing else, so anything a formatter
 /// touched is by definition part of this commit. Without that, re-staging would
 /// sweep in work the author deliberately kept back.
-pub fn restage(paths: &[String]) -> bool {
+pub fn restage(paths: &[String]) -> Restaged {
+    // Belt and braces alongside `fixing_enabled`: a future fixer that forgets
+    // the gate still cannot turn `githooks run --all-files` into `git add .`.
+    if not_the_index() {
+        return Restaged::Nothing;
+    }
     let changed: Vec<String> = paths
         .iter()
         .filter(|p| !git::succeeds(&["diff", "--quiet", "--", p]))
         .cloned()
         .collect();
     if changed.is_empty() {
-        return false;
+        return Restaged::Nothing;
     }
     let mut args = vec!["add", "--"];
     args.extend(changed.iter().map(String::as_str));
-    git::succeeds(&args)
+
+    let _serialised = INDEX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Another PROCESS can hold `index.lock` — a `git status` from an editor, a
+    // second hook in a linked worktree. Back off and retry rather than
+    // reporting a transient collision as a failed repair. `git add` of the same
+    // paths is idempotent: it records the paths' current worktree content, so
+    // running it twice records the same thing twice and cannot double-stage.
+    const BACKOFF_MS: [u64; 3] = [50, 150, 400];
+    if git::succeeds(&args) {
+        return Restaged::Staged;
+    }
+    for wait in BACKOFF_MS {
+        std::thread::sleep(std::time::Duration::from_millis(wait));
+        if git::succeeds(&args) {
+            return Restaged::Staged;
+        }
+    }
+    Restaged::Failed(changed)
 }
 
 pub fn ok(msg: &str) {
@@ -290,6 +435,86 @@ mod tests {
         }
         assert!(found.ends_with(".cmd"), "got {found}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// "Nothing moved" and "`git add` FAILED" are different answers, and the
+    /// old `bool` gave the same one for both.
+    ///
+    /// That conflation is what shipped unformatted code: `prettier.rs` read
+    /// `if wrote && restage(&files)`, so a failed `git add` fell through to a
+    /// second `--check` against the now-formatted WORKING TREE, which passed —
+    /// while the INDEX still held the unformatted content the commit would
+    /// carry.
+    ///
+    /// An absolute path outside any repository is a `git add` git will always
+    /// refuse, which is the only way to reach the failing branch without
+    /// sabotaging a real index.
+    #[test]
+    fn restage_distinguishes_nothing_from_failure() {
+        let outside = std::env::temp_dir()
+            .join("githooks-restage-outside-any-repo")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            restage(std::slice::from_ref(&outside)),
+            Restaged::Failed(vec![outside]),
+            "a `git add` git refuses must report Failed, never Nothing"
+        );
+        assert_eq!(
+            restage(&[]),
+            Restaged::Nothing,
+            "no paths is nothing to do, and nothing wrong"
+        );
+    }
+
+    /// No check may hand `Command` a bare program name.
+    ///
+    /// `Command::new` does NO PATHEXT resolution, so `Command::new("npm")`
+    /// cannot execute `npm.cmd` and `Command::new("uvx")` cannot execute
+    /// `uvx.exe`: the spawn fails with "program not found" and a
+    /// `Severity::Block` check reports an installed tool as broken. That is the
+    /// incident `program()` exists for, and it kept recurring — `yamllint` and
+    /// three sites in `python_tools` were still doing it, THREE OF THEM after
+    /// `which()` had already succeeded and discarded the answer.
+    ///
+    /// A source scan rather than a runtime assertion because the failure only
+    /// reproduces on Windows, and the whole point is to catch the next one on
+    /// every platform. Comment lines are skipped: `program()`'s own doc quotes
+    /// the offending call. The needle is assembled from two pieces so this
+    /// module — which the scan also reads — does not match itself.
+    #[test]
+    fn no_hook_spawns_a_bare_program_name() {
+        let needle = concat!("Command", "::new(");
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/hooks");
+        let mut scanned = 0usize;
+        for entry in std::fs::read_dir(dir).expect("hooks dir").flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            scanned += 1;
+            let src = std::fs::read_to_string(&path).expect("read a hook module");
+            for (n, line) in src.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let Some(after) = line.split_once(needle) else {
+                    continue;
+                };
+                assert!(
+                    !after.1.starts_with('"'),
+                    "{}:{} spawns a bare name — route it through `program()` or \
+                     the path `which()` already resolved: {}",
+                    path.display(),
+                    n + 1,
+                    line.trim()
+                );
+            }
+        }
+        assert!(
+            scanned > 10,
+            "the scan found almost nothing: {scanned} files"
+        );
     }
 
     #[test]

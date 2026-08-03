@@ -42,6 +42,7 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 use crate::check::{Check, Fix, Outcome, Scope, Severity, Stage};
+use crate::hooks::common::Restaged;
 use crate::registry::{Ctx, CHECKS, ENTRYPOINTS};
 
 pub const MANIFEST: &str = ".githooks.conf";
@@ -286,8 +287,10 @@ impl Check for External {
             } => (scope, program, args, *fix),
             Kind::Unusable { why } => {
                 crate::hooks::common::warn(&format!(
-                    "{MANIFEST}: {} — {why}",
-                    crate::ui::highlight(&self.short_name)
+                    "{MANIFEST}: {} — {}",
+                    crate::ui::highlight(&self.short_name),
+                    // Carries repo tokens: `BadStage("…")` quotes the manifest.
+                    crate::ui::sanitize(why)
                 ));
                 return Outcome::Unavailable;
             }
@@ -306,8 +309,21 @@ impl Check for External {
         // having its result discarded. Gating only the re-staging let the
         // command edit files with `githooks.fix` off, which is precisely the
         // surprise the gate exists to prevent.
+        //
+        // `Unavailable`, not `Passed`. `check.rs` defines `Unavailable` as
+        // "COULD NOT RUN — a tool is missing, or the opt-in config is absent",
+        // which is exactly this; `Passed` is the one verdict it must not
+        // report, because the dispatcher's roll-up and the fleet dashboard
+        // then show a check that never executed as clean. With a message,
+        // because every other `Unavailable` in this codebase says what was
+        // missing and an unexplained count on every commit is worse than none.
         if fix == Fix::Rewrite && !crate::hooks::common::fixing_enabled() {
-            return Outcome::Passed;
+            crate::hooks::common::warn(&format!(
+                "{}: declares fix, and {} is off — not run",
+                crate::ui::highlight(&self.short_name),
+                crate::ui::highlight("githooks.fix")
+            ));
+            return Outcome::Unavailable;
         }
 
         let in_scope = match self.stage {
@@ -328,9 +344,11 @@ impl Check for External {
             // error that does not exist.
             Err(e) => {
                 crate::hooks::common::warn(&format!(
-                    "{MANIFEST}: {} could not run {} — {e}",
+                    "{MANIFEST}: {} could not run {} — {}",
                     crate::ui::highlight(&self.short_name),
-                    crate::ui::highlight(program)
+                    crate::ui::highlight(program),
+                    // The io error's text embeds the program name it tried.
+                    crate::ui::sanitize(&e.to_string())
                 ));
                 Outcome::Unavailable
             }
@@ -338,15 +356,31 @@ impl Check for External {
                 // A declared fixer that ran clean may still have rewritten
                 // something; re-stage exactly what moved. Only its own scope,
                 // so it cannot stage a file it never looked at.
-                if fix == Fix::Rewrite
-                    && crate::hooks::common::fixing_enabled()
-                    && crate::hooks::common::restage(&scoped(scope, &in_scope))
-                {
-                    crate::hooks::common::ok(&format!(
-                        "{} fixed and re-staged",
-                        crate::ui::highlight(&self.short_name)
-                    ));
-                    return Outcome::Fixed;
+                if fix == Fix::Rewrite && crate::hooks::common::fixing_enabled() {
+                    match crate::hooks::common::restage(&scoped(scope, &in_scope)) {
+                        Restaged::Staged => {
+                            crate::hooks::common::ok(&format!(
+                                "{} fixed and re-staged",
+                                crate::ui::highlight(&self.short_name)
+                            ));
+                            return Outcome::Fixed;
+                        }
+                        // `git add` failed, so the index still holds whatever
+                        // the command has already replaced on disk. This used
+                        // to be indistinguishable from "nothing moved" and was
+                        // reported as a pass.
+                        Restaged::Failed(stuck) => {
+                            crate::hooks::common::fail(&format!(
+                                "{} rewrote files but {} failed — the index still holds the \
+                                 OLD content: {}",
+                                crate::ui::highlight(&self.short_name),
+                                crate::ui::highlight("git add"),
+                                crate::ui::sanitize(&stuck.join(", "))
+                            ));
+                            return Outcome::Failed;
+                        }
+                        Restaged::Nothing => {}
+                    }
                 }
                 Outcome::Passed
             }
@@ -640,25 +674,50 @@ pub(crate) fn externals() -> &'static [External] {
     EXTERNALS.get_or_init(|| {
         let root = crate::hooks::common::repo_root();
         let root = Path::new(&root);
-        let declared = read(root);
-        // Untrusted declarations are kept and DISABLED, not dropped. The names
-        // stay visible in `githooks list`, in the dashboard and in the "could
-        // not run" roll-up, because a repository quietly declaring checks that
-        // never run is the failure this project is arranged against — and the
-        // reader needs to know there is a decision waiting for them.
-        match crate::trust::why(crate::trust::state(root)) {
-            None => declared,
-            Some(reason) => declared
-                .into_iter()
-                .map(|external| External {
-                    kind: Kind::Unusable {
-                        why: reason.to_string(),
-                    },
-                    ..external
-                })
-                .collect(),
-        }
+        // ONE read. The bytes that get PARSED and the bytes that get HASHED
+        // have to be the same bytes: this used to `read(root)` and then let
+        // `trust::state` open the file a second time, so anything that changed
+        // it in between — a `git checkout`, a watcher, a `make` target already
+        // running — produced a trust decision about content that is not the
+        // content about to be executed. `record_verified` closes this at trust
+        // time and has a test named for it; the run path had the same gap.
+        let Ok(bytes) = std::fs::read(root.join(MANIFEST)) else {
+            return Vec::new();
+        };
+        // Non-UTF-8 yields no externals, as it always has: `parse` takes a
+        // `&str`, and a manifest we cannot read as text is one we cannot act
+        // on. Not lossy — that would invent a manifest nobody wrote.
+        let Ok(text) = String::from_utf8(bytes.clone()) else {
+            return Vec::new();
+        };
+        gate(parse(&text), crate::trust::state_of(root, &bytes))
     })
+}
+
+/// Apply a trust verdict to what the manifest declared.
+///
+/// Untrusted declarations are kept and DISABLED, not dropped. The names stay
+/// visible in `githooks list`, in the dashboard and in the "could not run"
+/// roll-up, because a repository quietly declaring checks that never run is the
+/// failure this project is arranged against — and the reader needs to know
+/// there is a decision waiting for them.
+///
+/// Split out from `externals` because that function is a `OnceLock` keyed on
+/// the process's own repository and so cannot be tested; this is the part with
+/// the rule in it.
+pub(crate) fn gate(declared: Vec<External>, state: crate::trust::State) -> Vec<External> {
+    match crate::trust::why(state) {
+        None => declared,
+        Some(reason) => declared
+            .into_iter()
+            .map(|external| External {
+                kind: Kind::Unusable {
+                    why: reason.to_string(),
+                },
+                ..external
+            })
+            .collect(),
+    }
 }
 
 #[cfg(test)]

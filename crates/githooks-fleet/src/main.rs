@@ -21,6 +21,17 @@ mod tui;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+/// A path, safe to print.
+///
+/// Every path this tool shows was found by walking directories somebody else
+/// owns, and `Path::display()` escapes nothing — a repository or a directory
+/// can be named with control bytes in it. `--json` output is deliberately not
+/// routed through here: it is a machine contract, and `json.rs` already escapes
+/// what JSON requires.
+fn shown(p: &Path) -> String {
+    githooks_runtime::ui::sanitize_path(p)
+}
+
 const USAGE: &str = "\
 usage: githooks-fleet [scan|tui|fix|install|uninstall] [--root <dir>] [--depth <n>] [--json]
 
@@ -36,7 +47,14 @@ usage: githooks-fleet [scan|tui|fix|install|uninstall] [--root <dir>] [--depth <
   --depth <n>    directory levels to descend  (default: 6)
   --binary <p>   the binary shims should point at (default: $HOME/.local/bin/githooks)
   --agents-md    with fix/install: also roll out the AGENTS.md pointer
+  --remove-unrecognized
+                 ALSO delete pre-commit-* / pre-push-* files this tool did not
+                 write. Off by default, and read the sentence below first.
   --json         emit the result as JSON
+
+install and fix --apply never delete a hook they did not write: a
+pre-commit-* or pre-push-* file without our marker is reported and left
+exactly where it is.
 ";
 
 #[derive(PartialEq)]
@@ -67,6 +85,17 @@ struct Args {
     /// content across up to 96 repositories is a materially bigger action
     /// than the untracked `.git/hooks` shims apply already writes.
     agents_md: bool,
+    /// Also delete `pre-commit-*` / `pre-push-*` files this tool did not write.
+    ///
+    /// Deliberately NOT called `--remove-stale`, and the naming is the safety
+    /// feature. "Stale" already means something exact here: `stale_ours`, the
+    /// retired per-check shims that carry OUR marker, which are removed by
+    /// default because they are ours to remove. Reusing that word for files
+    /// that are NOT ours is precisely what would get somebody to type this
+    /// casually — it would read as tidying up after us. It is not: it deletes
+    /// hooks other people wrote, in repositories this tool may never have
+    /// touched, and the long spelling is there to be read before it is used.
+    remove_unrecognized: bool,
 }
 
 /// `home` is threaded through rather than read from the environment here, so
@@ -81,6 +110,7 @@ fn parse(argv: &[String], home: Option<&Path>) -> Result<Args, String> {
     let mut apply = false;
     let mut binary: Option<String> = None;
     let mut agents_md = false;
+    let mut remove_unrecognized = false;
 
     let mut it = argv.iter().peekable();
     if let Some(first) = it.peek() {
@@ -126,6 +156,7 @@ fn parse(argv: &[String], home: Option<&Path>) -> Result<Args, String> {
             }
             "--apply" => apply = true,
             "--agents-md" => agents_md = true,
+            "--remove-unrecognized" => remove_unrecognized = true,
             "--binary" => {
                 binary = Some(it.next().ok_or("--binary needs a path")?.clone());
             }
@@ -151,6 +182,7 @@ fn parse(argv: &[String], home: Option<&Path>) -> Result<Args, String> {
         apply,
         binary,
         agents_md,
+        remove_unrecognized,
     })
 }
 
@@ -230,36 +262,58 @@ fn main() -> ExitCode {
     if args.mode == Mode::Uninstall {
         let mut removed = 0usize;
         let mut repos = 0usize;
+        let mut left: Vec<(PathBuf, githooks_runtime::hookfile::Refuse)> = Vec::new();
+        let mut failed: Vec<(PathBuf, std::io::Error)> = Vec::new();
         for repo in scan.repos.iter().filter(|r| r.managed) {
-            let hooks = scan::hooks_dir_for(&args.root.join(&repo.path));
-            let mut here = 0usize;
-            for name in githooks_runtime::install::DISPATCHERS {
-                let path = hooks.join(name);
-                // Only ours. A hook somebody wrote is not ours to take, and
-                // this is the guard whose absence let `install` clobber one.
-                let ours = std::fs::read_to_string(&path)
-                    .map(|t| githooks_runtime::install::is_our_shim(&t))
-                    .unwrap_or(false);
-                // AND not tracked: the same guard `fix`/`apply` treat as
-                // mandatory before any removal, for the same reason —
-                // `.git/hooks` reached through a symlinked template dir can
-                // resolve into a tracked checkout, and `is_our_shim` alone
-                // does not know that. This path deletes independently of
-                // `fix::plan`/`apply::apply`, so it must repeat the check
-                // rather than rely on going through them.
-                if ours && !fix::is_tracked(&path) && std::fs::remove_file(&path).is_ok() {
-                    here += 1;
-                }
-            }
-            if here > 0 {
+            // A hooks directory outside the repository, or one git would not
+            // name, is not ours to delete from any more than it is ours to
+            // write to. Skipped rather than guessed at.
+            let Some(hooks) = repo.hooks_dir.inside() else {
+                continue;
+            };
+            let mut result = uninstall_repo(hooks);
+            if !result.removed.is_empty() {
                 repos += 1;
-                removed += here;
-                println!("  {} {here} shims", repo.path.display());
+                removed += result.removed.len();
+                println!("  {} {} shims", shown(&repo.path), result.removed.len());
             }
+            left.append(&mut result.left);
+            failed.append(&mut result.failed);
         }
         println!("{removed} shims removed from {repos} repositories");
+        // Both blocks are printed even when empty-adjacent, because the whole
+        // bug was that neither existed: three different failures collapsed into
+        // one silent skip and the summary said `0 shims removed from 0
+        // repositories`, exit 0, while four shims sat untouched.
+        if !left.is_empty() {
+            println!();
+            println!("left alone (not ours):");
+            // `Refuse::explain` already names the path, and names it with the
+            // reason attached — which is the difference between "we skipped
+            // something" and "we skipped THIS, because THAT".
+            for (_, why) in &left {
+                println!("  {}", githooks_runtime::ui::sanitize(&why.explain()));
+            }
+        }
+        if !failed.is_empty() {
+            println!();
+            println!("FAILED to remove:");
+            for (path, e) in &failed {
+                println!(
+                    "  {}: {}",
+                    shown(path),
+                    githooks_runtime::ui::sanitize(&e.to_string())
+                );
+            }
+        }
         println!("hook.skip and githooks.severity were left alone.");
-        return ExitCode::SUCCESS;
+        // A shim that is still installed and still running, after the user
+        // asked for it to be gone, is not a success.
+        return if failed.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        };
     }
 
     if args.mode == Mode::Fix || args.mode == Mode::Install {
@@ -278,6 +332,7 @@ fn main() -> ExitCode {
                     &installed,
                     intent,
                     args.agents_md,
+                    args.remove_unrecognized,
                 )
             })
             .collect();
@@ -295,7 +350,7 @@ fn main() -> ExitCode {
                     serde_json::to_string_pretty(&reports).unwrap_or_default()
                 );
             } else {
-                report_apply(&reports);
+                report_apply(&reports, &plans);
             }
             let failed = reports
                 .iter()
@@ -342,6 +397,65 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// What `uninstall` did to one repository's hooks directory, in three lists.
+///
+/// Three lists because there are three outcomes and the old code had ONE:
+///
+/// ```text
+/// if ours && !is_tracked(&path) && std::fs::remove_file(&path).is_ok() { here += 1; }
+/// ```
+///
+/// "not ours", "tracked", and "the unlink failed" all fell out of that `&&`
+/// chain as the same silent skip. VERIFIED: with a read-only `.git/hooks`, this
+/// printed `0 shims removed from 0 repositories`, exited 0, and left all four
+/// shims installed and running — the repository was not even listed. A tool
+/// that reports success for work it did not do is worse than one that fails.
+///
+/// `left` is not a lesser outcome than `removed`. README promises that a hook
+/// somebody else wrote is never taken, so naming what was left is the tool
+/// keeping that promise out loud rather than quietly.
+struct RepoUninstall {
+    removed: Vec<PathBuf>,
+    left: Vec<(PathBuf, githooks_runtime::hookfile::Refuse)>,
+    failed: Vec<(PathBuf, std::io::Error)>,
+}
+
+/// Take our four dispatchers back out of one hooks directory.
+///
+/// `guard_remove(path, expect_ours = true)` decides and `remove_regular`
+/// performs, so ownership, tracked-ness, symlinks and file type are all
+/// answered by [`githooks_runtime::hookfile`] — the same module `install` and
+/// `apply` ask, rather than a fourth predicate that can disagree with them.
+/// `expect_ours` is the whole point here: `uninstall` removes only files
+/// carrying our marker, including a symlink refusal, because deleting a link
+/// and deleting the shim it points at are different acts and only one of them
+/// was asked for.
+fn uninstall_repo(hooks: &Path) -> RepoUninstall {
+    let mut out = RepoUninstall {
+        removed: Vec::new(),
+        left: Vec::new(),
+        failed: Vec::new(),
+    };
+    for name in githooks_runtime::install::DISPATCHERS {
+        let path = hooks.join(name);
+        // Nothing there is nothing to report: `uninstall` run twice must be
+        // quiet the second time, not four lines of "left alone".
+        if githooks_runtime::hookfile::classify(&path)
+            == githooks_runtime::hookfile::HookFile::Absent
+        {
+            continue;
+        }
+        match githooks_runtime::hookfile::guard_remove(&path, true) {
+            Err(refuse) => out.left.push((path, refuse)),
+            Ok(()) => match githooks_runtime::hookfile::remove_regular(&path) {
+                Ok(()) => out.removed.push(path),
+                Err(e) => out.failed.push((path, e)),
+            },
+        }
+    }
+    out
+}
+
 /// Every number carries its denominator. No bare adjectives.
 fn report(s: &scan::FleetScan, elapsed: std::time::Duration) {
     if s.looks_like_a_failed_scan() {
@@ -379,7 +493,7 @@ fn report(s: &scan::FleetScan, elapsed: std::time::Duration) {
     if !s.unreadable.is_empty() {
         println!("  {} unreadable:", s.unreadable.len());
         for p in s.unreadable.iter().take(5) {
-            println!("    {}", p.display());
+            println!("    {}", shown(p));
         }
     }
 }
@@ -395,17 +509,23 @@ fn report_fix(plans: &[fix::FixPlan]) {
         .collect();
 
     for p in &acting {
-        println!("{}", p.repo.display());
+        println!("{}", shown(&p.repo));
         for r in &p.remove {
-            println!("  rm    {}  ({:?})", r.path.display(), r.reason);
+            println!("  rm    {}  ({:?})", shown(&r.path), r.reason);
         }
         for w in p.write.iter().filter(|w| w.changes) {
-            println!("  write {}", w.path.display());
+            println!("  write {}", shown(&w.path));
         }
         if let Some(w) = &p.write_agents_md {
-            println!("  write {}", w.path.display());
+            println!("  write {}", shown(&w.path));
         }
     }
+
+    // Warnings are printed for EVERY plan, not only the acting ones. A repo
+    // whose sole finding is "there is a hook here we did not write" needs
+    // nothing done to it and so appears in none of the three buckets above —
+    // which is exactly the repo whose warning would otherwise never be seen.
+    report_warnings(plans);
 
     println!();
     println!(
@@ -428,10 +548,76 @@ fn report_fix(plans: &[fix::FixPlan]) {
     println!("  DRY RUN — nothing was written.");
 }
 
+/// Every repository we declined to act on, and why.
+///
+/// A refusal used to be reported as a bare count in the summary line. `1
+/// refused` cannot be acted on: it does not say which repository, and it does
+/// not distinguish "an application's data repo, correctly left alone" from
+/// "git will not talk to this checkout and one `git config` would fix it".
+fn report_refusals(plans: &[fix::FixPlan]) {
+    let refused: Vec<&fix::FixPlan> = plans.iter().filter(|p| p.refused()).collect();
+    if refused.is_empty() {
+        return;
+    }
+    // `Unmanaged` is the overwhelmingly common one and is not news — most of a
+    // machine's repositories are somebody else's. Listing ninety of those would
+    // bury the four that mean something.
+    let interesting: Vec<&fix::FixPlan> = refused
+        .iter()
+        .copied()
+        .filter(|p| p.refuse.iter().any(|r| *r != fix::Refusal::Unmanaged))
+        .collect();
+    if interesting.is_empty() {
+        return;
+    }
+    println!();
+    println!("REFUSED (nothing in these repositories was touched):");
+    for p in interesting {
+        println!("  {}", shown(&p.repo));
+        for r in p.refuse.iter().filter(|r| **r != fix::Refusal::Unmanaged) {
+            println!("    {}", githooks_runtime::ui::sanitize(&r.explain()));
+        }
+    }
+}
+
+/// Everything found but not acted on, named.
+///
+/// Its own block, and its own heading, because these are the two states this
+/// tool used to handle by SILENTLY DOING SOMETHING: deleting a hook somebody
+/// else wrote (reported only as a number in `repoC -1 +4`), and writing into a
+/// directory a scanned repository named. A count cannot say either of those; a
+/// path can.
+fn report_warnings(plans: &[fix::FixPlan]) {
+    report_refusals(plans);
+    let warned: Vec<&fix::FixPlan> = plans.iter().filter(|p| !p.warn.is_empty()).collect();
+    if warned.is_empty() {
+        return;
+    }
+    println!();
+    println!("LEFT ALONE (not ours — nothing here is deleted or written):");
+    for p in warned {
+        for w in &p.warn {
+            match w {
+                fix::Warning::UnrecognizedSubHook { path } => {
+                    println!("  {}  (a hook we did not write)", shown(path));
+                }
+                fix::Warning::HooksDirOutsideRepo { path } => {
+                    println!(
+                        "  {}  ({}: core.hooksPath points OUTSIDE the repository)",
+                        shown(path),
+                        shown(&p.repo)
+                    );
+                }
+            }
+        }
+    }
+    println!("  (pass --remove-unrecognized to delete the sub-hooks above)");
+}
+
 /// What actually happened. A failure is never folded into the same count as a
 /// success, and "refused" is reported separately from "unchanged" — they look
 /// identical in a total and mean opposite things.
-fn report_apply(reports: &[apply::ApplyReport]) {
+fn report_apply(reports: &[apply::ApplyReport], plans: &[fix::FixPlan]) {
     let mut applied = 0usize;
     let (mut removed, mut written, mut refused, mut unchanged) = (0usize, 0usize, 0usize, 0usize);
     for r in reports {
@@ -443,12 +629,16 @@ fn report_apply(reports: &[apply::ApplyReport]) {
                 applied += 1;
                 removed += rm;
                 written += wr;
-                println!("{}  -{rm} +{wr}", r.repo.display());
+                println!("{}  -{rm} +{wr}", shown(&r.repo));
             }
             apply::Outcome::Refused => refused += 1,
             apply::Outcome::Unchanged => unchanged += 1,
             apply::Outcome::Failed { error, at } => {
-                println!("{}  FAILED at {at}: {error}", r.repo.display());
+                println!(
+                    "{}  FAILED at {at}: {}",
+                    shown(&r.repo),
+                    githooks_runtime::ui::sanitize(error)
+                );
             }
         }
     }
@@ -456,6 +646,7 @@ fn report_apply(reports: &[apply::ApplyReport]) {
         .iter()
         .filter(|r| matches!(r.outcome, apply::Outcome::Failed { .. }))
         .count();
+    report_warnings(plans);
     println!();
     println!(
         "  {applied} of {} repositories changed · {refused} refused · {unchanged} already correct · {failed} failed",
@@ -479,6 +670,36 @@ mod tests {
         let a = parse(&["--depth".into(), "2".into(), "--json".into()], Some(home)).unwrap();
         assert_eq!(a.depth, 2);
         assert!(a.json);
+    }
+
+    /// Deleting hooks other people wrote is opt-in, and the flag's absence is
+    /// what makes it so. Asserted rather than assumed, because the default is
+    /// the whole fix.
+    #[test]
+    fn deleting_other_peoples_hooks_is_off_unless_asked_for() {
+        let home = Some(Path::new("/home/x"));
+        assert!(!parse(&[], home).unwrap().remove_unrecognized);
+        assert!(
+            !parse(&["fix".into(), "--apply".into()], home)
+                .unwrap()
+                .remove_unrecognized
+        );
+        assert!(
+            !parse(&["install".into()], home)
+                .unwrap()
+                .remove_unrecognized
+        );
+        assert!(
+            parse(&["fix".into(), "--remove-unrecognized".into()], home)
+                .unwrap()
+                .remove_unrecognized
+        );
+        // And the usage text has to say both halves out loud.
+        assert!(USAGE.contains("--remove-unrecognized"), "{USAGE}");
+        assert!(
+            USAGE.contains("never delete a hook they did not write"),
+            "{USAGE}"
+        );
     }
 
     #[test]

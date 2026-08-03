@@ -4,8 +4,13 @@ use super::common::run as run_tool;
 use super::common::{fail, first_existing, hl, ok, repo_root, staged_files, warn, which};
 use crate::check::Outcome;
 
+/// The extensions this check consumes. Exported so `registry.rs` declares the
+/// scope from the same constant — see `lint_json_yaml::EXTS` for the drift this
+/// prevents.
+pub const EXTS: &[&str] = &[".yaml", ".yml"];
+
 pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
-    let files = staged_files(&[".yaml", ".yml"]);
+    let files = staged_files(EXTS);
     if files.is_empty() {
         return Outcome::Passed;
     }
@@ -22,14 +27,19 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
     else {
         return Outcome::Passed;
     };
-    if which("yamllint").is_none() {
+    // The RESOLVED path, not the bare name, and not a second probe either.
+    // `Command::new` does no PATHEXT resolution, so a bare `yamllint` cannot
+    // execute `yamllint.exe`/`.cmd` on Windows — the spawn fails with "program
+    // not found" and a `Severity::Block` check reports an installed tool as
+    // broken. Same incident `common::program` documents for `npm.cmd`.
+    let Some(bin) = which("yamllint") else {
         warn(&format!(
             "This repo configures yamllint but it is not installed. Install {}",
             hl("yamllint")
         ));
         return Outcome::Unavailable;
     };
-    let argv = vec!["yamllint".to_string(), "-c".to_string(), config];
+    let argv = vec![bin, "-c".to_string(), config];
     // `--` before the file list: a staged file named e.g. `-x.yaml` would
     // otherwise be read as a flag by yamllint's own (argparse) parser.
     let mut with_files = vec!["--".to_string()];

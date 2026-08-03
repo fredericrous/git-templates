@@ -22,6 +22,7 @@ pub mod agents_md;
 pub mod check;
 pub mod dispatch;
 pub mod git;
+pub mod hookfile;
 pub mod hooks;
 pub mod install;
 pub mod json;
@@ -304,11 +305,16 @@ pub fn print_text(listings: &[CheckListing]) {
         // Where a check CAME FROM belongs next to its name, not appended
         // after a reason that is often empty. A reader scanning this list
         // wants to know which of these their repository added.
+        // A declared check's name and its reason both come from the
+        // repository's manifest, and `githooks list` is read at least as often
+        // as the trust prompt. Sanitised before padding, so the column width is
+        // computed on what is printed — see `ui::sanitize`.
+        let short_name = ui::sanitize(&l.short_name);
         let label = match l.source {
-            Source::Declared => format!("{} (declared)", l.short_name),
-            Source::Builtin => l.short_name.clone(),
+            Source::Declared => format!("{short_name} (declared)"),
+            Source::Builtin => short_name,
         };
-        println!("  {glyph} {label:<26} {}", l.reason);
+        println!("  {glyph} {label:<26} {}", ui::sanitize(&l.reason));
     }
     println!();
     println!("  ● runs here   ○ inert   ⊘ skipped via hook.skip   ✗ declaration unusable");
@@ -365,18 +371,16 @@ pub fn print_json(stage_filter: Option<check::Stage>, pushed: bool, listings: &[
 
 /// `git ls-files` — every check's default scope evaluation, unchanged from
 /// what `list_checks` always did.
+///
+/// Through `git::stdout_paths`, i.e. with `-z`. A raw `ls-files` QUOTES any
+/// path holding an unusual byte: `é.json` comes back as the nine-byte literal
+/// `"\303\251.json"`, which ends with a quote rather than an extension, so
+/// `Scope::matches` reports a check as irrelevant to a repository it plainly
+/// covers. Cosmetic here (this only decides what `list` prints) and not
+/// cosmetic in `dispatch::enter_all_files_mode`, which is the same bug — so
+/// both ask the same way.
 fn tracked_paths() -> Vec<String> {
-    Command::new("git")
-        .args(["ls-files"])
-        .output()
-        .ok()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
+    git::stdout_paths(&["ls-files"]).unwrap_or_default()
 }
 
 /// The pushed-range file list, computed standalone rather than from a real

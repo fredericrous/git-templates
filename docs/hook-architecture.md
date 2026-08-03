@@ -81,17 +81,39 @@ pub enum Outcome {
     Passed,
     Failed,       // ran, found a problem
     Warned,       // ran, found something non-blocking
+    Fixed,        // ran, found a problem, REPAIRED it
     Unavailable,  // COULD NOT RUN
 }
 ```
+
+There are FIVE. `Fixed` arrived with `Fix::Rewrite` (see
+`docs/index-fidelity-and-run-modes.md` §2): the check ran, found a problem, and
+repaired it, and the commit proceeds with the repair staged. That is neither
+`Passed` — something happened and the author's files changed, which they should
+be told — nor `Failed`, since nothing is blocking. Reachable only from a
+`Stage::PreCommit` declaration, which the compiler enforces: a `pre-push` hook
+must not modify the worktree or index, or the pushed commit would differ from
+the tree the developer is looking at.
 
 Shipped without the `detail` / `reason` payloads the sketch carried. Every check
 already prints its own diagnosis at the moment it has the context to phrase it;
 threading the same string back for the dispatcher to print again produced two
 messages about one problem. The variant is the whole signal.
 
-`Failed` is `Default`, so the slot of a check whose thread died reads as a
-failure rather than a pass.
+**`Failed` is NOT `Default` — there is no `Default`, deliberately.** It was
+`Failed`, to fill the slot of a check whose thread died, and `check.rs` records
+why that was removed:
+
+> Deliberately NO `Default`. It used to be `Failed`, to fill the slot of a check
+> whose thread died — a real rule, but `Default` means "the neutral value" to
+> every reader and to every `#[derive(Default)]` that might later contain one.
+> The rule is now written where it applies, in the runner.
+
+So the rule survives and only its location changed: `dispatch::run_stage` passes
+`Outcome::Failed` explicitly as the fill value, under a comment saying "a check
+whose thread died has not passed". Stated where the slot is filled, rather than
+hidden in a trait impl that any future `#[derive(Default)]` would silently
+inherit.
 
 `Unavailable` is the important addition. Today `ruff config found but no
 ruff/uvx binary` prints a warning and returns 0, which is indistinguishable
@@ -257,13 +279,21 @@ third-party command should not be able to delay `branch-protect`.
   run *here*. Externals are listed too, marked `(declared)`, and a line that
   could not be parsed gets its own glyph: correctly-inert, disabled, and
   unusable are three different things and none may look like another.
-- `githooks explain <check>` — why it did or did not fire, in this repo, now.
-  The answer to "why didn't prettier run" is currently a code-reading exercise.
 - Adding a built-in: one module plus one descriptor; the compiler names what is
   missing.
 - Adding an external: edit a committed file, no rebuild.
 - `githooks-fleet` gains third-party checks in its views, which it cannot see
   today at all.
+
+### Named future: `githooks explain <check>`
+
+Not built. It was in the list above, among shipped DX, which made "why didn't
+prettier run" look like a question the tool answers.
+
+Half of it exists: `githooks list` says whether a check would run HERE and why
+not — inert, skipped, or an unusable declaration, as three distinct glyphs. What
+is missing is the other half, the retrospective one: why a check did or did not
+fire on the commit you just made. Today that is a code-reading exercise.
 
 ## Migration
 

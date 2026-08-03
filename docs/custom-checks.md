@@ -189,9 +189,34 @@ git config hook.skip shellcheck                 # do not run it
 git config githooks.severity.shellcheck warn    # run it, do not let it block
 ```
 
-Prefer the second. `hook.skip` matches by substring — `hook.skip = e` disables
-every check — and it removes the signal along with the block. A downgrade keeps
-the check running and reporting.
+Both surfaces read the same three names, and **nothing matches by substring**:
+the full id (`pre-commit-shellcheck`), the short name (`shellcheck`, on either
+trigger), and the trigger (`pre-commit`, meaning all of them). Three exact
+comparisons, in `runtime::names_check` — `hook.skip = e` reaches nothing at all,
+and skipping `lint-js` leaves `lint-json-yaml` alone.
+
+> This paragraph used to claim the opposite — "`hook.skip` matches by substring
+> — `hook.skip = e` disables every check" — while README and
+> `docs/hook-skip-management.md` both stated the real rule on the same day. A
+> repository contradicting itself about which config lines disable your checks
+> is worse than either version being wrong alone, so the correction is recorded
+> rather than quietly applied. There is a test asserting that `hook.skip = e`
+> reaches nothing.
+
+**Prefer the severity downgrade anyway**, for a reason that survives the
+correction and is in fact the better one. The two do different things:
+
+| | runs | reports | blocks |
+|---|---|---|---|
+| `githooks.severity.<key> warn` | yes | yes | no |
+| `hook.skip <key>` | no | no (only that it was skipped) | no |
+
+A downgrade keeps the check working and keeps you looking at what it finds; you
+have decided the finding should not stop a commit, not that you no longer want
+to know. A skip removes the signal along with the block, so the problem it was
+watching for grows silently until somebody turns it back on. Reach for `skip`
+when a check is genuinely inapplicable to a repository, and for `severity` when
+it applies but should not be a gate.
 
 ## Seeing what you declared
 

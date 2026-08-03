@@ -78,7 +78,7 @@ pub const CHECKS: &[Builtin] = &[
         name: "pre-commit-argo-lint",
         stage: Stage::PreCommit,
         scope: Scope::new(
-            &[".yaml", ".yml"],
+            hooks::k8s::EXTS,
             &["kustomization.yaml", "kustomization.yml"],
         )
         .not_during(MID_OPERATION),
@@ -97,7 +97,7 @@ pub const CHECKS: &[Builtin] = &[
     Builtin {
         name: "pre-commit-cargo-fmt",
         stage: Stage::PreCommit,
-        scope: Scope::new(&[".rs"], &["Cargo.toml"]).not_during(MID_OPERATION),
+        scope: Scope::new(hooks::rust_tools::EXTS, &["Cargo.toml"]).not_during(MID_OPERATION),
         severity: Severity::Block,
         fix: Fix::Rewrite,
         run: |ctx| hooks::rust_tools::fmt(ctx.args),
@@ -105,7 +105,7 @@ pub const CHECKS: &[Builtin] = &[
     Builtin {
         name: "pre-commit-clippy",
         stage: Stage::PreCommit,
-        scope: Scope::new(&[".rs"], &["Cargo.toml"]).not_during(MID_OPERATION),
+        scope: Scope::new(hooks::rust_tools::EXTS, &["Cargo.toml"]).not_during(MID_OPERATION),
         severity: Severity::Block,
         fix: Fix::None,
         run: |ctx| hooks::rust_tools::clippy(ctx.args),
@@ -114,7 +114,7 @@ pub const CHECKS: &[Builtin] = &[
         name: "pre-commit-kube-linter",
         stage: Stage::PreCommit,
         scope: Scope::new(
-            &[".yaml", ".yml"],
+            hooks::k8s::EXTS,
             &[".kube-linter*.yaml", ".kube-linter*.yml"],
         )
         .not_during(MID_OPERATION),
@@ -126,7 +126,7 @@ pub const CHECKS: &[Builtin] = &[
         name: "pre-commit-kubeconform",
         stage: Stage::PreCommit,
         scope: Scope::new(
-            &[".yaml", ".yml"],
+            hooks::k8s::EXTS,
             &["kustomization.yaml", "kustomization.yml"],
         )
         .not_during(MID_OPERATION),
@@ -137,8 +137,7 @@ pub const CHECKS: &[Builtin] = &[
     Builtin {
         name: "pre-commit-lint-js",
         stage: Stage::PreCommit,
-        scope: Scope::new(&[".js", ".jsx", ".ts", ".tsx", ".vue"], &["package.json"])
-            .not_during(MID_OPERATION),
+        scope: Scope::new(hooks::lint_js::EXTS, &["package.json"]).not_during(MID_OPERATION),
         severity: Severity::Block,
         fix: Fix::None,
         run: |ctx| hooks::lint_js::run(ctx.args),
@@ -146,7 +145,7 @@ pub const CHECKS: &[Builtin] = &[
     Builtin {
         name: "pre-commit-lint-json-yaml",
         stage: Stage::PreCommit,
-        scope: Scope::files(&[".json", ".yaml", ".yml"]).not_during(MID_OPERATION),
+        scope: Scope::files(hooks::lint_json_yaml::EXTS).not_during(MID_OPERATION),
         severity: Severity::Block,
         fix: Fix::None,
         run: |ctx| hooks::lint_json_yaml::run(ctx.args),
@@ -190,7 +189,7 @@ pub const CHECKS: &[Builtin] = &[
         name: "pre-commit-pyright",
         stage: Stage::PreCommit,
         scope: Scope::new(
-            &[".py", ".pyi"],
+            hooks::python_tools::EXTS,
             &[
                 "pyrightconfig.json",
                 "pyrightconfig.jsonc",
@@ -206,7 +205,7 @@ pub const CHECKS: &[Builtin] = &[
         name: "pre-commit-ruff",
         stage: Stage::PreCommit,
         scope: Scope::new(
-            &[".py", ".pyi"],
+            hooks::python_tools::EXTS,
             &["ruff.toml", ".ruff.toml", "pyproject.toml"],
         )
         .not_during(MID_OPERATION),
@@ -226,7 +225,7 @@ pub const CHECKS: &[Builtin] = &[
         name: "pre-commit-yamllint",
         stage: Stage::PreCommit,
         scope: Scope::new(
-            &[".yaml", ".yml"],
+            hooks::yamllint::EXTS,
             &[".yamllint.yaml", ".yamllint.yml", ".yamllint"],
         )
         .not_during(MID_OPERATION),
@@ -249,7 +248,7 @@ pub const CHECKS: &[Builtin] = &[
         scope: Scope::ALWAYS,
         severity: Severity::Block,
         fix: Fix::None,
-        run: |ctx| hooks::branch_pattern::run(ctx.args),
+        run: |ctx| hooks::branch_pattern::run(ctx.push.get(), ctx.args),
     },
     Builtin {
         name: "pre-push-pull-rebase",
@@ -262,7 +261,7 @@ pub const CHECKS: &[Builtin] = &[
     Builtin {
         name: "pre-push-run-tests-js",
         stage: Stage::PrePush,
-        scope: Scope::new(&[".js", ".jsx", ".ts", ".tsx", ".vue"], &["package.json"])
+        scope: Scope::new(hooks::run_tests::JS_EXTS, &["package.json"])
             .not_during(&[GitState::Bisect, GitState::Rebase]),
         severity: Severity::Block,
         fix: Fix::None,
@@ -271,7 +270,7 @@ pub const CHECKS: &[Builtin] = &[
     Builtin {
         name: "pre-push-cargo-test",
         stage: Stage::PrePush,
-        scope: Scope::new(&[".rs"], &["Cargo.toml"])
+        scope: Scope::new(hooks::rust_tools::EXTS, &["Cargo.toml"])
             .not_during(&[GitState::Bisect, GitState::Rebase]),
         severity: Severity::Block,
         fix: Fix::None,
@@ -646,6 +645,199 @@ mod tests {
                 "pre-push-cargo-test",
             ]
         );
+    }
+
+    /// What a check actually looks at, as opposed to what it DECLARES.
+    ///
+    /// `All` is a check that reads every staged path regardless of the
+    /// extensions in its scope (ban-terms greps them all); `Exts(e)` is a check
+    /// that filters by suffix, and `e` is the list it filters WITH.
+    enum Consumes {
+        All,
+        Exts(&'static [&'static str]),
+    }
+
+    /// Every check, and the file set it consumes. The table exists so a NEW
+    /// check cannot be added without somebody stating the answer.
+    ///
+    /// The incident: `pre-commit-lint-json-yaml` declared
+    /// `[".json", ".yaml", ".yml"]` in the registry while `lint_json_yaml::run`
+    /// asked `staged_files` for `[".yaml"]`. `githooks list` reported the check
+    /// as covering `.yml`, the fleet dashboard agreed, and a staged, broken
+    /// `x.yml` returned `Outcome::Passed` with no output whatsoever. Nothing
+    /// connected the two lists, so nothing could notice.
+    ///
+    /// Each entry now names the module constant the check itself filters with,
+    /// which is the same constant the registry declares its scope from — so
+    /// this table cannot silently agree with a stale copy.
+    const CONSUMED: &[(&str, Consumes)] = &[
+        (
+            "pre-commit-argo-lint",
+            Consumes::Exts(crate::hooks::k8s::EXTS),
+        ),
+        // Declares JS extensions so the dashboard can say what it is FOR, but
+        // greps every staged path — a banned term in a `.md` is still a banned
+        // term. This is why the assertion below is a SUBSET check.
+        ("pre-commit-ban-terms", Consumes::All),
+        (
+            "pre-commit-cargo-fmt",
+            Consumes::Exts(crate::hooks::rust_tools::EXTS),
+        ),
+        (
+            "pre-commit-clippy",
+            Consumes::Exts(crate::hooks::rust_tools::RUST_PATHS),
+        ),
+        (
+            "pre-commit-kube-linter",
+            Consumes::Exts(crate::hooks::k8s::EXTS),
+        ),
+        (
+            "pre-commit-kubeconform",
+            Consumes::Exts(crate::hooks::k8s::EXTS),
+        ),
+        (
+            "pre-commit-lint-js",
+            Consumes::Exts(crate::hooks::lint_js::EXTS),
+        ),
+        (
+            "pre-commit-lint-json-yaml",
+            Consumes::Exts(crate::hooks::lint_json_yaml::EXTS),
+        ),
+        ("pre-commit-merge-conflict", Consumes::All),
+        ("pre-commit-package-lock", Consumes::All),
+        // Declares `files: &[]` — it is opt-in by CONFIG, not by file type —
+        // while consuming seventeen extensions. The other reason the assertion
+        // is a subset check rather than an equality.
+        (
+            "pre-commit-prettier",
+            Consumes::Exts(crate::hooks::prettier::EXTS),
+        ),
+        (
+            "pre-commit-pyright",
+            Consumes::Exts(crate::hooks::python_tools::EXTS),
+        ),
+        (
+            "pre-commit-ruff",
+            Consumes::Exts(crate::hooks::python_tools::EXTS),
+        ),
+        ("pre-commit-usual-name", Consumes::All),
+        (
+            "pre-commit-yamllint",
+            Consumes::Exts(crate::hooks::yamllint::EXTS),
+        ),
+        ("pre-push-branch-protect", Consumes::All),
+        ("pre-push-branch-pattern", Consumes::All),
+        ("pre-push-pull-rebase", Consumes::All),
+        (
+            "pre-push-run-tests-js",
+            Consumes::Exts(crate::hooks::run_tests::JS_EXTS),
+        ),
+        (
+            "pre-push-cargo-test",
+            Consumes::Exts(crate::hooks::rust_tools::RUST_PATHS),
+        ),
+    ];
+
+    /// A declared scope must never promise more than the check consumes.
+    ///
+    /// Two halves, and the first is the one that earns its keep: a check with a
+    /// non-empty `scope.files` that nobody has entered in `CONSUMED` fails the
+    /// build, so adding a check forces somebody to state what it actually
+    /// reads. The second half then pins that `scope.files ⊆ consumed`.
+    ///
+    /// SUBSET, not equality, deliberately: `ban-terms` declares JS extensions
+    /// and greps every staged path, and `prettier` declares `files: &[]` while
+    /// consuming seventeen extensions. Equality would forbid both.
+    #[test]
+    fn no_check_declares_a_file_type_it_does_not_consume() {
+        for (name, _) in CONSUMED {
+            assert!(
+                CHECKS.iter().any(|check| check.name == *name),
+                "CONSUMED names {name:?}, which is not a check"
+            );
+        }
+        for check in CHECKS {
+            let entry = CONSUMED.iter().find(|(name, _)| *name == check.name);
+            if check.scope.files.is_empty() && entry.is_none() {
+                continue;
+            }
+            let Some((_, consumes)) = entry else {
+                panic!(
+                    "{} declares scope.files {:?} but is missing from CONSUMED — \
+                     say what it actually reads",
+                    check.name, check.scope.files
+                );
+            };
+            let Consumes::Exts(consumed) = consumes else {
+                continue; // `All` consumes everything, so any declaration fits
+            };
+            for ext in check.scope.files {
+                assert!(
+                    consumed.contains(ext),
+                    "{} declares {ext:?} in its scope but never asks for it — \
+                     `githooks list` would report a coverage the check does not have",
+                    check.name
+                );
+            }
+        }
+    }
+
+    /// Which checks contain code that repairs and re-stages, stated by hand.
+    ///
+    /// `pre-commit-cargo-fmt` and `pre-commit-ruff` both declared
+    /// `Fix::Rewrite` with NO fixing code anywhere — only `prettier.rs` and
+    /// `manifest.rs` ever called `restage`/`fixing_enabled`. `githooks list
+    /// --json` reported `"fix":"rewrite"` for them regardless, and `agents_md`
+    /// explicitly directs agents to trust that JSON, so an agent would set
+    /// `githooks.fix true` and wait for a repair that could never arrive.
+    const HAS_FIXING_CODE: &[(&str, bool)] = &[
+        ("pre-commit-argo-lint", false),
+        ("pre-commit-ban-terms", false),
+        ("pre-commit-cargo-fmt", true),
+        ("pre-commit-clippy", false),
+        ("pre-commit-kube-linter", false),
+        ("pre-commit-kubeconform", false),
+        ("pre-commit-lint-js", false),
+        ("pre-commit-lint-json-yaml", false),
+        ("pre-commit-merge-conflict", false),
+        ("pre-commit-package-lock", false),
+        ("pre-commit-prettier", true),
+        ("pre-commit-pyright", false),
+        ("pre-commit-ruff", true),
+        ("pre-commit-usual-name", false),
+        ("pre-commit-yamllint", false),
+        ("pre-push-branch-protect", false),
+        ("pre-push-branch-pattern", false),
+        ("pre-push-pull-rebase", false),
+        ("pre-push-run-tests-js", false),
+        ("pre-push-cargo-test", false),
+    ];
+
+    /// A `Fix::Rewrite` declaration is a PROMISE, and the set of checks that
+    /// keep it must equal the set that make it.
+    #[test]
+    fn every_rewrite_declaration_has_a_fixer() {
+        let declared: BTreeSet<&str> = CHECKS
+            .iter()
+            .filter(|check| check.fix == super::Fix::Rewrite)
+            .map(|check| check.name)
+            .collect();
+        let implemented: BTreeSet<&str> = HAS_FIXING_CODE
+            .iter()
+            .filter(|(_, has)| *has)
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(
+            declared, implemented,
+            "a check declaring Fix::Rewrite with no fixer lies to `githooks list --json`, \
+             and a check with a fixer that does not declare it can never be reached"
+        );
+
+        // …and the table must cover every check, so a new one cannot be added
+        // without somebody answering the question.
+        let listed: BTreeSet<&str> = HAS_FIXING_CODE.iter().map(|(name, _)| *name).collect();
+        let all: BTreeSet<&str> = CHECKS.iter().map(|check| check.name).collect();
+        assert_eq!(listed, all, "HAS_FIXING_CODE does not cover CHECKS");
     }
 
     /// The reconciliation tests that used to live here are gone, and that is

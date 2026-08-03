@@ -11,10 +11,39 @@
 //! anything it cannot positively establish, and a refusal suppresses the whole
 //! repo rather than the individual file — a half-applied fix is how a repo ends
 //! up with both `pre-commit-ruff.zsh` and `pre-commit-ruff`, running ruff twice.
+//!
+//! ## Where "is this ours, and may we touch it?" is answered
+//!
+//! Not here. [`githooks_runtime::hookfile`] owns every one of those questions —
+//! ownership, tracked-ness, symlinks, file type — and this module only turns its
+//! answers into refusals.
+//!
+//! That module exists because this one used to answer them itself, and got both
+//! halves wrong in the same three lines:
+//!
+//! ```text
+//! Command::new("git").args(["ls-files", "--error-unmatch"]).arg(path)   // ABSOLUTE path
+//!     .current_dir(dir).output().map(|o| o.status.success()).unwrap_or(false)
+//! ```
+//!
+//! - git normalises a pathspec LEXICALLY but resolves its working directory
+//!   PHYSICALLY, so handing it the absolute `<repo>/.git/hooks/pre-commit` when
+//!   `.git/hooks` is a symlink into the working tree returns `exit 1, pathspec
+//!   did not match` — "untracked" — for a file git plainly tracks. That is the
+//!   exact shape of both incidents this guard was written for.
+//! - `.map(|o| o.status.success()).unwrap_or(false)` collapsed a spawn failure,
+//!   a `fatal: detected dubious ownership` (every repo owned by another uid,
+//!   which is every repo inside a container bind mount) and a permissions error
+//!   into the same "untracked" — the opposite of the rule this module's own doc
+//!   states two paragraphs up.
+//!
+//! `hookfile::tracked` asks with the BASENAME from `-C <parent>` and answers
+//! tri-state, so "could not tell" is its own refusal ([`Refusal::TrackedUnknown`])
+//! rather than a clean "no".
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
+use githooks_runtime::hookfile::Tracked;
 use serde::Serialize;
 
 use crate::scan::{AgentsMdState, Repo};
@@ -33,6 +62,20 @@ pub enum Refusal {
     /// git tracks this path. An install step must never delete tracked source,
     /// whatever the path resolution says.
     Tracked { path: PathBuf },
+    /// git could not say whether it tracks this path. Suppresses the whole repo
+    /// exactly as [`Refusal::Tracked`] does, and deliberately so: "we could not
+    /// tell whether this file is somebody's tracked source" is precisely the
+    /// ignorance the two overwrite incidents were made of, and the predicate
+    /// that used to live here answered it "no".
+    ///
+    /// The common cause is `fatal: detected dubious ownership in repository`,
+    /// which git emits on EVERY call for a repository owned by another uid — so
+    /// this is not an exotic state, it is the steady state inside a container
+    /// bind mount. `why` carries git's own first line, and the rendered message
+    /// names `git config --global --add safe.directory <path>`, because a
+    /// refusal that does not say what to do next is indistinguishable from a
+    /// bug.
+    TrackedUnknown { path: PathBuf, why: String },
     /// A dispatcher file exists here and is not one of ours — somebody wrote
     /// their own `pre-commit`. Activating would overwrite it.
     ///
@@ -45,6 +88,70 @@ pub enum Refusal {
     /// this file is SUPPOSED to be tracked, so a malformed block is its own
     /// refusal rather than a false positive on that guard.
     AgentsMdMalformed { path: PathBuf },
+    /// The binary path is not one a shim will accept. The shim resolves a
+    /// relative path against the WORKING TREE, so baking one across a fleet
+    /// would hand every repository the chance to answer for its own hooks.
+    UnbakeableBinary { binary: String },
+    /// This repository's hooks resolve to a directory outside it.
+    ///
+    /// `core.hooksPath` may be an absolute path anywhere on the disk, and
+    /// `Intent::Activate` used to `create_dir_all` it and write four 0o755 files
+    /// into it — so a scanned repository could name `/etc/githooks`, or another
+    /// checkout's working tree, and a fleet-wide `install` would oblige. See
+    /// [`crate::scan::HooksDir`] for why the per-repo installer keeps honouring
+    /// the same setting that this refuses.
+    HooksDirOutsideRepo { path: PathBuf },
+    /// git would not say where this repository's hooks live. The old code
+    /// answered that question with `repo.join(".git/hooks")`, which is a guess
+    /// everywhere and a WRONG guess for a repository whose `.git` is a file.
+    HooksDirUnknown { why: String },
+}
+
+impl Refusal {
+    /// One line, naming what stopped us and — where there is one — the command
+    /// that resolves it.
+    ///
+    /// This exists because a refusal used to be reported as a NUMBER. `1
+    /// refused` in a fleet-wide summary is indistinguishable from a bug: the
+    /// reader cannot tell an application data repository we correctly declined
+    /// from a repository we could not read because git will not talk to it. The
+    /// `TrackedUnknown` case is the sharpest — its fix is one `git config` away
+    /// and the old output did not even say which repository was affected.
+    pub fn explain(&self) -> String {
+        match self {
+            Refusal::Unmanaged => "no shim of ours here — not adopting it".to_string(),
+            Refusal::UnreadableHooks => "the hooks directory could not be read".to_string(),
+            Refusal::Tracked { path } => format!(
+                "{} is TRACKED by git — that is somebody's source, not our hook",
+                path.display()
+            ),
+            Refusal::TrackedUnknown { path, why } => format!(
+                "cannot tell whether {} is tracked ({why})\n      \
+                 If this is a repository you own: \
+                 git config --global --add safe.directory {}",
+                path.display(),
+                path.parent().unwrap_or(path).display()
+            ),
+            Refusal::ForeignHook { names } => format!(
+                "{} was written by somebody else — activating would overwrite it",
+                names.join(", ")
+            ),
+            Refusal::AgentsMdMalformed { path } => {
+                format!("{} carries an unpaired marker", path.display())
+            }
+            Refusal::UnbakeableBinary { binary } => {
+                format!("{binary} is not a path a shim will accept")
+            }
+            Refusal::HooksDirOutsideRepo { path } => format!(
+                "core.hooksPath resolves to {}, OUTSIDE the repository — \
+                 not creating or writing there",
+                path.display()
+            ),
+            Refusal::HooksDirUnknown { why } => {
+                format!("git would not say where the hooks are ({why})")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -55,6 +162,9 @@ pub enum RemovalReason {
     StaleOurs,
     /// A hand-written sub-hook. Nothing dispatches these since the move
     /// in-process, so it looks installed and never runs.
+    ///
+    /// Only ever produced under `--remove-unrecognized`. By default these are
+    /// [`Warning::UnrecognizedSubHook`] and are left exactly where they are.
     ForeignSubHook,
     /// The node-era `package.json` that forced CommonJS. No hook is node now.
     VestigialPackageJson,
@@ -91,10 +201,65 @@ pub struct WriteAgentsMd {
     pub changes: bool,
 }
 
+/// Something the reader must be told that does NOT stop the repair.
+///
+/// A second channel next to `refuse`, and the separation is the point. A
+/// refusal suppresses the whole repository, which is right when we cannot
+/// establish that acting is safe and wrong when we simply found something worth
+/// mentioning: a stranger's `pre-push-mine.sh` sitting in `.git/hooks` must not
+/// block repairing four broken dispatchers in the same directory. Folding the
+/// two together forces a choice between "say nothing" and "do nothing", and
+/// this tool has been on both sides of that choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "warning", rename_all = "snake_case")]
+pub enum Warning {
+    /// A `pre-commit-*` / `pre-push-*` file in `.git/hooks` that we did not
+    /// write. Nothing dispatches these since the checks moved in-process, so it
+    /// looks installed and never runs — worth saying, and NOT ours to delete.
+    ///
+    /// It was deleted, by default, in repositories this tool had never touched,
+    /// with no confirmation, and reported only as a number in `repoC -1 +4`. A
+    /// hand-written `pre-commit-secrets-scan` went that way in the reproduction.
+    /// README.md has stated the opposite posture the whole time: "a hook you
+    /// wrote yourself is left alone."
+    ///
+    /// The removal was never a decision. `scripts/propagate.sh` (see
+    /// `git show 90b0d30^:scripts/propagate.sh`, around lines 82-87) did
+    /// `rm -f "$hooks"/pre-commit-* "$hooks"/pre-push-*` as a ONE-TIME migration
+    /// sweep when the 16 per-check shims retired in `81cdf9d` — a glob that
+    /// could not tell our retired shims from anybody else's files, run once,
+    /// deliberately. `fix.rs` inherited it wholesale as standing behaviour and
+    /// `tests/parity.rs` then pinned it as golden, which is how a migration
+    /// one-liner became a promise the tool kept making to every repository it
+    /// ever scanned.
+    UnrecognizedSubHook { path: PathBuf },
+    /// The repository's hooks resolve outside the repository itself.
+    ///
+    /// Also present in `refuse`, as the only condition that appears on both
+    /// channels. The two say different things to different readers: the warning
+    /// NAMES the directory in the fix/install report and in the dashboard, so
+    /// somebody can go and look at what their `core.hooksPath` is pointing at,
+    /// while the refusal is what stops `apply` writing there. Dropping either
+    /// one loses something — the refusal alone is silent about where, the
+    /// warning alone would not suppress the write.
+    HooksDirOutsideRepo { path: PathBuf },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FixPlan {
     pub repo: PathBuf,
+    /// Absolute path to the repository, carried so `apply` can RE-RESOLVE what
+    /// this plan resolved rather than trusting a field that was computed before
+    /// the user was even shown a preview.
+    pub repo_abs: PathBuf,
+    /// Repair or activate. Carried for the same reason: `apply` re-verifies the
+    /// refusals that depend on it, and re-deriving intent from the shape of the
+    /// plan would be guessing at the caller's decision.
+    pub intent: Intent,
+    /// Where this plan resolved the hooks to. `apply` re-resolves and compares.
+    pub hooks: crate::scan::HooksDir,
     pub refuse: Vec<Refusal>,
+    pub warn: Vec<Warning>,
     pub remove: Vec<Removal>,
     pub write: Vec<WriteShim>,
     pub write_agents_md: Option<WriteAgentsMd>,
@@ -103,6 +268,10 @@ pub struct FixPlan {
 impl FixPlan {
     /// A plan that would change nothing. Applying twice must produce one of
     /// these the second time.
+    ///
+    /// Warnings do not count. A repository whose only finding is "there is a
+    /// hook here we did not write" needs nothing done to it, and reporting it as
+    /// a pending change every run would train the reader to ignore the number.
     pub fn is_noop(&self) -> bool {
         self.remove.is_empty()
             && self.write.iter().all(|w| !w.changes)
@@ -113,23 +282,41 @@ impl FixPlan {
     }
 }
 
-/// Does git track this path? Consulted before any removal.
+/// git's answer about one path, as the refusal it implies — or `None` when git
+/// said a clean "not tracked" and there is nothing to refuse.
 ///
 /// Files under `.git/hooks` are never tracked, so in the normal case this is
 /// pure defence. It exists because the normal case is not the one that broke:
 /// `~/.config/git/git-templates` is a SYMLINK to a checkout, and an install
 /// step that resolved through it deleted tracked templates twice.
-pub fn is_tracked(path: &Path) -> bool {
-    let Some(dir) = path.parent() else {
-        return false;
-    };
-    Command::new("git")
-        .args(["ls-files", "--error-unmatch"])
-        .arg(path)
-        .current_dir(dir)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+///
+/// The question itself is [`githooks_runtime::hookfile::tracked`]'s to answer;
+/// see this module's doc for the two ways the version that used to live here
+/// failed open.
+pub fn tracked_refusal(path: &Path) -> Option<Refusal> {
+    match githooks_runtime::hookfile::tracked(path) {
+        Tracked::No => None,
+        Tracked::Yes => Some(Refusal::Tracked {
+            path: path.to_path_buf(),
+        }),
+        Tracked::Unknown { why } => Some(Refusal::TrackedUnknown {
+            path: path.to_path_buf(),
+            why,
+        }),
+    }
+}
+
+/// Is this dispatcher path one activation may claim — nothing there, or already
+/// one of ours?
+///
+/// Every other answer (a stranger's hook, a compiled binary, a symlink, a
+/// directory, an unreadable file) is a repository we do not activate. Shared
+/// with `apply`, which asks the same question again at the moment of writing.
+pub fn is_absent_or_ours(path: &Path) -> bool {
+    matches!(
+        githooks_runtime::hookfile::classify(path),
+        githooks_runtime::hookfile::HookFile::Absent | githooks_runtime::hookfile::HookFile::Ours
+    )
 }
 
 /// Why we are planning: repairing an installation, or making one.
@@ -137,32 +324,77 @@ pub fn is_tracked(path: &Path) -> bool {
 /// The difference is exactly one refusal. `fix` declines an unmanaged
 /// repository because there is nothing there to repair and writing into one
 /// would be a decision it was not asked to make. `install` IS that decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Intent {
     Repair,
     Activate,
 }
 
+/// What it would take to bring `repo` back to the shipped state.
+///
+/// `remove_unrecognized` promotes every [`Warning::UnrecognizedSubHook`] back
+/// into a [`Removal`] — the pre-`--remove-unrecognized` behaviour, now opt-in.
+/// See that variant for what it deletes and why it used to be the default.
 pub fn plan(
     repo: &Repo,
     repo_abs: &Path,
     binary: &str,
     intent: Intent,
     agents_md: bool,
+    remove_unrecognized: bool,
 ) -> FixPlan {
-    let hooks = crate::scan::hooks_dir_for(repo_abs);
+    let hooks_dir = crate::scan::hooks_dir_for(repo_abs);
     let mut p = FixPlan {
         repo: repo.path.clone(),
+        repo_abs: repo_abs.to_path_buf(),
+        intent,
+        hooks: hooks_dir.clone(),
         refuse: Vec::new(),
+        warn: Vec::new(),
         remove: Vec::new(),
         write: Vec::new(),
         write_agents_md: None,
     };
 
+    // Before anything else: a path the shim will not accept must not be baked
+    // into one repository, let alone a fleet of them.
+    if !githooks_runtime::install::is_bakeable(binary) {
+        p.refuse.push(Refusal::UnbakeableBinary {
+            binary: binary.to_string(),
+        });
+        return p;
+    }
+    // A repository whose hooks another one in this scan already owns gets an
+    // empty plan — not a refusal, because nothing is wrong: a linked worktree
+    // and its main repo are one hooks directory wearing two paths. Writing the
+    // four shims through both would write the same file twice and report it as
+    // eight, which is the shape of the `192 removals across 96 repos` number
+    // that started this whole exercise.
+    if repo.shares_hooks_with.is_some() {
+        return p;
+    }
     if !repo.managed && intent == Intent::Repair {
         p.refuse.push(Refusal::Unmanaged);
         return p;
     }
+    // Containment BEFORE creation. `Intent::Activate` used to `create_dir_all`
+    // whatever `core.hooksPath` named, which is how a fleet-wide install could
+    // create and populate a directory a scanned repository chose.
+    let hooks = match &hooks_dir {
+        crate::scan::HooksDir::In { path } => path.clone(),
+        crate::scan::HooksDir::Outside { path } => {
+            p.warn
+                .push(Warning::HooksDirOutsideRepo { path: path.clone() });
+            p.refuse
+                .push(Refusal::HooksDirOutsideRepo { path: path.clone() });
+            return p;
+        }
+        crate::scan::HooksDir::Unknown { why } => {
+            p.refuse.push(Refusal::HooksDirUnknown { why: why.clone() });
+            return p;
+        }
+    };
     // Activating creates the directory; repairing does not, because a missing
     // `.git/hooks` in a repo we thought was managed is a fact worth reporting
     // rather than papering over.
@@ -180,11 +412,20 @@ pub fn plan(
             reason: RemovalReason::StaleOurs,
         });
     }
+    // NOT a removal by default. These files are not ours; see
+    // `Warning::UnrecognizedSubHook`. A warning does not suppress the repo
+    // either — a stranger's `pre-push-mine.sh` must not block repairing four
+    // broken dispatchers sitting in the same directory.
     for name in &repo.foreign_subs {
-        p.remove.push(Removal {
-            path: hooks.join(name),
-            reason: RemovalReason::ForeignSubHook,
-        });
+        let path = hooks.join(name);
+        if remove_unrecognized {
+            p.remove.push(Removal {
+                path,
+                reason: RemovalReason::ForeignSubHook,
+            });
+        } else {
+            p.warn.push(Warning::UnrecognizedSubHook { path });
+        }
     }
     if repo.hook_pkgjson {
         p.remove.push(Removal {
@@ -196,14 +437,17 @@ pub fn plan(
 
     // Only when activating: repairing a managed repo means its dispatchers are
     // already ours, and a drifted one is a repair rather than a stranger.
+    //
+    // Asked through `hookfile::classify`, which does not follow links and does
+    // not need the file to be UTF-8. The predicate here used to be
+    // `read_to_string(..).map(|t| !is_our_shim(&t)).unwrap_or(false)` — so a
+    // compiled hook (`Err(InvalidData)`) and a symlink to a tracked file (the
+    // target's bytes) both came back "not foreign", and activation wrote over
+    // them.
     if intent == Intent::Activate {
         let foreign: Vec<String> = DISPATCHERS
             .into_iter()
-            .filter(|name| {
-                std::fs::read_to_string(hooks.join(name))
-                    .map(|text| !githooks_runtime::install::is_our_shim(&text))
-                    .unwrap_or(false)
-            })
+            .filter(|name| !is_absent_or_ours(&hooks.join(name)))
             .map(str::to_owned)
             .collect();
         if !foreign.is_empty() {
@@ -225,18 +469,18 @@ pub fn plan(
         });
     }
 
-    // Fail closed: one tracked path suppresses the WHOLE repo, because a
-    // partially applied plan is how a repo ends up running a check twice.
-    let tracked: Vec<PathBuf> = p
+    // Fail closed: one tracked path — or one path git would not answer about —
+    // suppresses the WHOLE repo, because a partially applied plan is how a repo
+    // ends up running a check twice.
+    let refusals: Vec<Refusal> = p
         .remove
         .iter()
-        .map(|r| r.path.clone())
-        .chain(p.write.iter().map(|w| w.path.clone()))
-        .filter(|path| is_tracked(path))
+        .map(|r| &r.path)
+        .chain(p.write.iter().map(|w| &w.path))
+        .filter_map(|path| tracked_refusal(path))
         .collect();
-    if !tracked.is_empty() {
-        p.refuse
-            .extend(tracked.into_iter().map(|path| Refusal::Tracked { path }));
+    if !refusals.is_empty() {
+        p.refuse.extend(refusals);
         p.remove.clear();
         p.write.clear();
     }
@@ -287,6 +531,10 @@ mod tests {
             declared: Vec::new(),
             trusted: None,
             agents_md: AgentsMdState::Missing,
+            hooks_dir: crate::scan::HooksDir::In {
+                path: std::path::PathBuf::from(".git/hooks"),
+            },
+            shares_hooks_with: None,
         }
     }
 
@@ -298,6 +546,7 @@ mod tests {
             "/bin/gh",
             Intent::Repair,
             false,
+            false,
         );
         assert_eq!(p.refuse, vec![Refusal::Unmanaged]);
         assert!(
@@ -306,16 +555,43 @@ mod tests {
         );
     }
 
+    /// A repository whose `.git` is there but whose hooks directory is not.
+    /// `Repair` does not create it — a missing `.git/hooks` in a repo we thought
+    /// was managed is a fact worth reporting rather than papering over.
     #[test]
     fn a_missing_hooks_dir_is_refused() {
+        let dir = std::env::temp_dir().join(format!("fixplan-nohooks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        let p = plan(&repo(true), &dir, "/bin/gh", Intent::Repair, false, false);
+        assert_eq!(p.refuse, vec![Refusal::UnreadableHooks]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CHANGED ON PURPOSE. This case — a repository path that is not there at
+    /// all — used to fall out as `UnreadableHooks`, because `hooks_dir_for`
+    /// answered every failure with the guess `repo.join(".git/hooks")` and the
+    /// guess then failed an `is_dir()`. The right refusal for it, and the reason
+    /// `HooksDirUnknown` exists, is that we do not know where this repository's
+    /// hooks are: for a repo whose `.git` is a FILE, the old guess was not a
+    /// conservative default but a wrong answer, and `UnreadableHooks` reported
+    /// it as if we had looked.
+    #[test]
+    fn a_repo_git_cannot_reach_at_all_refuses_as_unknown() {
         let p = plan(
             &repo(true),
             Path::new("/definitely/not/here"),
             "/bin/gh",
             Intent::Repair,
             false,
+            false,
         );
-        assert_eq!(p.refuse, vec![Refusal::UnreadableHooks]);
+        assert!(
+            matches!(p.refuse.as_slice(), [Refusal::HooksDirUnknown { why }] if !why.is_empty()),
+            "{:?}",
+            p.refuse
+        );
+        assert!(p.remove.is_empty() && p.write.is_empty());
     }
 
     #[test]
@@ -330,18 +606,60 @@ mod tests {
         r.foreign_subs = vec!["pre-push-mine.sh".into()];
         r.hook_pkgjson = true;
 
-        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false);
-        assert_eq!(p.remove.len(), 3);
+        // CHANGED ON PURPOSE: `pre-push-mine.sh` used to be a third REMOVAL
+        // here, `ForeignSubHook`. It is not ours, so by default it is now a
+        // warning and stays where it is; the flag is what puts it back on the
+        // removal list. See `Warning::UnrecognizedSubHook` for the evidence.
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, false);
+        assert_eq!(p.remove.len(), 2, "{:?}", p.remove);
         let reasons: Vec<_> = p.remove.iter().map(|r| r.reason).collect();
         assert!(reasons.contains(&RemovalReason::StaleOurs));
-        assert!(reasons.contains(&RemovalReason::ForeignSubHook));
         assert!(reasons.contains(&RemovalReason::VestigialPackageJson));
+        assert!(!reasons.contains(&RemovalReason::ForeignSubHook));
+        assert_eq!(
+            p.warn,
+            vec![Warning::UnrecognizedSubHook {
+                path: hooks.join("pre-push-mine.sh")
+            }],
+            "and it must be NAMED, not silently skipped"
+        );
         assert_eq!(
             p.write.len(),
             4,
             "all four are written, as propagate.sh does"
         );
         assert!(p.write.iter().all(|w| w.changes), "none exist yet");
+
+        // The opt-in restores exactly the third removal, and drops the warning.
+        let opted_in = plan(&r, &dir, "/bin/gh", Intent::Repair, false, true);
+        assert_eq!(opted_in.remove.len(), 3, "{:?}", opted_in.remove);
+        assert!(opted_in
+            .remove
+            .iter()
+            .any(|r| r.reason == RemovalReason::ForeignSubHook));
+        assert!(opted_in.warn.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A hook somebody else wrote must not stop us repairing the four
+    /// dispatchers sitting next to it. That is the difference between the `warn`
+    /// channel and the `refuse` one, and folding them together would force a
+    /// choice between "say nothing" and "do nothing".
+    #[test]
+    fn a_stranger_s_hook_warns_without_suppressing_the_repair() {
+        let dir = std::env::temp_dir().join(format!("fixplan-warn-{}", std::process::id()));
+        let hooks = dir.join(".git/hooks");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&hooks).unwrap();
+
+        let mut r = repo(true);
+        r.foreign_subs = vec!["pre-push-mine.sh".into()];
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, false);
+
+        assert!(!p.refused(), "{:?}", p.refuse);
+        assert_eq!(p.write.len(), 4, "all four dispatchers still planned");
+        assert!(p.remove.is_empty());
+        assert_eq!(p.warn.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -356,7 +674,7 @@ mod tests {
         for n in DISPATCHERS {
             std::fs::write(hooks.join(n), shim::render("/bin/gh")).unwrap();
         }
-        let p = plan(&repo(true), &dir, "/bin/gh", Intent::Repair, false);
+        let p = plan(&repo(true), &dir, "/bin/gh", Intent::Repair, false, false);
         assert!(p.is_noop(), "{p:?}");
         assert_eq!(p.write.len(), 4);
         let _ = std::fs::remove_dir_all(&dir);
@@ -381,7 +699,7 @@ mod tests {
         let dir = healthy_repo_dir("optout");
         let mut r = repo(true);
         r.agents_md = AgentsMdState::Missing;
-        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false);
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, false);
         assert!(p.write_agents_md.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -392,7 +710,7 @@ mod tests {
             let dir = healthy_repo_dir("plan");
             let mut r = repo(true);
             r.agents_md = state;
-            let p = plan(&r, &dir, "/bin/gh", Intent::Repair, true);
+            let p = plan(&r, &dir, "/bin/gh", Intent::Repair, true, false);
             assert!(!p.is_noop(), "{p:?}");
             let w = p.write_agents_md.expect("must plan a write");
             assert!(w.changes);
@@ -406,7 +724,7 @@ mod tests {
         let dir = healthy_repo_dir("uptodate");
         let mut r = repo(true);
         r.agents_md = AgentsMdState::UpToDate;
-        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, true);
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, true, false);
         assert!(p.write_agents_md.is_none());
         assert!(p.is_noop(), "{p:?}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -417,7 +735,7 @@ mod tests {
         let dir = healthy_repo_dir("malformed");
         let mut r = repo(true);
         r.agents_md = AgentsMdState::Malformed;
-        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, true);
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, true, false);
         assert_eq!(
             p.refuse,
             vec![Refusal::AgentsMdMalformed {
@@ -428,16 +746,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The predicate that keeps the apply path away from tracked source. Proven
+    /// The guard that keeps the apply path away from tracked source. Proven
     /// against a real repository rather than mocked, because the whole point is
     /// that it agrees with git.
+    ///
+    /// It used to assert a BOOLEAN predicate, `fix::is_tracked`, which this
+    /// replaces. Two things were wrong with that predicate and neither was
+    /// visible from a test shaped like this one, which is why the assertions
+    /// now go through `hookfile::tracked`: it asked with the ABSOLUTE path
+    /// (wrong answer whenever `.git/hooks` is a symlink into the working tree —
+    /// the setup at the centre of both incidents), and it turned every git
+    /// failure into "untracked". See this module's doc.
     #[test]
-    fn is_tracked_agrees_with_git() {
+    fn a_tracked_path_refuses_and_an_untracked_one_does_not() {
         let dir = std::env::temp_dir().join(format!("fixplan-tracked-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
-            Command::new("git")
+            std::process::Command::new("git")
                 .args(args)
                 .current_dir(&dir)
                 .output()
@@ -451,9 +777,14 @@ mod tests {
         git(&["add", "tracked.txt"]);
         git(&["commit", "-q", "--no-verify", "-m", "chore: seed"]);
 
-        assert!(is_tracked(&dir.join("tracked.txt")));
-        assert!(!is_tracked(&dir.join("untracked.txt")));
-        assert!(!is_tracked(&dir.join("does-not-exist.txt")));
+        assert_eq!(
+            tracked_refusal(&dir.join("tracked.txt")),
+            Some(Refusal::Tracked {
+                path: dir.join("tracked.txt")
+            })
+        );
+        assert_eq!(tracked_refusal(&dir.join("untracked.txt")), None);
+        assert_eq!(tracked_refusal(&dir.join("does-not-exist.txt")), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -468,7 +799,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
-            Command::new("git")
+            std::process::Command::new("git")
                 .args(args)
                 .current_dir(&dir)
                 .output()
@@ -486,7 +817,7 @@ mod tests {
 
         let mut r = repo(true);
         r.stale_ours = vec!["pre-commit-ruff".into()];
-        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false);
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, false);
 
         assert!(!p.refused(), "{:?}", p.refuse);
         assert_eq!(

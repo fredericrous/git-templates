@@ -128,6 +128,21 @@ pub struct Repo {
     /// Whether `AGENTS.md` carries an up-to-date pointer at this check's own
     /// generated block, and if not, why.
     pub agents_md: AgentsMdState,
+    /// Where this repo's hooks resolve to, and whether that is inside it.
+    pub hooks_dir: HooksDir,
+    /// Set when another repository already seen in this scan shares this one's
+    /// hooks directory, naming that repository.
+    ///
+    /// Recognising `.git` FILES created this problem the same day it fixed the
+    /// bigger one: a submodule and a linked worktree keep their hooks in the
+    /// superproject/main repo, so one hooks directory became reachable from two
+    /// entries in `repos`. Without this, `fix --apply` would write the same four
+    /// files twice and count them twice, and the dashboard would report a repo
+    /// as needing an install it had already received through its sibling.
+    ///
+    /// The first repository encountered in the walk's (stable, sorted) order
+    /// owns the directory; every later one points at it.
+    pub shares_hooks_with: Option<PathBuf>,
 }
 
 /// A local wrapper around `githooks_runtime::agents_md::CheckResult`: that
@@ -167,6 +182,11 @@ pub struct FleetScan {
     /// Paths that exist but could not be read. Never silently dropped: an
     /// unreadable repo is not an absent one.
     pub unreadable: Vec<PathBuf>,
+    /// Repositories whose hooks resolve somewhere this tool will not touch —
+    /// outside the repository, or nowhere git would name. Counted rather than
+    /// merely listed per-repo, because the number that matters to a reader is
+    /// "how much of this fleet did I decline to act on".
+    pub hooks_outside_seen: usize,
     pub excluded_dirs: usize,
     pub dirs_visited: usize,
     pub repos: Vec<Repo>,
@@ -181,61 +201,210 @@ impl FleetScan {
     }
 }
 
-/// A file is ours only if it dispatches to the binary. Anything else in
-/// `.git/hooks` is somebody's own hook and is never counted as ours.
+/// A file is ours only if it carries our shim marker AND is an ordinary file we
+/// could actually read.
 ///
-/// Asked once, via `install::is_our_shim` — the SHIM_MARKER check — rather
-/// than re-tested here with a bespoke substring match. This answer feeds
-/// `stale_ours`, which `fix::plan` turns straight into a removal list: the
-/// old body was `s.contains("--hooks-dir")`, matched by a hand-written hook
-/// that merely mentions the flag in a comment or forwards it to another
-/// tool, which `install::is_our_shim` would have refused to touch.
+/// Asked once, via [`githooks_runtime::hookfile::classify`], rather than
+/// re-tested here. This answer feeds `stale_ours`, which `fix::plan` turns
+/// straight into a REMOVAL list, and `is_managed`, which decides whether the
+/// tool will act on a repository at all — so both halves of a wrong answer are
+/// expensive:
+///
+/// - The body was once `s.contains("--hooks-dir")`, matched by a hand-written
+///   hook that merely mentions the flag in a comment or forwards it to another
+///   tool. That claimed somebody else's file as ours to delete.
+/// - Then it was `read_to_string(..).map(is_our_shim).unwrap_or(false)`, which
+///   FOLLOWS SYMLINKS: a dispatcher that is a link to a shim in the working tree
+///   read as ours, so the repo counted as managed and `fix --apply` wrote
+///   through the link. `hookfile::classify` reports the link as a link.
 fn is_ours(path: &Path) -> bool {
-    std::fs::read_to_string(path)
-        .map(|s| githooks_runtime::install::is_our_shim(&s))
-        .unwrap_or(false)
+    matches!(
+        githooks_runtime::hookfile::classify(path),
+        githooks_runtime::hookfile::HookFile::Ours
+    )
 }
 
-/// Where `repo`'s hooks actually live — honouring `core.hooksPath` rather
-/// than assuming `.git/hooks`. A repo that redirects hooks elsewhere would
-/// otherwise be scanned (and `fix --apply` would WRITE) at a path git never
-/// reads.
+/// Where a scanned repository's hooks live — and whether that is somewhere this
+/// tool is willing to touch.
 ///
-/// `git rev-parse --git-path hooks` is the authority: relative
-/// `core.hooksPath` resolution, `~` expansion and worktree indirection are
-/// git's rules to get right, not ours to reimplement. This used to skip that
-/// call unless `.git/config`'s own bytes mentioned `hooksPath`, on the theory
-/// that a config file which does not even mention it cannot have set it —
-/// true of THAT FILE, but `core.hooksPath` can just as well come from global
-/// or system config, or from a file `.git/config` merely `include`s, none of
-/// which the local bytes say anything about. A fleet scan walking every repo
-/// on disk is exactly the setting where someone points `core.hooksPath` at a
-/// shared directory globally, so the case the shortcut got wrong was not a
-/// rare one. One `git` call per repo, always — asking git is the one thing
-/// this function exists to do right.
-pub fn hooks_dir_for(repo: &Path) -> PathBuf {
-    let default = repo.join(".git").join("hooks");
-    let Some(resolved) =
-        githooks_runtime::git::stdout_in(repo, &["rev-parse", "--git-path", "hooks"])
-    else {
-        return default;
-    };
-    let resolved = PathBuf::from(resolved);
-    if resolved.is_absolute() {
-        resolved
-    } else {
-        repo.join(resolved)
+/// The `Outside` variant is the whole reason this is a sum type rather than a
+/// `PathBuf`. `core.hooksPath` may be an ABSOLUTE path anywhere on the disk, and
+/// `Intent::Activate` used to `create_dir_all` whatever came back and write four
+/// 0o755 files into it. Nothing canonicalised, nothing compared it against the
+/// repository — so a repo could name `/etc/githooks`, or another checkout's
+/// working tree, and a fleet-wide `install` would create it and populate it.
+///
+/// **The asymmetry with per-repo `githooks install` is deliberate.** That
+/// command keeps honouring its own repository's `core.hooksPath`, absolute or
+/// not: you are standing in that repository and you configured it yourself, so
+/// the redirect is your instruction. The fleet refuses, because it is walking
+/// ninety-six repositories it did not configure and a redirect there is a fact
+/// about somebody else's checkout, not an instruction to this tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "where", rename_all = "snake_case")]
+pub enum HooksDir {
+    /// Inside the repository's own working tree, or inside its git common
+    /// directory. Both count: a submodule's and a linked worktree's hooks live
+    /// in the superproject/main repo's common dir and are perfectly legitimate,
+    /// and a repo redirecting `core.hooksPath` to `tooling/hooks` within itself
+    /// is redirecting within itself.
+    In { path: PathBuf },
+    /// Resolved to a directory that is neither. Reported, never created, never
+    /// written to, never deleted from.
+    Outside { path: PathBuf },
+    /// git would not say. Not a guess-worthy state: the old code fell back to
+    /// `repo.join(".git/hooks")`, which for a repository whose `.git` is a FILE
+    /// (a submodule, a linked worktree) is not a fallback but a wrong answer.
+    Unknown { why: String },
+}
+
+impl HooksDir {
+    /// The directory, when it is one we may act on. `None` is the refusal.
+    pub fn inside(&self) -> Option<&Path> {
+        match self {
+            HooksDir::In { path } => Some(path),
+            _ => None,
+        }
+    }
+
+    /// A fragment for the middle of a sentence: "the hooks directory is {}".
+    pub fn describe(&self) -> String {
+        match self {
+            HooksDir::In { path } => path.display().to_string(),
+            HooksDir::Outside { path } => {
+                format!("{} — OUTSIDE the repository", path.display())
+            }
+            HooksDir::Unknown { why } => format!("unresolvable ({why})"),
+        }
     }
 }
 
-fn is_managed(hooks: &Path) -> bool {
+/// Where `repo`'s hooks actually live, resolved by git and then contained.
+///
+/// `git rev-parse` is the authority for the resolution: relative
+/// `core.hooksPath`, `~` expansion, `.git`-file indirection and worktree
+/// indirection are git's rules to get right, not ours to reimplement. This used
+/// to skip the call unless `.git/config`'s own bytes mentioned `hooksPath`, on
+/// the theory that a config file which does not mention it cannot have set it —
+/// true of THAT FILE, but the value can just as well come from global or system
+/// config, or from a file `.git/config` merely `include`s. One `git` call per
+/// repo, always.
+///
+/// Three paths come back from one invocation, and all three are needed:
+///
+/// | asked | used for |
+/// |---|---|
+/// | `--git-path hooks` | where the hooks are |
+/// | `--git-common-dir` | a submodule's / linked worktree's hooks live here |
+/// | `--show-toplevel`  | an in-repo `core.hooksPath` redirect lives here |
+///
+/// Containment is tested against EITHER of the last two, and compares
+/// git-reported paths only — never a git-reported path against one this process
+/// built — because git resolves symlinks in what it prints (`/tmp` comes back as
+/// `/private/tmp` on macOS) and a lexical comparison across that boundary would
+/// report every repository under a symlinked root as `Outside`.
+///
+/// Having compared in git's spelling, the answer is returned in the CALLER's
+/// wherever it can be: hooks under the toplevel come back re-anchored onto
+/// `repo`. Everything downstream — the removal list, the write list, the
+/// root-relative paths the report and the parity gate compare — is built from
+/// this, and handing back `/private/var/…` for a `--root` of `/var/…` would make
+/// every one of those paths fail to relativise against the root the user typed.
+/// A submodule's or linked worktree's hooks live outside the toplevel by
+/// definition and keep git's absolute answer, which is the only true one there.
+///
+/// ## The one fallback, and its guard
+///
+/// `fatal: not a git repository` with a `.git` that IS a directory falls back to
+/// `<repo>/.git/hooks` as `In`. That is not the old guess wearing a hat: a
+/// directory git does not recognise as a repository cannot have a
+/// `core.hooksPath`, so there is nothing to resolve and exactly one place the
+/// walk could have meant. It is also load-bearing for the test suites — the
+/// fixtures throughout this crate build `<name>/.git/hooks` in a bare temp dir,
+/// and refusing those would fail every one of them for a reason unrelated to
+/// what it tests, the same accommodation `hookfile::tracked` makes and for the
+/// same reason. The `.git`-is-a-DIRECTORY guard is what keeps it honest: when
+/// `.git` is a FILE and git will not resolve the pointer inside it, we do not
+/// know where the hooks are, and `Unknown` says so.
+pub fn hooks_dir_for(repo: &Path) -> HooksDir {
+    let out = match Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "hooks",
+            "--git-common-dir",
+            "--show-toplevel",
+        ])
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            return HooksDir::Unknown {
+                why: format!("could not run git: {e}"),
+            }
+        }
+    };
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.to_lowercase().contains("not a git repository") && repo.join(".git").is_dir() {
+            return HooksDir::In {
+                path: repo.join(".git").join("hooks"),
+            };
+        }
+        return HooksDir::Unknown {
+            why: first_line(&stderr),
+        };
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut lines = stdout.lines();
+    let (Some(hooks), Some(common), Some(top)) = (lines.next(), lines.next(), lines.next()) else {
+        return HooksDir::Unknown {
+            why: "git rev-parse answered with fewer paths than it was asked for".to_string(),
+        };
+    };
+    let hooks = PathBuf::from(hooks);
+    if let Ok(rel) = githooks_runtime::hookfile::resolve_lexical(&hooks)
+        .strip_prefix(githooks_runtime::hookfile::resolve_lexical(Path::new(top)))
+    {
+        return HooksDir::In {
+            path: repo.join(rel),
+        };
+    }
+    if githooks_runtime::hookfile::is_within(&hooks, Path::new(common)) {
+        HooksDir::In { path: hooks }
+    } else {
+        HooksDir::Outside { path: hooks }
+    }
+}
+
+/// The git common directory, which is what two "repositories" sharing one hooks
+/// directory have in common — a linked worktree and its main repo report the
+/// same one. `None` when git would not say, in which case no sharing can be
+/// established and none is claimed.
+fn common_dir_for(repo: &Path) -> Option<PathBuf> {
+    githooks_runtime::git::stdout_in(
+        repo,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .map(PathBuf::from)
+}
+
+fn first_line(s: &str) -> String {
+    s.lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("no output")
+        .trim()
+        .to_string()
+}
+
+pub fn is_managed(hooks: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(hooks) else {
         return false;
     };
-    entries.flatten().any(|e| {
-        let p = e.path();
-        p.is_file() && is_ours(&p)
-    })
+    entries.flatten().any(|e| is_ours(&e.path()))
 }
 
 /// Progress emitted while walking, so a caller can paint rows as they are
@@ -257,21 +426,40 @@ pub fn scan_with(
     installed_binary: &str,
     on: &mut dyn FnMut(Progress),
 ) -> FleetScan {
-    let mut s = FleetScan {
+    let mut w = Walk {
         root: root.to_path_buf(),
-        depth,
-        git_dirs_found: 0,
-        hook_dirs_seen: 0,
-        managed_seen: 0,
-        unmanaged_seen: 0,
-        unreadable: Vec::new(),
-        excluded_dirs: 0,
-        dirs_visited: 0,
-        repos: Vec::new(),
+        installed_binary: installed_binary.to_string(),
+        seen_common: std::collections::HashMap::new(),
+        scan: FleetScan {
+            root: root.to_path_buf(),
+            depth,
+            git_dirs_found: 0,
+            hook_dirs_seen: 0,
+            managed_seen: 0,
+            unmanaged_seen: 0,
+            unreadable: Vec::new(),
+            hooks_outside_seen: 0,
+            excluded_dirs: 0,
+            dirs_visited: 0,
+            repos: Vec::new(),
+        },
     };
-    walk(root, root, depth, installed_binary, on, &mut s);
-    s.repos.sort_by(|a, b| a.path.cmp(&b.path));
-    s
+    walk(&mut w, root, depth, on);
+    w.scan.repos.sort_by(|a, b| a.path.cmp(&b.path));
+    w.scan
+}
+
+/// State the walk carries that is not part of the reported scan.
+///
+/// `seen_common` is the one that earns the struct: answering "have I already
+/// scanned something that shares this hooks directory?" needs a memory that
+/// outlives one directory's recursion, and threading a seventh `&mut` argument
+/// through `walk` was how the previous shape started to go wrong.
+struct Walk {
+    root: PathBuf,
+    installed_binary: String,
+    seen_common: std::collections::HashMap<PathBuf, PathBuf>,
+    scan: FleetScan,
 }
 
 /// Walks `dir`, following symlinks — DELIBERATELY, not merely because
@@ -286,103 +474,186 @@ pub fn scan_with(
 /// to a directory outside `--root` that a filesystem path comparison would
 /// not expect. That is not this function's problem to solve: `fix`/`apply`
 /// never trust a path scan reported — every removal and write is re-verified
-/// against `git ls-files` at the moment of action (`fix::is_tracked`), so a
-/// symlink reaching tracked source changes what gets REPORTED here, never
-/// what a later `--apply` is willing to touch.
-fn walk(
-    root: &Path,
-    dir: &Path,
-    budget: usize,
-    installed_binary: &str,
-    on: &mut dyn FnMut(Progress),
-    s: &mut FleetScan,
-) {
-    s.dirs_visited += 1;
-    on(Progress::Visited(s.dirs_visited));
+/// through `hookfile`'s guards at the moment of action — so a symlink reaching
+/// tracked source changes what gets REPORTED here, never what a later `--apply`
+/// is willing to touch.
+///
+/// ## `.git` is not always a directory
+///
+/// The entry test used to be `path.is_dir()` before the name was even looked
+/// at, so a repository whose `.git` is a FILE holding `gitdir: …` — every
+/// SUBMODULE, and every linked WORKTREE — was invisible. Not scanned, not
+/// installed into, and not counted as uncovered: the dashboard reported a clean
+/// fleet while commits inside a submodule ran no checks at all. That is the
+/// exact failure mode this crate's module doc opens with, one file type along.
+///
+/// The pointer inside a `.git` file is never parsed here. `git rev-parse`
+/// resolves it (see [`hooks_dir_for`]), because the format has grown relative
+/// gitdirs, worktree indirection and `commondir` files, and a hand-rolled
+/// reader of it would be a fourth place that can disagree with git.
+///
+/// Entries are SORTED before they are acted on. Ordering used to be whatever
+/// `read_dir` returned, which was fine while every repo was independent; it
+/// stopped being fine when a linked worktree and its main repo can both claim
+/// the same hooks directory and exactly one of them must be recorded as the
+/// owner. An unstable order there means an unstable `shares_hooks_with`.
+fn walk(w: &mut Walk, dir: &Path, budget: usize, on: &mut dyn FnMut(Progress)) {
+    w.scan.dirs_visited += 1;
+    on(Progress::Visited(w.scan.dirs_visited));
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => {
-            s.unreadable.push(dir.to_path_buf());
+            w.scan.unreadable.push(dir.to_path_buf());
             return;
         }
     };
 
+    let mut repos = Vec::new();
     let mut subdirs = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+
+        // Name first, TYPE SECOND: a `.git` file is a repository just as much as
+        // a `.git` directory is.
+        if name == ".git" {
+            repos.push(path.parent().unwrap_or(&path).to_path_buf());
+            continue;
+        }
         if !path.is_dir() {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
-
-        if name == ".git" {
-            s.git_dirs_found += 1;
-            let repo = path.parent().unwrap_or(&path);
-            let hooks = hooks_dir_for(repo);
-            if hooks.is_dir() {
-                s.hook_dirs_seen += 1;
-            }
-            let managed = is_managed(&hooks);
-            if managed {
-                s.managed_seen += 1;
-            } else {
-                s.unmanaged_seen += 1;
-            }
-            let found = inspect(root, repo, &hooks, managed, installed_binary);
-            on(Progress::Found(&found));
-            s.repos.push(found);
-            // A repository is a leaf for this purpose; nothing inside .git is
-            // another repo, and worktrees keep their hooks in the main one.
-            continue;
-        }
-
         if EXCLUDED.contains(&name.as_str()) {
-            s.excluded_dirs += 1;
+            w.scan.excluded_dirs += 1;
             continue;
         }
         subdirs.push(path);
+    }
+    repos.sort();
+    subdirs.sort();
+
+    for repo in repos {
+        let found = found_repo(w, &repo);
+        on(Progress::Found(&found));
+        w.scan.repos.push(found);
     }
 
     if budget == 0 {
         return;
     }
     for subdir in subdirs {
-        walk(root, &subdir, budget - 1, installed_binary, on, s);
+        walk(w, &subdir, budget - 1, on);
     }
 }
 
-/// Everything we can learn about one repository from its hooks directory.
-fn inspect(root: &Path, repo: &Path, hooks: &Path, managed: bool, installed_binary: &str) -> Repo {
-    let shims: Vec<ShimState> = DISPATCHERS
-        .iter()
-        .map(|n| shim::classify(&hooks.join(n)))
-        .collect();
+/// One repository, counted and inspected. Split out of [`walk`] only because
+/// the counting is now five decisions rather than two, and burying them inside
+/// a loop over directory entries is how `hook_dirs_seen` came to be incremented
+/// for a directory nobody had established was a hooks directory.
+fn found_repo(w: &mut Walk, repo: &Path) -> Repo {
+    w.scan.git_dirs_found += 1;
+    let hooks_dir = hooks_dir_for(repo);
 
-    let (mut stale_ours, mut foreign_subs) = (Vec::new(), Vec::new());
-    let mut hook_pkgjson = false;
-    if let Ok(entries) = std::fs::read_dir(hooks) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if !p.is_file() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".sample") || DISPATCHERS.contains(&name.as_str()) {
-                continue;
-            }
-            if name == "package.json" {
-                hook_pkgjson = std::fs::read_to_string(&p)
-                    .map(|c| c.contains("Forces Node"))
-                    .unwrap_or(false);
-                continue;
-            }
-            if is_ours(&p) {
-                stale_ours.push(name);
-            } else if name.starts_with("pre-commit-") || name.starts_with("pre-push-") {
-                foreign_subs.push(name);
+    // Sharing is established from the git COMMON directory, not from the hooks
+    // path: two repos can legitimately be told to use one `core.hooksPath`
+    // without being the same repository, and it is the repository identity that
+    // decides whether writing twice is writing the same file twice.
+    let shares_hooks_with = common_dir_for(repo).and_then(|common| {
+        use std::collections::hash_map::Entry;
+        let rel = repo.strip_prefix(&w.root).unwrap_or(repo).to_path_buf();
+        match w.seen_common.entry(common) {
+            // The FIRST repository to claim a common directory keeps it, so a
+            // third sharer points at the same owner as the second rather than
+            // at the second itself.
+            Entry::Occupied(e) => Some(e.get().clone()),
+            Entry::Vacant(e) => {
+                e.insert(rel);
+                None
             }
         }
+    });
+
+    match &hooks_dir {
+        HooksDir::In { path } => {
+            if path.is_dir() {
+                w.scan.hook_dirs_seen += 1;
+            }
+        }
+        _ => w.scan.hooks_outside_seen += 1,
     }
+
+    // A repository we will not look inside is never "managed": claiming so would
+    // put it in the population `fix` acts on, which is the one thing an
+    // unresolvable or out-of-repo hooks directory must not do.
+    let managed = hooks_dir.inside().is_some_and(is_managed);
+    if managed {
+        w.scan.managed_seen += 1;
+    } else {
+        w.scan.unmanaged_seen += 1;
+    }
+    inspect(
+        &w.root,
+        repo,
+        hooks_dir,
+        managed,
+        shares_hooks_with,
+        &w.installed_binary,
+    )
+}
+
+/// Everything we can learn about one repository from its hooks directory.
+///
+/// When `hooks_dir` is not [`HooksDir::In`] this reads NOTHING from it — not
+/// even to report what is there. That is a deliberate refusal to look rather
+/// than an inability: a repository can point `core.hooksPath` at any directory
+/// on the disk, and enumerating it would put somebody else's filenames into this
+/// tool's output (and into `stale_ours`, which is a removal list). The four
+/// dispatchers come back as `Unreadable`, naming why, which is honest and — the
+/// part that matters — is not `Missing`, the state that makes `fix` write.
+fn inspect(
+    root: &Path,
+    repo: &Path,
+    hooks_dir: HooksDir,
+    managed: bool,
+    shares_hooks_with: Option<PathBuf>,
+    installed_binary: &str,
+) -> Repo {
+    let (mut stale_ours, mut foreign_subs) = (Vec::new(), Vec::new());
+    let mut hook_pkgjson = false;
+    let shims: Vec<ShimState> = match hooks_dir.inside() {
+        None => vec![
+            ShimState::Unreadable {
+                why: format!("hooks directory {}", hooks_dir.describe()),
+            };
+            DISPATCHERS.len()
+        ],
+        Some(hooks) => {
+            if let Ok(entries) = std::fs::read_dir(hooks) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.ends_with(".sample") || DISPATCHERS.contains(&name.as_str()) {
+                        continue;
+                    }
+                    if name == "package.json" {
+                        hook_pkgjson = std::fs::read_to_string(&p)
+                            .map(|c| c.contains("Forces Node"))
+                            .unwrap_or(false);
+                        continue;
+                    }
+                    if is_ours(&p) {
+                        stale_ours.push(name);
+                    } else if name.starts_with("pre-commit-") || name.starts_with("pre-push-") {
+                        foreign_subs.push(name);
+                    }
+                }
+            }
+            DISPATCHERS
+                .iter()
+                .map(|n| shim::classify(&hooks.join(n)))
+                .collect()
+        }
+    };
     stale_ours.sort();
     foreign_subs.sort();
 
@@ -405,6 +676,8 @@ fn inspect(root: &Path, repo: &Path, hooks: &Path, managed: bool, installed_bina
             _ => Some(false),
         },
         agents_md: agents_md_state(repo),
+        hooks_dir,
+        shares_hooks_with,
     }
 }
 

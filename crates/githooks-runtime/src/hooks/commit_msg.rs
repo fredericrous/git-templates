@@ -154,32 +154,72 @@ pub fn is_footer(line: &str) -> bool {
             return true;
         }
     }
-    // /\w-\w{1,}:\s\w/ — a hyphenated key followed by ": " and a word char.
-    let b: Vec<char> = line.chars().collect();
-    for i in 0..b.len() {
-        if b[i] == '-' && i > 0 && (b[i - 1].is_alphanumeric() || b[i - 1] == '_') {
-            let mut j = i + 1;
-            while j < b.len() && (b[j].is_alphanumeric() || b[j] == '_') {
-                j += 1;
-            }
-            if j > i + 1 && j + 2 < b.len() && b[j] == ':' && b[j + 1] == ' ' {
-                let c = b[j + 2];
-                if c.is_alphanumeric() || c == '_' {
-                    return true;
-                }
-            }
-        }
+    is_hyphenated_key(line)
+}
+
+/// `^[\w][\w-]*-[\w-]*\w: \w` — a hyphenated trailer key that STARTS the line.
+///
+/// The anchor is the whole point. The rule used to be the JS regex
+/// `/\w-\w{1,}:\s\w/` applied ANYWHERE in the line, and this repo's own commit
+/// subjects match it: the formatted subject
+///
+/// ```text
+/// 🐛  fix: pre-commit: stop hanging
+/// ```
+///
+/// contains the fragment `pre-commit: s`, which satisfied `\w-\w+: \w`. So the
+/// SUBJECT read as a footer, `group_footer` walked the whole message from the
+/// bottom without ever hitting a non-footer line, and split at index 0 — the
+/// emitted message became `["", subject, trailer…]`. git strips the leading
+/// blank, which leaves the subject glued to the trailer block with no blank
+/// line between them, and `%(trailers)` returns EMPTY for a commit that plainly
+/// carries a `Co-Authored-By`. Silent, because the hook still exits 0.
+///
+/// Anchoring at column 0 keeps every real trailer (`Co-Authored-By: x`,
+/// `Signed-off-by: y`) and rejects both `fix: pre-commit: stop hanging` and
+/// prose like `see the pre-commit: docs above`, because in each of those the
+/// leading key run stops at the first space and holds no hyphen.
+fn is_hyphenated_key(line: &str) -> bool {
+    let key: String = line
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    // A key starts and ends with a word character — `-foo: x` is a bulleted
+    // list item, and `A-: x` was never a trailer either.
+    if !key.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+        || !key.ends_with(|c: char| c.is_alphanumeric() || c == '_')
+        || !key.contains('-')
+    {
+        return false;
     }
-    false
+    let Some(rest) = line[key.len()..].strip_prefix(": ") else {
+        return false;
+    };
+    rest.starts_with(|c: char| c.is_alphanumeric() || c == '_')
 }
 
 /// Separate the trailing run of footer lines, drop blanks inside it, and put
 /// exactly one blank line before the group.
+///
+/// The run deliberately crosses BLANK lines, which is what merges a
+/// `BREAKING CHANGE:` paragraph and a `Co-Authored-By:` paragraph into one
+/// footer block. That is a feature, not an accident, so this is not a
+/// "last paragraph only" rule.
+///
+/// The scan starts at `lines[1..]`: line 0 is the SUBJECT and can never be a
+/// footer, whatever it happens to look like. Without that anchor a subject
+/// misread as a footer (see `is_hyphenated_key`) let the run consume the entire
+/// message, `split_at` became 0, and the subject was emitted INSIDE the footer
+/// group with a blank line in front of it — destroying every trailer in the
+/// commit. `lines[1..]` makes `split_at >= 1` by construction; `split('\n')`
+/// never yields an empty vector, so the slice is always in range, and a
+/// single-line message falls out of the general path producing exactly what it
+/// produced before (`out = [subject, ""]`).
 pub fn group_footer(text: &str) -> String {
     let trimmed = text.trim_end_matches('\n');
     let lines: Vec<&str> = trimmed.split('\n').collect();
     let mut footer_size = 0;
-    for line in lines.iter().rev() {
+    for line in lines[1..].iter().rev() {
         if is_footer(line) {
             footer_size += 1;
         } else {
@@ -379,10 +419,122 @@ mod tests {
         );
     }
 
+    /// A trailer key is only a trailer key when it STARTS its line.
+    ///
+    /// The formatted subject `fix: pre-commit: stop hanging` contains
+    /// `pre-commit: s`, which the old anywhere-in-the-line rule accepted — and
+    /// a subject read as a footer took the whole message down with it.
+    #[test]
+    fn a_key_must_start_the_line_to_be_a_footer() {
+        // Real trailers, at column 0.
+        assert!(is_footer("Co-Authored-By: someone"));
+        assert!(is_footer("Signed-off-by: someone"));
+        assert!(is_footer("Reviewed-by: a"));
+        // The subject shape this repo writes constantly.
+        assert!(!is_footer("fix: pre-commit: stop hanging"));
+        assert!(!is_footer("🐛  fix: pre-commit: stop hanging"));
+        // Prose that merely mentions a hyphenated word followed by a colon.
+        assert!(!is_footer("see the pre-commit: docs above"));
+        assert!(!is_footer("  Co-Authored-By: indented is not a trailer"));
+        // A bullet is not a key, and neither is a key with nothing after the
+        // hyphen.
+        assert!(!is_footer("-foo: bar"));
+        assert!(!is_footer("A-: bar"));
+        // Neither branch below is anchored by this rule; both still work.
+        assert!(is_footer("BREAKING CHANGE: it broke"));
+        assert!(is_footer("Refs: #123"));
+    }
+
     #[test]
     fn groups_the_trailing_footer_with_one_blank_line() {
         let out = group_footer("subject\n\nbody text\n\nCo-Authored-By: x\n\n");
         assert_eq!(out, "subject\n\nbody text\n\nCo-Authored-By: x\n");
+    }
+
+    /// The shapes a real message arrives in, for the property tests below.
+    ///
+    /// Every subject here is one that the old anywhere-in-the-line footer rule
+    /// misread as a trailer, crossed with each body/footer arrangement the
+    /// formatter emits.
+    const SHAPES: &[&str] = &[
+        // subject only
+        "fix: pre-commit: stop hanging",
+        "fix: pre-commit: stop hanging\n\n\n",
+        // body only
+        "fix: pre-commit: stop hanging\n\nthe worker thread blocked on a tty\n",
+        // trailers only
+        "fix: pre-commit: stop hanging\n\nCo-Authored-By: a <a@x>\n",
+        // body and trailers
+        "fix: pre-commit: stop hanging\n\nthe worker thread blocked\n\nCo-Authored-By: a <a@x>\n",
+        // body, trailers, trailing blanks
+        "fix: pre-commit: stop hanging\n\nthe worker thread blocked\n\nCo-Authored-By: a <a@x>\n\n\n",
+        // two footer PARAGRAPHS, which the run deliberately merges
+        "feat: x\n\nbody\n\nBREAKING CHANGE: it broke\n\nCo-Authored-By: a <a@x>\n",
+        // an ordinary subject, to prove nothing regressed for the common case
+        "feat: add a thing\n\nbody\n\nCo-Authored-By: a <a@x>\n",
+    ];
+
+    /// PROPERTY: grouping the footer never drops or invents a line, and never
+    /// moves the subject off line 0.
+    ///
+    /// Both halves failed together for the subject `fix: pre-commit: stop
+    /// hanging`: the whole message was swallowed into the footer group, blank
+    /// body lines inside it were filtered away, and the emitted line 0 was the
+    /// inserted blank rather than the subject.
+    #[test]
+    fn group_footer_never_loses_a_line() {
+        for shape in SHAPES {
+            let out = group_footer(shape);
+
+            let mut before: Vec<&str> = shape
+                .trim_end_matches('\n')
+                .split('\n')
+                .filter(|l| !l.is_empty())
+                .collect();
+            let mut after: Vec<&str> = out
+                .trim_end_matches('\n')
+                .split('\n')
+                .filter(|l| !l.is_empty())
+                .collect();
+            before.sort_unstable();
+            after.sort_unstable();
+            assert_eq!(before, after, "lines changed for {shape:?} -> {out:?}");
+
+            assert_eq!(
+                out.split('\n').next(),
+                shape.split('\n').next(),
+                "the subject left line 0 for {shape:?} -> {out:?}"
+            );
+        }
+    }
+
+    /// PROPERTY: grouping is idempotent. A message that has already been
+    /// formatted once — an amend, a rebase reword, a `--no-verify` retry — must
+    /// come back byte for byte.
+    #[test]
+    fn group_footer_is_idempotent() {
+        for shape in SHAPES {
+            let once = group_footer(shape);
+            let twice = group_footer(&once);
+            assert_eq!(once, twice, "not idempotent for {shape:?}");
+        }
+    }
+
+    /// The exact damage the anchor prevents: a blank line must stand between
+    /// the subject and the footer group, and the subject must never appear
+    /// inside it. Without the blank line git reads the trailer as a
+    /// continuation of the subject and `%(trailers)` comes back empty.
+    #[test]
+    fn a_subject_and_its_trailers_stay_separated() {
+        let out = group_footer("fix: pre-commit: stop hanging\n\nCo-Authored-By: a <a@x>\n");
+        assert_eq!(
+            out, "fix: pre-commit: stop hanging\n\nCo-Authored-By: a <a@x>\n",
+            "got: {out:?}"
+        );
+        assert!(
+            !out.starts_with('\n'),
+            "the message must not begin with a blank line: {out:?}"
+        );
     }
 
     #[test]

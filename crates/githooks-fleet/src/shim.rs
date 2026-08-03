@@ -17,7 +17,7 @@
 //! a comment, because `make install` seds globally. Any comparison that assumed
 //! a single substitution would misclassify every baked shim.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -39,9 +39,29 @@ pub enum ShimState {
     Ok {
         baked: String,
     },
-    /// Present, but not the template under any substitution.
+    /// Present, readable text, but not the template under any substitution.
     Drifted,
     Missing,
+    /// A symlink, pointing anywhere — including at one of our own shims.
+    ///
+    /// This used to collapse into `Ok`/`Drifted`, because `read_to_string`
+    /// follows a link and reports the TARGET's bytes. A dispatcher that is a
+    /// link to a tracked file in the working tree therefore read as a perfectly
+    /// healthy shim, and `fix --apply` then wrote through it — `fs::write`
+    /// follows links too — and rewrote the tracked file. That is the verified
+    /// incident `hookfile` exists to end, and this variant is how the dashboard
+    /// can see it before the write does.
+    Symlink {
+        target: Option<PathBuf>,
+    },
+    /// It exists and we could not establish what it is: not valid UTF-8 (a
+    /// compiled hook), unreadable, a directory, a device, a hard link with other
+    /// names. Every one of these used to become `Drifted` or `Missing` — the
+    /// latter being the dangerous one, since "missing" is what makes `fix`
+    /// decide to WRITE.
+    Unreadable {
+        why: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -92,13 +112,45 @@ pub fn recover_baked(installed: &str) -> Option<String> {
     (render(&candidate) == installed).then_some(candidate)
 }
 
+/// What is installed at one dispatcher path.
+///
+/// Two questions, asked in this order and by two different owners:
+///
+/// 1. WHAT IS THERE — a link, a directory, a binary, an unreadable file, a
+///    regular readable file. [`githooks_runtime::hookfile::classify`] owns that
+///    one, because it is the same question `install` and `uninstall` ask and
+///    three separate one-liners used to answer it differently. It never follows
+///    a link and never guesses.
+/// 2. IS IT OUR TEMPLATE, byte for byte — which only [`recover_baked`] can
+///    answer, since `hookfile` knows about our marker but not about the exact
+///    substitution.
+///
+/// The body used to be `read_to_string(path)` with `Err` ⇒ `Missing`, which
+/// answered neither question honestly: a compiled hook, a directory and a
+/// permissions error all read as "nothing installed", and "nothing installed"
+/// is what makes `fix` decide to write one.
 pub fn classify(path: &Path) -> ShimState {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return ShimState::Missing;
-    };
-    match recover_baked(&content) {
-        Some(baked) => ShimState::Ok { baked },
-        None => ShimState::Drifted,
+    use githooks_runtime::hookfile::{ForeignWhy, HookFile};
+    match githooks_runtime::hookfile::classify(path) {
+        HookFile::Absent => ShimState::Missing,
+        HookFile::Symlink { target } => ShimState::Symlink { target },
+        HookFile::NotARegularFile => ShimState::Unreadable {
+            why: "not a regular file (a directory, a fifo, a device)".to_string(),
+        },
+        HookFile::Unknown { why } => ShimState::Unreadable { why },
+        HookFile::Foreign(ForeignWhy::HandWritten) | HookFile::Ours => {
+            // A regular, readable, UTF-8 file: now the byte-exact question.
+            match std::fs::read_to_string(path)
+                .ok()
+                .and_then(|c| recover_baked(&c))
+            {
+                Some(baked) => ShimState::Ok { baked },
+                None => ShimState::Drifted,
+            }
+        }
+        HookFile::Foreign(why) => ShimState::Unreadable {
+            why: why.describe(),
+        },
     }
 }
 
@@ -202,8 +254,53 @@ mod tests {
     #[test]
     fn the_anchor_alone_does_not_satisfy_it() {
         let faked = render("/opt/a").replace("exec", "# exec");
-        assert!(faked.contains("BIN=\"/opt/a\""));
+        assert!(faked.contains("BAKED=\"/opt/a\""));
         assert_eq!(recover_baked(&faked), None);
+    }
+
+    fn tmpdir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("fleet-shim-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("mkdir");
+        d
+    }
+
+    /// The verified incident, at the level of one classification. A dispatcher
+    /// that is a LINK to a healthy shim used to read as `Ok` — `read_to_string`
+    /// follows links — so nothing in the dashboard or the plan could see that a
+    /// write here lands somewhere else entirely.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_dispatcher_is_a_symlink_not_a_healthy_shim() {
+        let d = tmpdir("symlink");
+        let real = d.join("shared-pre-commit");
+        std::fs::write(&real, render("/bin/gh")).unwrap();
+        let link = d.join("pre-commit");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert_eq!(
+            classify(&link),
+            ShimState::Symlink {
+                target: Some(real.clone())
+            },
+            "a link to a perfect shim is still a link"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A compiled hook is not "missing", and the difference matters: `Missing`
+    /// is the state that makes `fix` decide to WRITE one.
+    #[test]
+    fn a_binary_hook_is_unreadable_not_missing() {
+        let d = tmpdir("binary");
+        let p = d.join("pre-commit");
+        std::fs::write(&p, [0x7f, b'E', b'L', b'F', 0x02, 0x01, 0xff, 0xfe]).unwrap();
+        assert!(
+            matches!(classify(&p), ShimState::Unreadable { .. }),
+            "classified as {:?}",
+            classify(&p)
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     fn ok(p: &str) -> ShimState {

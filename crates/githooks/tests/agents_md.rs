@@ -129,3 +129,46 @@ fn a_path_flag_with_no_value_is_a_usage_error() {
         "must not fall back to writing the default file"
     );
 }
+
+/// Outside a repository there is no root to write into — and `repo_root()`
+/// answered `"."` anyway, so this wrote `./AGENTS.md` into whatever directory
+/// the user was standing in and printed `wrote ./AGENTS.md` as if that were an
+/// answer. Typed from `~`, that is a file in somebody's home directory
+/// describing checks that no repository there runs.
+///
+/// `GIT_CEILING_DIRECTORIES` stops git walking up out of the temp dir, so this
+/// tests "no repository" rather than "no repository unless the CI runner keeps
+/// its temp dir inside one".
+#[test]
+fn outside_a_repository_it_writes_nothing_and_says_so() {
+    let dir = std::env::temp_dir().join(format!("gh-agents-norepo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("agents-md")
+        .current_dir(&dir)
+        .env("GIT_CEILING_DIRECTORIES", &dir)
+        .output()
+        .expect("run");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "writing into a non-repository reported success:\n{text}"
+    );
+    assert!(
+        text.contains("not inside a git repository"),
+        "and did not say why:\n{text}"
+    );
+    assert!(
+        !dir.join("AGENTS.md").exists(),
+        "AGENTS.md WAS WRITTEN into a directory that is not a repository"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

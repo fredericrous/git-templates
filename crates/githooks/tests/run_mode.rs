@@ -5,7 +5,7 @@
 //! dirty tree reports on content that is not committed and may never be.
 
 mod common;
-use common::Repo;
+use common::{missing, Repo};
 use std::process::Command;
 
 fn run(r: &Repo, args: &[&str]) -> (i32, String) {
@@ -70,6 +70,183 @@ fn the_two_modes_answer_different_questions() {
     let (all, _) = run(&r, &["--all-files"]);
     assert_eq!(staged, 0, "nothing staged means nothing to judge");
     assert_ne!(all, 0, "but the tree still holds a broken file");
+}
+
+/// Staged mode is a REHEARSAL of the commit, so it must take the same
+/// index-fidelity hold the commit takes.
+///
+/// It did not. Reproduced with the fixture in
+/// docs/index-fidelity-and-run-modes.md §1: valid JSON staged, garbage in the
+/// working tree. `git commit` passed (the hold puts the staged content at the
+/// path) and `githooks run` failed — the two modes disagreed about the same
+/// repository, which is the one thing this mode exists not to do.
+#[test]
+fn run_judges_the_staged_content_not_the_tree() {
+    if missing("node") {
+        return;
+    }
+    let r = Repo::new();
+    r.stage("x.json", "{ \"a\": 1 }\n");
+    r.commit("chore: seed");
+    r.stage("x.json", "{ \"a\": 2 }\n");
+    r.write("x.json", "{ THIS IS NOT JSON\n");
+
+    let (code, out) = run(&r, &[]);
+    assert_eq!(code, 0, "it judged the working tree, not the index:\n{out}");
+    assert_eq!(
+        std::fs::read_to_string(r.path("x.json")).expect("read"),
+        "{ THIS IS NOT JSON\n",
+        "the unstaged work was not put back"
+    );
+}
+
+/// The false-negative direction, which is the worse one: the tree is fine and
+/// the staged content is not.
+#[test]
+fn run_still_catches_a_broken_staged_change() {
+    if missing("node") {
+        return;
+    }
+    let r = Repo::new();
+    r.stage("x.json", "{ \"a\": 1 }\n");
+    r.commit("chore: seed");
+    r.stage("x.json", "{ THIS IS NOT JSON\n");
+    r.write("x.json", "{ \"a\": 2 }\n");
+
+    let (code, out) = run(&r, &[]);
+    assert_ne!(code, 0, "a broken staged change passed:\n{out}");
+    assert_eq!(
+        std::fs::read_to_string(r.path("x.json")).expect("read"),
+        "{ \"a\": 2 }\n",
+        "the unstaged work was not put back"
+    );
+}
+
+/// `--all-files` stays stash-free — decision 1 of
+/// docs/index-fidelity-and-run-modes.md. There is no staged/unstaged
+/// distinction to protect when the input set is `git ls-files`.
+///
+/// Proven by POLLING for the store while a deliberately slow declared check is
+/// running, the trick `index_fidelity.rs` already uses: `enter()` parks before
+/// any check starts, so if a hold were taken the directory would exist for the
+/// whole five seconds.
+#[cfg(unix)]
+#[test]
+fn all_files_takes_no_hold() {
+    let r = Repo::new();
+    r.stage("x.json", "{ \"a\": 1 }\n");
+    r.stage(".githooks.conf", "pre-commit  slow  *  block  sleep  5\n");
+    r.commit("chore: seed");
+    // Something unstaged, so a hold would have work to do.
+    r.write("x.json", "{ \"a\": 999 }\n");
+    let trusted = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("trust")
+        .current_dir(&r.dir)
+        .output()
+        .expect("githooks trust");
+    assert!(trusted.status.success(), "could not trust the manifest");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("run")
+        .arg("--all-files")
+        .current_dir(&r.dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn githooks run --all-files");
+
+    let store = r.path(".git/githooks-held");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        assert!(
+            !store.exists(),
+            "--all-files took a hold; it must be stash-free"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// A pre-push check invoked by name must never touch the working tree: nothing
+/// about a push is a staging operation.
+#[cfg(unix)]
+#[test]
+fn a_named_pre_push_check_takes_no_hold() {
+    let r = Repo::new();
+    r.stage("x.json", "{ \"a\": 1 }\n");
+    r.commit("chore: seed");
+    let origin = r.path(".git/test-origin.git");
+    r.git(&["init", "-q", "--bare", origin.to_str().unwrap()]);
+    r.git(&["remote", "add", "origin", origin.to_str().unwrap()]);
+    r.git(&["push", "-q", "--no-verify", "-u", "origin", "main"]);
+    // Unstaged work a hold would have parked.
+    r.write("x.json", "{ \"a\": 999 }\n");
+
+    let (_, out) = run(&r, &["pre-push-branch-pattern"]);
+    assert!(
+        !r.path(".git/githooks-held").exists(),
+        "a pre-push check parked the tree:\n{out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(r.path("x.json")).expect("read"),
+        "{ \"a\": 999 }\n",
+        "a pre-push check modified the working tree:\n{out}"
+    );
+}
+
+/// `--all-files` with `githooks.fix` on must stage NOTHING.
+///
+/// The override makes `staged_files()` return every tracked file, and every
+/// fixer's `restage(&files)` would then `git add` everything in the tree that
+/// differs from the index — turning a read-only "does my tree pass" query into
+/// `git add .`. That is the hazard §2 of
+/// docs/index-fidelity-and-run-modes.md names.
+#[test]
+fn all_files_never_stages_anything() {
+    let r = Repo::new();
+    r.stage("a.js", "const a = BAD\n");
+    r.stage("b.js", "const b = BAD\n");
+    // A declared fixer, so the mode has something that WOULD re-stage.
+    r.write(
+        "rewrite.sh",
+        "#!/bin/sh\nfor f in *.js; do [ -f \"$f\" ] || continue; sed -i.bak 's/BAD/GOOD/' \"$f\"; rm -f \"$f.bak\"; done\nexit 0\n",
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(r.path("rewrite.sh"), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+    }
+    r.git(&["add", "rewrite.sh"]);
+    r.stage(
+        ".githooks.conf",
+        "pre-commit  fmt  *.js  block  fix ./rewrite.sh\n",
+    );
+    r.commit("chore: seed");
+    let trusted = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("trust")
+        .current_dir(&r.dir)
+        .output()
+        .expect("githooks trust");
+    assert!(trusted.status.success(), "could not trust the manifest");
+    r.git(&["config", "githooks.fix", "true"]);
+
+    // A dirty tree, nothing staged.
+    r.write("a.js", "const a = BAD\n");
+    r.write("b.js", "const b = STILL BAD\n");
+
+    let (_, out) = run(&r, &["--all-files"]);
+    let staged = r.git(&["diff", "--cached", "--name-only"]);
+    let staged = String::from_utf8_lossy(&staged.stdout);
+    assert!(
+        staged.trim().is_empty(),
+        "--all-files staged files: {staged}\n{out}"
+    );
+    assert!(
+        out.contains("fixing is off"),
+        "it must say why githooks.fix did nothing:\n{out}"
+    );
 }
 
 /// One check by name, which is how you adopt a single check.

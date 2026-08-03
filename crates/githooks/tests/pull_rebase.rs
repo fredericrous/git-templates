@@ -183,3 +183,102 @@ fn a_branch_tracking_a_local_branch_is_not_silently_synced_as_origin() {
         "the branch must not be touched at all when its upstream is not a real remote"
     );
 }
+
+/// Step 4's advisory has to survive the WORKTREE MARKER.
+///
+/// Since git 2.23, `git branch` prints `+ main` for a branch checked out in
+/// another worktree, not `  main`. `lists_branch` stripped only spaces, tabs
+/// and `*`, so in exactly the layout this project's own workflow uses — work in
+/// a linked worktree while `main` stays checked out in the primary — it
+/// answered false for both `main` and `master` and the whole default-branch
+/// advisory silently never fired.
+#[test]
+fn the_default_branch_advisory_survives_a_worktree_marker() {
+    let r = with_origin();
+    r.stage("a.txt", "one\n");
+    r.commit("chore: seed");
+    r.git(&["push", "-q", "--no-verify", "-u", "origin", "main"]);
+
+    // The work happens in a linked worktree; `main` stays checked out here, so
+    // `git branch` over there prints `+ main`.
+    let wt = r.worktree("feat/adv");
+    let mut push = std::process::Command::new("git");
+    push.args(["push", "-q", "--no-verify", "-u", "origin", "feat/adv"])
+        .current_dir(&wt);
+    Repo::strip_git_env_impl(&mut push);
+    assert!(push.status().expect("push").success());
+
+    // Move the default branch ahead on the server.
+    r.stage("a.txt", "two\n");
+    r.commit("chore: move main on");
+    r.git(&["push", "-q", "--no-verify", "origin", "main"]);
+
+    let listed = String::from_utf8_lossy(
+        &std::process::Command::new("git")
+            .args(["branch"])
+            .current_dir(&wt)
+            .output()
+            .expect("git branch")
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        listed.contains("+ main"),
+        "fixture: expected the worktree marker, got {listed:?}"
+    );
+
+    let run = r.hook_at(&wt, "pre-push-pull-rebase", &[]);
+    assert!(run.passed(), "{}", run.output());
+    assert!(
+        run.says("is ahead by 1 commit"),
+        "the advisory never fired past the worktree marker:\n{}",
+        run.output()
+    );
+}
+
+/// Step 2 spends thirteen lines of comment establishing `remote` as the
+/// VERIFIED remote for this branch, and step 4 then hardcoded `origin`. In a
+/// repository whose remote is called `upstream`, the fetch failed (ignored) and
+/// `rev-list origin/<branch>...HEAD` returned `None`, so the advisory was
+/// silently skipped.
+///
+/// The branch is `test/zz` on purpose: it sorts AFTER `main`, so `git branch`
+/// lists the default branch FIRST — which is the arrangement that also exposes
+/// the trim hazard in step 4 (`git::stdout` trimmed the whole buffer and ate
+/// the first line's indentation, so `lists_branch`'s decoration guard rejected
+/// it). Whether the advisory fired used to depend on the alphabetical position
+/// of the branch you happened to be on.
+#[test]
+fn the_advisory_uses_the_branch_s_own_remote() {
+    let r = Repo::new();
+    r.stage("a.txt", "one\n");
+    r.commit("chore: seed");
+    let remote = r.path(".git/test-upstream.git");
+    r.git(&["init", "-q", "--bare", remote.to_str().unwrap()]);
+    r.git(&["remote", "add", "upstream", remote.to_str().unwrap()]);
+    r.git(&["push", "-q", "--no-verify", "-u", "upstream", "main"]);
+
+    r.git(&["checkout", "-q", "-b", "test/zz"]);
+    r.git(&["push", "-q", "--no-verify", "-u", "upstream", "test/zz"]);
+
+    // Move the default branch ahead on the server, then come back.
+    r.git(&["checkout", "-q", "main"]);
+    r.stage("a.txt", "two\n");
+    r.commit("chore: move main on");
+    r.git(&["push", "-q", "--no-verify", "upstream", "main"]);
+    r.git(&["checkout", "-q", "test/zz"]);
+
+    let listed = String::from_utf8_lossy(&r.git(&["branch"]).stdout).into_owned();
+    assert!(
+        listed.starts_with("  main"),
+        "fixture: main must sort first for this case to bite, got {listed:?}"
+    );
+
+    let run = r.hook("pre-push-pull-rebase", &[]);
+    assert!(run.passed(), "{}", run.output());
+    assert!(
+        run.says("upstream/main is ahead by 1 commit"),
+        "the advisory looked for a remote this repo does not have:\n{}",
+        run.output()
+    );
+}

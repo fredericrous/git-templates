@@ -352,6 +352,24 @@ fn selection_cursor(color: bool) -> Span<'static> {
 
 /// `●` ok, `◐` drifted, `○` missing — position encodes WHICH hook, so the
 /// column costs four characters instead of four names.
+/// The repository path as the table shows it.
+///
+/// Split out to be testable: a `Frame` renderer is not, and this is the one
+/// place scanned-disk text becomes terminal output in the dashboard. ratatui's
+/// `Cell` keeps zero-width graphemes and crossterm writes them through, so a
+/// directory named with control bytes in it would be rendered verbatim.
+fn repo_cell(r: &Repo) -> String {
+    githooks_runtime::ui::sanitize_path(&r.path)
+}
+
+/// One glyph per dispatcher.
+///
+/// `!` for a symlink and `?` for an unreadable file are deliberately not
+/// variations on the filled/half/empty circle: those three form a scale from
+/// healthy to absent, and neither of the new states is a point on it. A
+/// dispatcher that is a link to a tracked file is not "somewhat installed", it
+/// is a hazard — writing through it rewrites the other file — and it must not
+/// read as a milder ◐.
 fn shim_glyphs(r: &Repo) -> String {
     r.shims
         .iter()
@@ -359,6 +377,8 @@ fn shim_glyphs(r: &Repo) -> String {
             ShimState::Ok { .. } => '●',
             ShimState::Drifted => '◐',
             ShimState::Missing => '○',
+            ShimState::Symlink { .. } => '!',
+            ShimState::Unreadable { .. } => '?',
         })
         .collect()
 }
@@ -387,8 +407,26 @@ fn agents_md_word(s: AgentsMdState) -> &'static str {
 /// A redundant text summary of the same information the glyphs carry, so the
 /// screen survives NO_COLOR and colour vision deficiency.
 fn state_word(r: &Repo) -> String {
+    // Before "unmanaged", because these two say WHY it is not managed and
+    // "unmanaged" alone would send somebody looking for a missing install.
+    if let Some(owner) = &r.shares_hooks_with {
+        return format!("covered by {}", githooks_runtime::ui::sanitize_path(owner));
+    }
+    if r.hooks_dir.inside().is_none() {
+        return "! hooks elsewhere".into();
+    }
     if !r.managed {
         return "! unmanaged".into();
+    }
+    // A symlinked or unreadable dispatcher outranks drift and absence: it is the
+    // state in which a write goes somewhere we cannot see.
+    let hazard = r
+        .shims
+        .iter()
+        .filter(|s| matches!(s, ShimState::Symlink { .. } | ShimState::Unreadable { .. }))
+        .count();
+    if hazard > 0 {
+        return format!("! not a file {hazard}");
     }
     let missing = r
         .shims
@@ -528,8 +566,7 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
     let body: Vec<Row> = rows
         .iter()
         .map(|repo| {
-            let path = repo.path.to_string_lossy().into_owned();
-            let mut cells = vec![Cell::from(path)];
+            let mut cells = vec![Cell::from(repo_cell(repo))];
             if mid {
                 let g = shim_glyphs(repo);
                 let all_ok = g.chars().all(|c| c == '●');
@@ -667,24 +704,64 @@ fn detail(f: &mut Frame, area: Rect, app: &App) {
         Line::from(""),
         Line::from("DISPATCHERS").style(tint(app.color, ACCENT)),
     ];
+    // Where the hooks are, always — not only when something is wrong with it.
+    // A reader who cannot see the directory cannot tell a repo we declined to
+    // touch from one that had nothing to do.
+    lines.push(Line::from(format!(
+        "  {:<20} {}",
+        "hooks dir",
+        githooks_runtime::ui::sanitize(&repo.hooks_dir.describe())
+    )));
+    if let Some(owner) = &repo.shares_hooks_with {
+        lines.push(Line::from(format!(
+            "  {:<20} covered by {}",
+            "shares hooks",
+            githooks_runtime::ui::sanitize_path(owner)
+        )));
+    }
     for (i, n) in DISPATCHERS.iter().enumerate() {
         let s = match repo.shims.get(i) {
             Some(ShimState::Ok { baked }) => format!("ok       -> {baked}"),
             Some(ShimState::Drifted) => "DRIFTED  does not match the template".into(),
+            Some(ShimState::Symlink { target }) => format!(
+                "SYMLINK  -> {}  (a write here would rewrite that file)",
+                target
+                    .as_deref()
+                    .map(githooks_runtime::ui::sanitize_path)
+                    .unwrap_or_else(|| "?".to_string())
+            ),
+            Some(ShimState::Unreadable { why }) => {
+                format!("UNKNOWN  {}", githooks_runtime::ui::sanitize(why))
+            }
             _ => "MISSING".to_string(),
         };
         lines.push(Line::from(format!("  {n:<20} {s}")));
     }
-    if !repo.stale_ours.is_empty() || !repo.foreign_subs.is_empty() || repo.hook_pkgjson {
+    if !repo.stale_ours.is_empty() || repo.hook_pkgjson {
         lines.push(Line::from(""));
         lines.push(
-            Line::from("LEFTOVERS (nothing dispatches these)").style(tint(app.color, ACCENT)),
+            Line::from("LEFTOVERS OF OURS (nothing dispatches these — fix removes them)")
+                .style(tint(app.color, ACCENT)),
         );
-        for name in repo.stale_ours.iter().chain(repo.foreign_subs.iter()) {
+        for name in &repo.stale_ours {
             lines.push(Line::from(format!("  {name}")));
         }
         if repo.hook_pkgjson {
             lines.push(Line::from("  package.json (node era)"));
+        }
+    }
+    // A separate block, and the heading is the whole point: these are hooks
+    // somebody else wrote, `fix` LEAVES THEM ALONE, and for two releases it
+    // silently deleted them while listing them under the same "LEFTOVERS"
+    // heading as our own retired shims.
+    if !repo.foreign_subs.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from("NOT OURS (left alone — nothing dispatches these either)")
+                .style(tint(app.color, ACCENT)),
+        );
+        for name in &repo.foreign_subs {
+            lines.push(Line::from(format!("  {name}")));
         }
     }
     if !repo.skips.is_empty() {
@@ -1003,6 +1080,7 @@ pub fn run(root: std::path::PathBuf, depth: usize, binary: String) -> std::io::R
         managed_seen: 0,
         unmanaged_seen: 0,
         unreadable: Vec::new(),
+        hooks_outside_seen: 0,
         excluded_dirs: 0,
         dirs_visited: 0,
         repos: Vec::new(),
@@ -1094,6 +1172,7 @@ mod tests {
             managed_seen: 0,
             unmanaged_seen: 0,
             unreadable: Vec::new(),
+            hooks_outside_seen: 0,
             excluded_dirs: 0,
             dirs_visited: 412,
             repos: Vec::new(),
@@ -1121,6 +1200,10 @@ mod tests {
             declared: Vec::new(),
             trusted: None,
             agents_md: AgentsMdState::Missing,
+            hooks_dir: crate::scan::HooksDir::In {
+                path: std::path::PathBuf::from(".git/hooks"),
+            },
+            shares_hooks_with: None,
         }
     }
 
@@ -1134,6 +1217,7 @@ mod tests {
             managed_seen: managed,
             unmanaged_seen: rs.len() - managed,
             unreadable: Vec::new(),
+            hooks_outside_seen: 0,
             excluded_dirs: 3,
             dirs_visited: 100,
             repos: rs,

@@ -285,11 +285,21 @@ pub struct SkipPlan {
     pub action: Action,
     /// Exactly the argv that will run, so the preview cannot drift from the act.
     pub command: Vec<String>,
-    /// What the config will suppress afterwards. Not always one, even when
-    /// adding a full check name — `pre-commit-lint-js` is a PREFIX of
-    /// `pre-commit-lint-json-yaml`, so skipping the first unavoidably skips the
-    /// second. Substring matching cannot express "this check only", which is
-    /// why this is computed rather than assumed to be 1.
+    /// What the config will suppress afterwards.
+    ///
+    /// COMPUTED, never assumed, and the reason has changed. Under the old
+    /// substring rule this was frequently more than one by accident:
+    /// `pre-commit-lint-js` is a PREFIX of `pre-commit-lint-json-yaml`, so
+    /// skipping the first unavoidably skipped the second, and nothing could
+    /// express "this check only". Matching is now three exact comparisons
+    /// (`githooks_runtime::names_check`), so a full check name reaches exactly
+    /// itself.
+    ///
+    /// It is still computed rather than hard-coded to 1, because a value can
+    /// legitimately reach several checks by naming their TRIGGER — and because
+    /// the preview must come from the same function the dispatcher obeys. A
+    /// second implementation that disagreed is how a UI comes to claim a check
+    /// is active while the dispatcher skips it.
     pub suppresses: Vec<&'static str>,
     pub refuse: Option<String>,
 }

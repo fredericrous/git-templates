@@ -6,6 +6,19 @@ use crate::check::Outcome;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+/// The extensions each half consumes, and their union.
+///
+/// EXPORTED so `registry.rs` can DECLARE the scope from the same constant the
+/// check FILTERS with. They drifted: the registry declared
+/// `[".json", ".yaml", ".yml"]` while this module asked for `[".yaml"]`, so
+/// `githooks list` reported the check as covering `.yml` and a staged, broken
+/// `x.yml` returned `Outcome::Passed` with no output at all. A `const fn` over
+/// a `const` is legal in a const item, so the registry can reference these
+/// directly and the two cannot disagree again.
+pub const JSON: &[&str] = &[".json"];
+pub const YAML: &[&str] = &[".yaml", ".yml"];
+pub const EXTS: &[&str] = &[".json", ".yaml", ".yml"];
+
 /// Helm chart templates carry Go templating (`{{ }}`) and are not valid YAML
 /// until Helm renders them. A staged YAML under a chart's `templates/` — i.e.
 /// with a sibling `Chart.yaml` at the chart root — is skipped, or valid chart
@@ -33,8 +46,8 @@ fn parses(root: &str, tool: &str, args: &[&str]) -> bool {
 }
 
 pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
-    let json: Vec<String> = staged_files(&[".json"]);
-    let yaml: Vec<String> = staged_files(&[".yaml"]);
+    let json: Vec<String> = staged_files(JSON);
+    let yaml: Vec<String> = staged_files(YAML);
     if json.is_empty() && yaml.is_empty() {
         return Outcome::Passed;
     }

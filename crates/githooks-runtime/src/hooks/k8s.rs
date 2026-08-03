@@ -9,6 +9,11 @@ use crate::check::Outcome;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+/// The extensions all three Kubernetes checks consume. Exported so
+/// `registry.rs` declares their scopes from the same constant — see
+/// `lint_json_yaml::EXTS` for the drift this prevents.
+pub const EXTS: &[&str] = &[".yaml", ".yml"];
+
 /// Staged YAML under a kubernetes-ish prefix. Deliberately conservative and
 /// shared by all three hooks, so they trigger on exactly the same change sets.
 fn k8s_staged() -> Vec<String> {
@@ -21,7 +26,7 @@ fn k8s_staged() -> Vec<String> {
         "helm/",
         "deploy/",
     ];
-    staged_files(&[".yaml", ".yml"])
+    staged_files(EXTS)
         .into_iter()
         .filter(|f| PREFIXES.iter().any(|p| f.starts_with(p)))
         .collect()
@@ -123,7 +128,12 @@ pub fn kube_linter(_args: &[std::ffi::OsString]) -> Outcome {
     // does not use, and does not report a gap it does not have.
     let configs = kube_linter_configs(&root);
     if configs.is_empty() {
-        warn("Kubernetes manifests staged but no .kube-linter*.yaml found; skipping");
+        // SILENT, like `yamllint::run` in exactly this situation. It used to
+        // print a skip notice, which fires on EVERY commit that touches
+        // `kubernetes/**.yaml` in a repository that has no `.kube-linter*.yaml`
+        // and never will — the same "a repo that never wanted yamllint was told
+        // to install it" noise `docs/hook-architecture.md` records these three
+        // checks being fixed for.
         return Outcome::Passed;
     }
     if which("kube-linter").is_none() {

@@ -3,13 +3,18 @@
 
 use super::common::{
     fail, first_existing, fixing_enabled, hl, ok, repo_root, resolve_tool, restage,
-    run as run_tool, staged_files, warn,
+    run as run_tool, run_quiet, staged_files, warn, Restaged,
 };
 use crate::check::Outcome;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
-const EXTS: [&str; 17] = [
+/// Everything prettier is asked to look at.
+///
+/// Exported, even though `registry.rs` deliberately declares
+/// `Scope::files(&[])` for this check (it is opt-in by CONFIG, not by file
+/// type): the drift guard needs to know what the check actually consumes, and
+/// an empty declared set is a subset of this one.
+pub const EXTS: &[&str] = &[
     ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".json", ".jsonc", ".css", ".scss", ".less",
     ".html", ".vue", ".md", ".mdx", ".yaml", ".yml",
 ];
@@ -45,7 +50,7 @@ fn has_config(root: &str) -> bool {
 }
 
 pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
-    let files = staged_files(&EXTS);
+    let files = staged_files(EXTS);
     if files.is_empty() {
         return Outcome::Passed;
     }
@@ -83,52 +88,61 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
     // `-x.js` would otherwise be read as a flag by prettier's own parser —
     // and prettier does not even error on that, it exits 0 having checked
     // nothing, so the file would silently never be linted at all.
+    // ONE `--check` pass. It used to run twice on the clean path — once to
+    // decide whether to repair, once to decide the verdict — which is a whole
+    // extra prettier startup on every commit that had nothing wrong with it.
     let mut check = flags.clone();
     check.push("--check".into());
     check.push("--".into());
     check.extend(files.iter().cloned());
-    if !run_quiet(&root, &argv, &check) && fixing_enabled() {
+    if run_quiet(&root, &argv, &check) {
+        ok("Prettier passed");
+        return Outcome::Passed;
+    }
+
+    if fixing_enabled() {
         // Asked to repair, so repair rather than reporting an instruction the
         // author would carry out identically by hand.
         let mut write = flags.clone();
         write.push("--write".into());
         write.push("--".into());
         write.extend(files.iter().cloned());
-        if run_quiet(&root, &argv, &write) && restage(&files) {
-            ok("Prettier reformatted and re-staged");
-            return Outcome::Fixed;
+        if run_quiet(&root, &argv, &write) {
+            // Dropping the confirming re-`--check` after the write is safe:
+            // `prettier --write` exits NON-ZERO on a parse error, so a
+            // successful write means the files are formatted.
+            match restage(&files) {
+                Restaged::Staged => {
+                    ok("Prettier reformatted and re-staged");
+                    return Outcome::Fixed;
+                }
+                // The index still holds the content prettier has just replaced
+                // on disk. Reporting anything but a failure here is how
+                // unformatted code reached a commit the hook called clean.
+                Restaged::Failed(stuck) => {
+                    fail(&format!(
+                        "Prettier reformatted these files but {} failed — the index still \
+                         holds the UNFORMATTED content: {}",
+                        hl("git add"),
+                        stuck.join(", ")
+                    ));
+                    return Outcome::Failed;
+                }
+                // Nothing differed from the index, so the write changed
+                // nothing that was staged. Fall through and report.
+                Restaged::Nothing => {}
+            }
         }
     }
-    if !run_quiet(&root, &argv, &check) {
-        fail(&format!(
-            "Prettier found unformatted files. Run {} on:",
-            hl("prettier --write")
-        ));
-        let mut list = flags;
-        list.push("--list-different".into());
-        list.push("--".into());
-        list.extend(files);
-        let _ = run_tool(&root, &argv, &list);
-        return Outcome::Failed;
-    }
-    ok("Prettier passed");
-    Outcome::Passed
-}
 
-/// Like `common::run` but silent — the check pass only decides the verdict; the
-/// offending files are printed by the `--list-different` pass after it.
-fn run_quiet(root: &str, argv: &[String], extra: &[String]) -> bool {
-    let Some((program, rest)) = argv.split_first() else {
-        return true;
-    };
-    Command::new(program)
-        .args(rest)
-        .args(extra)
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    fail(&format!(
+        "Prettier found unformatted files. Run {} on:",
+        hl("prettier --write")
+    ));
+    let mut list = flags;
+    list.push("--list-different".into());
+    list.push("--".into());
+    list.extend(files);
+    let _ = run_tool(&root, &argv, &list);
+    Outcome::Failed
 }

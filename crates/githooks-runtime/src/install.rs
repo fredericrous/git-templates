@@ -22,7 +22,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::ui::{highlight, valid_sign, warning_sign};
+use crate::hookfile::{self, HookFile, Refuse, Staged, SwapFailure};
+use crate::ui::{error_sign, highlight, valid_sign, warning_sign};
 
 /// The token every shim carries until it is baked.
 pub const PLACEHOLDER: &str = "__GITHOOKS_BIN__";
@@ -32,20 +33,15 @@ pub const PLACEHOLDER: &str = "__GITHOOKS_BIN__";
 /// copy honest against `templates/hooks/`.
 pub const SHIM: &str = include_str!("../../../templates/hooks/pre-commit");
 
-/// A line every shim carries and nothing else does.
+/// The ownership question, and every other "may we touch this file?" answer,
+/// now live in [`crate::hookfile`] — one implementation that fails closed,
+/// rather than the three `unwrap_or(false)` one-liners that used to answer it
+/// here, in `fleet::scan` and in `fleet::fix`.
 ///
-/// `uninstall` needs to answer "is this file ours to delete?" and the answer
-/// must not be "it is named pre-commit". A colleague's own `pre-commit` lives at
-/// the same path and deleting it would be the third time this project destroyed
-/// somebody's file. Marker-based on purpose rather than byte-comparing against
-/// `bake(SHIM, path)`: a shim somebody hand-edited is still ours, and uninstall
-/// should still take it.
-pub const SHIM_MARKER: &str = "git-templates hook shim";
-
-/// Whether a file in `.git/hooks` is one of ours.
-pub fn is_our_shim(text: &str) -> bool {
-    text.contains(SHIM_MARKER)
-}
+/// Re-exported rather than moved outright because both fleet call sites and the
+/// dashboard's `shim` module name them through this path, and a rename would be
+/// churn in files this change has no business editing.
+pub use crate::hookfile::{is_our_shim, SHIM_MARKER};
 
 /// The hook names git actually invokes, and so the only files we install.
 pub const DISPATCHERS: [&str; 4] = ["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"];
@@ -119,6 +115,44 @@ pub fn bake(shim: &str, bin: &str) -> String {
     shim.replace(PLACEHOLDER, bin)
 }
 
+/// Whether the shim will accept `bin` as its baked path.
+///
+/// The shim rejects anything relative before it ever touches the filesystem,
+/// and this is the same rule stated where the value is produced. Git runs a
+/// hook with the working tree as the current directory, so a relative baked
+/// path is a question asked of the REPOSITORY — and a clone that ships a file
+/// by that name gets to answer it. Baking one would install a hook that either
+/// cannot resolve its binary or resolves it to somebody else's, so refuse here
+/// too, where the message can say which path was wrong.
+///
+/// Absolute means POSIX `/…` or a Windows drive path (`C:\…`, `C:/…`).
+pub fn is_bakeable(bin: &str) -> bool {
+    if bin.is_empty() || bin == PLACEHOLDER {
+        return false;
+    }
+    let b = bin.as_bytes();
+    if b[0] == b'/' {
+        return true;
+    }
+    b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
+}
+
+/// An absolute form of `p`, for baking.
+///
+/// NOT `canonicalize`: that returns an extended-length path (`\\?\C:\…`) on
+/// Windows, which `sh` cannot test, and it fails outright on a path that does
+/// not exist yet. `$GITHOOKS_BIN_DIR` may be relative, which is the route by
+/// which a relative path could reach a shim at all.
+fn absolute(p: &Path) -> PathBuf {
+    if p.is_absolute() {
+        return p.to_path_buf();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(p),
+        Err(_) => p.to_path_buf(),
+    }
+}
+
 /// `~/.local/bin`, or `$GITHOOKS_BIN_DIR`.
 pub fn bin_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("GITHOOKS_BIN_DIR") {
@@ -164,35 +198,145 @@ fn name_for(exe: &Path) -> String {
     }
 }
 
-/// Hook files in `dir` that exist and are NOT ours.
+/// Hook files in `dir` that exist and are NOT ours, each with its reason.
 ///
 /// `install` used to write all four unconditionally, which silently destroyed a
 /// `commit-msg` somebody had written themselves. That is the same failure as the
 /// two that overwrote tracked files, one directory along, and it had no guard at
 /// all — the fleet's `fix` planner has one and the per-repo installer never did.
-fn foreign_hooks(dir: &Path) -> Vec<&'static str> {
+///
+/// It carries the [`HookFile`] rather than only the name because "commit-msg is
+/// not ours" sends somebody to diff a file against a shim they have never seen,
+/// while "commit-msg is not valid UTF-8 — a compiled hook, probably" ends the
+/// question. The old version could not have said either: it read the file as a
+/// string, and a file it could not read came back as NOT foreign.
+fn foreign_hooks(dir: &Path) -> Vec<(&'static str, HookFile)> {
     DISPATCHERS
         .into_iter()
-        .filter(|name| {
-            std::fs::read_to_string(dir.join(name))
-                .map(|text| !is_our_shim(&text))
-                .unwrap_or(false)
-        })
+        .map(|name| (name, hookfile::classify(&dir.join(name))))
+        .filter(|(_, what)| !matches!(what, HookFile::Absent | HookFile::Ours))
         .collect()
 }
 
-fn write_shims(dir: &Path, bin: &str) -> std::io::Result<usize> {
-    let baked = bake(SHIM, bin);
-    let mut n = 0;
-    for name in DISPATCHERS {
-        let path = dir.join(name);
-        std::fs::write(&path, &baked)?;
-        make_executable(&path)?;
-        n += 1;
-    }
-    Ok(n)
+/// One dispatcher that landed, and what stood at that path before it.
+///
+/// `replaced` exists so `--force` can say what it took. It printed
+/// "baked 4 shims" and nothing else, which is a receipt for an act whose whole
+/// point is that it destroys something — the user typed `--force` precisely
+/// because there was a file there, and the one thing the output never said was
+/// which files or what they were.
+#[derive(Debug)]
+pub struct Written {
+    pub path: PathBuf,
+    pub replaced: HookFile,
 }
 
+/// Why a set of shims was not written.
+#[derive(Debug)]
+pub enum ShimWriteError {
+    /// One or more paths are not ours to write. Every refusal is carried, not
+    /// just the first: somebody about to run `--force` should see all four.
+    Refused(Vec<Refuse>),
+    /// A failure before any destination was touched — an unbakeable path, or a
+    /// staging write that could not happen (no space, no permission).
+    Preflight { at: PathBuf, error: std::io::Error },
+    /// Staging succeeded and a rename did not. The only failure mode that can
+    /// leave a directory partly written, which is why it carries the lists.
+    Swap(SwapFailure),
+}
+
+impl std::fmt::Display for ShimWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ShimWriteError::Refused(refusals) => {
+                writeln!(f, "refusing to write {} hooks:", refusals.len())?;
+                for (i, r) in refusals.iter().enumerate() {
+                    if i > 0 {
+                        writeln!(f)?;
+                    }
+                    write!(f, "    {}", r.explain())?;
+                }
+                Ok(())
+            }
+            ShimWriteError::Preflight { at, error } => {
+                write!(f, "cannot prepare {}: {error}", at.display())
+            }
+            ShimWriteError::Swap(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+/// Write the four dispatchers into `dir`: guard ALL, stage ALL, then swap.
+///
+/// Three phases, in that order, because the posture `bake_repo_hooks` has
+/// claimed since it was written — "fail closed, and for the whole repository
+/// rather than per file: a partial install is how a repo ends up with two of
+/// four hooks and no way to tell" — was a comment over a loop that checked one
+/// file and then wrote it, four times. A refusal on the third hook came after
+/// two had already been overwritten.
+///
+/// Now: every path is guarded before any body is written, and every body is
+/// written before any destination is touched. A refusal anywhere means nothing
+/// at all was written; a staging failure likewise. Only the swap can leave a
+/// directory partly done, and that is reported as exactly which files landed
+/// and which did not (see [`SwapFailure`]) rather than as a count.
+///
+/// Returns what was written and what each write replaced, so `--force` can name
+/// what it took.
+fn write_shims(dir: &Path, bin: &str, force: bool) -> Result<Vec<Written>, ShimWriteError> {
+    // Fail closed rather than write four hooks that resolve to nothing — or, if
+    // the repository happens to hold a file by that name, to something.
+    if !is_bakeable(bin) {
+        return Err(ShimWriteError::Preflight {
+            at: dir.to_path_buf(),
+            error: std::io::Error::other(format!(
+                "refusing to bake {bin:?}: the shim takes an absolute path only"
+            )),
+        });
+    }
+    let baked = bake(SHIM, bin);
+
+    // Phase 1 — guard every path. Nothing has been written and nothing will be
+    // if a single one of these refuses.
+    let mut allowed: Vec<(PathBuf, HookFile)> = Vec::new();
+    let mut refusals: Vec<Refuse> = Vec::new();
+    for name in DISPATCHERS {
+        let path = dir.join(name);
+        match hookfile::guard_write(&path, force) {
+            Ok(what) => allowed.push((path, what)),
+            Err(r) => refusals.push(r),
+        }
+    }
+    if !refusals.is_empty() {
+        return Err(ShimWriteError::Refused(refusals));
+    }
+
+    // Phase 2 — stage every body. A `Staged` that never lands removes its own
+    // temporary on drop, so an error here leaves the directory as it was.
+    let mut staged: Vec<Staged> = Vec::new();
+    for (path, _) in &allowed {
+        match hookfile::stage(path, &baked, true) {
+            Ok(s) => staged.push(s),
+            Err(error) => {
+                return Err(ShimWriteError::Preflight {
+                    at: path.clone(),
+                    error,
+                });
+            }
+        }
+    }
+
+    // Phase 3 — swap. Renames, so a symlinked destination is REPLACED rather
+    // than written through.
+    hookfile::commit_all(staged).map_err(ShimWriteError::Swap)?;
+    Ok(allowed
+        .into_iter()
+        .map(|(path, replaced)| Written { path, replaced })
+        .collect())
+}
+
+/// For the installed BINARY only — shims get their mode from `hookfile::stage`,
+/// before they are anywhere a hook could be dispatched from.
 #[cfg(unix)]
 fn make_executable(p: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -212,7 +356,7 @@ fn make_executable(_p: &Path) -> std::io::Result<()> {
 /// functions.
 pub fn run(force: bool) -> Result<(), String> {
     let binary = install_binary()?;
-    populate_template_dir(&binary)?;
+    populate_template_dir(&binary, force)?;
     bake_repo_hooks(&binary, force)?;
     offer_trust();
     offer_agents_md();
@@ -229,7 +373,13 @@ pub fn run(force: bool) -> Result<(), String> {
 /// Never blocks and never fails the install: a repository that declares nothing
 /// says nothing, and a non-interactive install simply reports the state.
 fn offer_trust() {
-    let root = crate::hooks::common::repo_root();
+    // No repository, no manifest to ask about. `repo_root()` answered "." and
+    // this went looking for `./.githooks.conf` in whatever directory the
+    // install was run from — a file it would then have offered to trust ON
+    // BEHALF of a repository that does not exist.
+    let Ok(root) = crate::hooks::common::repo_root_checked() else {
+        return;
+    };
     let root = Path::new(&root);
     let state = crate::trust::state(root);
     if matches!(
@@ -245,15 +395,26 @@ fn offer_trust() {
         warning_sign(),
         crate::manifest::MANIFEST
     );
-    print!("{}", crate::trust::describe(root));
-    // Fingerprint what was just shown BEFORE asking, not after: `confirm()`
-    // blocks on a keypress, sometimes for several seconds, and a file
-    // rewritten in that window must not be trusted under the guise of the
-    // content that was actually displayed. `record_verified` re-checks this
-    // fingerprint still matches once the answer is in, rather than trusting
-    // whatever happens to be on disk by then.
+    // Read ONCE, then show and fingerprint that same buffer. `confirm()` blocks
+    // on a keypress, sometimes for several seconds, and a file rewritten in
+    // that window must not be trusted under the guise of the content that was
+    // displayed — `record_verified` re-checks this fingerprint once the answer
+    // is in. Reading separately to show and to hash would leave the same gap
+    // one step earlier: the listing approved need not be the one recorded.
     let manifest = root.join(crate::manifest::MANIFEST);
-    let Some(fp) = crate::trust::fingerprint(root, &manifest) else {
+    let Ok(source) = std::fs::read(&manifest) else {
+        println!(
+            "{} could not read {}",
+            warning_sign(),
+            crate::manifest::MANIFEST
+        );
+        return;
+    };
+    print!(
+        "{}",
+        crate::trust::describe_source(&String::from_utf8_lossy(&source))
+    );
+    let Some(fp) = crate::trust::fingerprint_bytes(root, &source) else {
         println!(
             "{} could not hash {}",
             warning_sign(),
@@ -288,7 +449,13 @@ fn offer_trust() {
 /// nothing to offer, and a non-interactive install simply leaves the
 /// question unanswered — `trust::confirm` already treats no tty as "no".
 fn offer_agents_md() {
-    let root = crate::hooks::common::repo_root();
+    // Same reason as `offer_trust`: with `repo_root()`'s "." fallback, an
+    // install run outside a repository offered to write an AGENTS.md into the
+    // current directory — the one thing `install` writes to TRACKED content,
+    // aimed at a directory nobody said was a project.
+    let Ok(root) = crate::hooks::common::repo_root_checked() else {
+        return;
+    };
     let path = Path::new(&root).join("AGENTS.md");
     match crate::agents_md::check(&path) {
         Ok(crate::agents_md::CheckResult::MatchesGenerated) => return,
@@ -320,10 +487,24 @@ fn install_binary() -> Result<String, String> {
     let dir = bin_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
 
-    let target = dir.join(installed_name());
+    // Absolute from here on: this path is what gets baked into every shim, and
+    // `bin_dir()` honours `$GITHOOKS_BIN_DIR`, which may be relative.
+    let target = absolute(&dir.join(installed_name()));
     // Copying a running binary over ITSELF fails on some platforms and is
     // pointless on all of them.
-    let already_there = me.canonicalize().ok() == target.canonicalize().ok();
+    //
+    // `me.canonicalize().ok() == target.canonicalize().ok()` is the version
+    // this replaces, and it was wrong in the one case that matters: when the
+    // TARGET does not exist yet — a first install, the whole point of the
+    // step — `canonicalize` returns `Err`, both sides are `None`, `None ==
+    // None` is true, and the copy was skipped. The binary was never installed,
+    // and `install` printed "installed <path>" for a file that was not there.
+    // Every shim then baked that path and resolved nothing. Two `Ok`s that
+    // agree is the only thing that means "same file".
+    let already_there = matches!(
+        (me.canonicalize(), target.canonicalize()),
+        (Ok(a), Ok(b)) if a == b
+    );
     if !already_there {
         std::fs::copy(&me, &target)
             .map_err(|e| format!("cannot install to {}: {e}", target.display()))?;
@@ -341,7 +522,7 @@ fn install_binary() -> Result<String, String> {
 /// checkout, there is nothing to install and the install has succeeded. FAILING
 /// to write one it was allowed to write is, though — reporting success after a
 /// step did not happen is the thing this whole codebase is arranged against.
-fn populate_template_dir(binary: &str) -> Result<(), String> {
+fn populate_template_dir(binary: &str, force: bool) -> Result<(), String> {
     let dir = template_hooks_dir();
     let _ = std::fs::create_dir_all(&dir);
     // Report the RESOLVED path. "It is the checkout" is only useful with the
@@ -371,12 +552,34 @@ fn populate_template_dir(binary: &str) -> Result<(), String> {
             println!("{} cannot resolve {shown} — skipping.", warning_sign())
         }
         TemplateDir::Safe => {
-            let written = write_shims(&dir, binary)
+            let written = write_shims(&dir, binary, force)
                 .map_err(|e| format!("cannot write shims to {shown}: {e}"))?;
-            println!("{} wrote {written} shims to {shown}", valid_sign());
+            println!("{} wrote {} shims to {shown}", valid_sign(), written.len());
+            report_overwrites(&written);
         }
     }
     Ok(())
+}
+
+/// Say what each write took, for the writes that took something.
+///
+/// `install --force` used to print `baked 4 shims` and stop. `--force` is
+/// typed precisely because a file is in the way, so the one fact the output
+/// omitted is the only fact the user needed: which files, and what they were.
+/// A hook replaced with no record of what it was is unrecoverable — `.git` is
+/// not tracked, so there is nothing to `git checkout` it back from.
+fn report_overwrites(written: &[Written]) {
+    for w in written {
+        if matches!(w.replaced, HookFile::Absent | HookFile::Ours) {
+            continue;
+        }
+        println!(
+            "{} overwrote {} — it was {}",
+            warning_sign(),
+            w.path.display(),
+            w.replaced.describe()
+        );
+    }
 }
 
 /// Where git will actually look for hooks in the repository we are standing
@@ -393,6 +596,15 @@ fn repo_hooks_dir() -> Option<PathBuf> {
 }
 
 /// Bake the shims into the repository we are standing in, if we are in one.
+///
+/// The tracked guard is inherited from `hookfile::guard_write` rather than
+/// written here, and that inheritance closes a verified bug: with
+/// `.git/hooks/pre-commit` a symlink to a TRACKED `devhooks/pre-commit`,
+/// `install --force` rewrote the tracked source file. Every guard this function
+/// had was about the LINK path — untracked, inside `.git`, unremarkable — while
+/// `fs::write` followed the link and landed in the working tree. Both halves
+/// are fixed at once: the symlink is refused by name, and `--force` replaces
+/// the link by rename instead of writing through it.
 fn bake_repo_hooks(binary: &str, force: bool) -> Result<(), String> {
     let Some(hooks) = repo_hooks_dir() else {
         println!(
@@ -403,24 +615,33 @@ fn bake_repo_hooks(binary: &str, force: bool) -> Result<(), String> {
     };
     let _ = std::fs::create_dir_all(&hooks);
 
-    // Fail closed, and for the whole repository rather than per file: a partial
-    // install is how a repo ends up with two of four hooks and no way to tell.
+    // Asked here, ahead of the guard, only so the message can offer `--force`.
+    // The guard inside `write_shims` is the one that decides, and it refuses
+    // things `--force` will not move (a tracked path, a path git cannot answer
+    // for) which this pre-check deliberately says nothing about.
     let foreign = foreign_hooks(&hooks);
     if !foreign.is_empty() && !force {
-        return Err(format!(
-            "{} {} already has hooks that are not ours: {}\n    Look at them first, then `githooks install --force`.",
-            crate::ui::error_sign(),
-            hooks.display(),
-            foreign.join(", ")
-        ));
+        let mut msg = format!(
+            "{} {} already has hooks that are not ours:",
+            error_sign(),
+            hooks.display()
+        );
+        for (name, what) in &foreign {
+            msg.push_str(&format!("\n    {name} — {}", what.describe()));
+        }
+        msg.push_str("\n    Look at them first, then `githooks install --force`.");
+        return Err(msg);
     }
-    let written = write_shims(&hooks, binary)
+
+    let written = write_shims(&hooks, binary, force)
         .map_err(|e| format!("cannot write shims to {}: {e}", hooks.display()))?;
     println!(
-        "{} baked {written} shims into {}",
+        "{} baked {} shims into {}",
         valid_sign(),
+        written.len(),
         hooks.display()
     );
+    report_overwrites(&written);
     Ok(())
 }
 
@@ -435,36 +656,13 @@ fn bake_repo_hooks(binary: &str, force: bool) -> Result<(), String> {
 ///   reinstall should not silently forget that they disabled a check;
 /// - the binary goes only when asked, because other repositories are using it.
 pub fn uninstall(remove_binary: bool) -> Result<(), String> {
-    let Some(hooks) = repo_hooks_dir() else {
-        return Err("not inside a git repository".to_string());
-    };
-
-    let mut removed = 0usize;
-    let mut foreign: Vec<&str> = Vec::new();
-    for name in DISPATCHERS {
-        let path = hooks.join(name);
-        match std::fs::read_to_string(&path) {
-            Err(_) => {}
-            Ok(text) if is_our_shim(&text) => {
-                std::fs::remove_file(&path)
-                    .map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
-                removed += 1;
-            }
-            Ok(_) => foreign.push(name),
-        }
-    }
-    println!(
-        "{} removed {removed} shims from {}",
-        valid_sign(),
-        hooks.display()
-    );
-    if !foreign.is_empty() {
-        println!(
-            "{} left alone (not ours): {}",
-            warning_sign(),
-            foreign.join(", ")
-        );
-    }
+    // The template directory FIRST, and unconditionally, because it is the only
+    // part of an install that keeps working when you are not standing in a
+    // repository — and because `uninstall` returning early with "not inside a
+    // git repository" is how the standing grant survived every attempt to
+    // revoke it.
+    uninstall_template_dir()?;
+    uninstall_repo_hooks()?;
 
     if remove_binary {
         let target = bin_dir().join(installed_name());
@@ -479,10 +677,167 @@ pub fn uninstall(remove_binary: bool) -> Result<(), String> {
         }
     }
 
+    report_global_template_dir();
+
     // Said out loud, because a user who uninstalls and reinstalls should not be
     // surprised that a check they disabled is still disabled.
     println!("    hook.skip and githooks.severity were not touched.");
     Ok(())
+}
+
+/// Remove our shims from the repository we are standing in, naming everything
+/// we did not take and why.
+///
+/// Every non-removal is now NAMED. The loop this replaces matched
+/// `Err(_) => {}` on `read_to_string`, so a hook that could not be read at all
+/// — a compiled one, or one whose permissions we lack — was passed over in
+/// total silence: not removed, not counted, not mentioned. The README's promise
+/// that a foreign hook is "left alone and named" was true only for hooks that
+/// happened to be valid UTF-8.
+///
+/// Not being in a repository is a warning rather than an error. It used to
+/// return `Err`, which was defensible on its own but became wrong once
+/// `uninstall_template_dir` existed: the early return meant that running
+/// `githooks uninstall` from a plain directory did nothing AND said nothing,
+/// while `init.templateDir` quietly went on installing hooks into every future
+/// clone. Refusing is not failing — the same rule `populate_template_dir`
+/// already states.
+fn uninstall_repo_hooks() -> Result<(), String> {
+    let Some(hooks) = repo_hooks_dir() else {
+        println!(
+            "{} not inside a git repository — no repo hooks removed.",
+            warning_sign()
+        );
+        return Ok(());
+    };
+
+    let mut removed = 0usize;
+    let mut left: Vec<String> = Vec::new();
+    for name in DISPATCHERS {
+        let path = hooks.join(name);
+        match hookfile::classify(&path) {
+            HookFile::Absent => {}
+            HookFile::Ours => match hookfile::guard_remove(&path, true) {
+                Ok(()) => {
+                    hookfile::remove_regular(&path)
+                        .map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
+                    removed += 1;
+                }
+                // Ours by marker, and still not ours to delete: a tracked path,
+                // or one git could not answer for.
+                Err(r) => left.push(r.explain()),
+            },
+            what => left.push(format!("{name} — {}", what.describe())),
+        }
+    }
+    println!(
+        "{} removed {removed} shims from {}",
+        valid_sign(),
+        hooks.display()
+    );
+    for reason in &left {
+        println!("{} left alone: {reason}", warning_sign());
+    }
+    Ok(())
+}
+
+/// Take our shims back out of the template directory.
+///
+/// `install` writes there; `uninstall` did not, which meant uninstall did not
+/// undo install. Combined with `init.templateDir`, that is the failure worth
+/// spelling out: the user runs `githooks uninstall`, sees "removed 4 shims",
+/// believes they are done — and every `git clone` and `git init` from then on
+/// copies the template directory into the new repository's `.git/hooks` and
+/// installs the hooks again. They uninstalled a repository, not a machine.
+///
+/// The same classification `install` uses decides what may happen here, for the
+/// same reason and with the sharper stake: `~/.config/git/git-templates` is
+/// commonly a SYMLINK to a checkout of this repository, and "uninstalling"
+/// there means `rm` on tracked source. That is not a hypothetical; it is the
+/// two incidents this module exists because of, and a delete has no `--force`.
+fn uninstall_template_dir() -> Result<(), String> {
+    let dir = template_hooks_dir();
+    // The RESOLVED path, because the configured one is usually the symlink that
+    // hides exactly what we are about to explain.
+    let shown = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+    let shown = shown.display();
+
+    match classify_dir(&dir) {
+        TemplateDir::IsCheckout | TemplateDir::InsideCheckout => {
+            println!(
+                "{} template dir is a git checkout ({shown}) — deleting NOTHING there.",
+                warning_sign()
+            );
+            println!("    Those shims are tracked files belonging to that checkout,");
+            println!("    not something this install put there. Remove them with git,");
+            println!("    or point init.templateDir somewhere else.");
+        }
+        TemplateDir::NoGit => println!(
+            "{} git is not on PATH — cannot tell whether {shown} is a checkout, deleting nothing.",
+            warning_sign()
+        ),
+        TemplateDir::Unresolvable => println!(
+            "{} no template dir at {shown} — nothing to remove.",
+            warning_sign()
+        ),
+        TemplateDir::Safe => {
+            let mut removed = 0usize;
+            let mut left: Vec<String> = Vec::new();
+            for name in DISPATCHERS {
+                let path = dir.join(name);
+                match hookfile::classify(&path) {
+                    HookFile::Absent => {}
+                    HookFile::Ours => match hookfile::guard_remove(&path, true) {
+                        Ok(()) => {
+                            hookfile::remove_regular(&path)
+                                .map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
+                            removed += 1;
+                        }
+                        Err(r) => left.push(r.explain()),
+                    },
+                    what => left.push(format!("{name} — {}", what.describe())),
+                }
+            }
+            println!("{} removed {removed} shims from {shown}", valid_sign());
+            for reason in &left {
+                println!("{} left alone: {reason}", warning_sign());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Say, every time, whether `init.templateDir` is still pointing at us.
+///
+/// UNCONDITIONAL, including when the template dir was a checkout we refused to
+/// touch and when there was no template dir at all — because the config setting
+/// is what actually installs hooks into new repositories, and it survives every
+/// file this command removes. An uninstall that leaves it set has not
+/// uninstalled anything durable: the next `git clone` re-installs.
+///
+/// Printed rather than unset. `git config --global` is the user's file, holding
+/// their identity and their aliases, and reaching into it uninvited is a larger
+/// claim than removing files this tool wrote. The command to run is given
+/// verbatim so it is a copy rather than a lookup.
+fn report_global_template_dir() {
+    let Some(configured) = crate::git::stdout(&["config", "--global", "--get", "init.templateDir"])
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    println!();
+    println!(
+        "{} init.templateDir is still set: {}",
+        warning_sign(),
+        highlight(&configured)
+    );
+    println!("    Every `git clone` and `git init` still copies hooks from there");
+    println!("    into the new repository. Uninstalling this repo did not change that.");
+    println!("    Undo it with:");
+    println!(
+        "        {}",
+        highlight("git config --global --unset init.templateDir")
+    );
 }
 
 #[cfg(test)]
@@ -614,17 +969,147 @@ mod tests {
         }
     }
 
+    /// Only an absolute path may be baked.
+    ///
+    /// A relative one is resolved by the shim against the WORKING TREE, so a
+    /// repository shipping an executable by that name would be running it on
+    /// the first commit after clone.
+    #[test]
+    fn only_an_absolute_path_is_bakeable() {
+        for good in [
+            "/opt/githooks",
+            "/home/u/.local/bin/githooks",
+            "C:/Users/u/githooks.exe",
+            "C:\\Users\\u\\githooks.exe",
+        ] {
+            assert!(is_bakeable(good), "{good} should be bakeable");
+        }
+        for bad in [
+            "",
+            PLACEHOLDER,
+            "githooks",
+            "./githooks",
+            "../githooks",
+            "target/debug/githooks",
+            "C:githooks.exe",
+        ] {
+            assert!(!is_bakeable(bad), "{bad:?} must not be bakeable");
+        }
+    }
+
+    /// The shim must never hand the unsubstituted token to `[ -x ]`: that is a
+    /// filesystem question asked in the repository's own directory.
+    #[test]
+    fn the_shim_never_tests_the_placeholder_as_a_path() {
+        assert!(
+            !SHIM.contains(&format!("[ -x \"{PLACEHOLDER}\" ]")),
+            "the shim tests the raw token as a path"
+        );
+        assert!(
+            SHIM.contains("case \"$BAKED\" in"),
+            "the shim lost its absoluteness guard"
+        );
+    }
+
+    /// Refusing beats writing four hooks that cannot resolve their binary.
+    #[test]
+    fn write_shims_refuses_a_relative_binary_path() {
+        let d = tmp("relative");
+        let err = write_shims(&d, "target/debug/githooks", false).expect_err("must refuse");
+        assert!(err.to_string().contains("absolute"), "{err}");
+        for name in DISPATCHERS {
+            assert!(!d.join(name).exists(), "{name} was written anyway");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// Every hook git invokes gets a file, and each is the baked shim.
     #[test]
     fn writing_shims_covers_every_dispatcher() {
         let d = tmp("write");
-        let n = write_shims(&d, "/opt/githooks").expect("write");
-        assert_eq!(n, DISPATCHERS.len());
+        let written = write_shims(&d, "/opt/githooks", false).expect("write");
+        assert_eq!(written.len(), DISPATCHERS.len());
         for name in DISPATCHERS {
             let got = std::fs::read_to_string(d.join(name)).expect("read");
             assert!(!got.contains(PLACEHOLDER), "{name} was written unbaked");
             assert!(got.contains("/opt/githooks"), "{name} has no path");
         }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The whole-repository posture, at the level of the function that owes it:
+    /// ONE unwritable path and nothing at all is written. `bake_repo_hooks` has
+    /// claimed this in a comment since it was written, over a loop that checked
+    /// one file then wrote it, four times over — so a refusal on the third hook
+    /// arrived after two were already gone.
+    #[test]
+    fn one_refusal_writes_nothing_at_all() {
+        let d = tmp("all-or-nothing");
+        // `prepare-commit-msg` sorts last among the dispatchers, so under the
+        // old check-then-write loop the first three would already be on disk by
+        // the time this one refused.
+        let theirs = d.join("prepare-commit-msg");
+        std::fs::write(&theirs, "#!/bin/sh\necho MINE\n").expect("write");
+
+        let err = write_shims(&d, "/opt/githooks", false).expect_err("must refuse");
+        assert!(
+            matches!(err, ShimWriteError::Refused(ref rs) if rs.len() == 1),
+            "{err}"
+        );
+        for name in ["commit-msg", "pre-commit", "pre-push"] {
+            assert!(
+                !d.join(name).exists(),
+                "{name} was written despite a refusal elsewhere"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&theirs).expect("read"),
+            "#!/bin/sh\necho MINE\n"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A refusal has to say WHAT was in the way, not only that something was.
+    /// The old predicate could not: it read the file as a string, so the one
+    /// case worth naming — a compiled hook — came back as "not foreign" and was
+    /// overwritten in silence.
+    #[test]
+    fn a_refusal_names_the_reason_for_each_hook() {
+        let d = tmp("named");
+        std::fs::write(d.join("commit-msg"), [0x7f, b'E', b'L', b'F', 0xff]).expect("write");
+        std::fs::write(d.join("pre-commit"), "#!/bin/sh\necho mine\n").expect("write");
+
+        let err = write_shims(&d, "/opt/githooks", false).expect_err("must refuse");
+        let text = err.to_string();
+        assert!(text.contains("not valid UTF-8"), "{text}");
+        assert!(text.contains("commit-msg"), "{text}");
+        assert!(text.contains("pre-commit"), "{text}");
+
+        // And `foreign_hooks` — which is what phrases the `--force` offer —
+        // agrees about both.
+        let foreign = foreign_hooks(&d);
+        assert_eq!(foreign.len(), 2, "{foreign:?}");
+        assert!(foreign
+            .iter()
+            .any(|(n, w)| *n == "commit-msg" && matches!(w, HookFile::Foreign(_))));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `--force` says what it took, per file, with what it was. Without this
+    /// the output was "baked 4 shims" — a receipt with the transaction left
+    /// off, for the one operation whose purpose is to destroy something.
+    #[test]
+    fn force_reports_what_each_write_replaced() {
+        let d = tmp("force-report");
+        std::fs::write(d.join("commit-msg"), "#!/bin/sh\necho mine\n").expect("write");
+        let written = write_shims(&d, "/opt/githooks", true).expect("force must write");
+        let replaced: Vec<_> = written
+            .iter()
+            .filter(|w| !matches!(w.replaced, HookFile::Absent))
+            .collect();
+        assert_eq!(replaced.len(), 1, "{written:?}");
+        assert!(replaced[0].path.ends_with("commit-msg"));
+        assert!(matches!(replaced[0].replaced, HookFile::Foreign(_)));
         let _ = std::fs::remove_dir_all(&d);
     }
 

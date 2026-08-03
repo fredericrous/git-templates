@@ -13,7 +13,10 @@
 //! disable them individually — `git config hook.skip clippy` when you are
 //! mid-refactor, without losing the formatting gate.
 
-use super::common::{fail, hl, ok, repo_root, run as run_tool, staged_files, warn, which};
+use super::common::{
+    fail, fixing_enabled, hl, ok, repo_root, restage, run as run_tool, staged_files, warn, which,
+    Restaged,
+};
 use crate::check::Outcome;
 use crate::git;
 use std::collections::BTreeSet;
@@ -23,13 +26,20 @@ use std::process::{Command, Stdio};
 /// Files that mean "this commit touches Rust". `Cargo.toml` and `Cargo.lock`
 /// count: a dependency bump compiles differently without a single `.rs` edit,
 /// and that is exactly when clippy earns its keep.
-const RUST_PATHS: [&str; 5] = [
+///
+/// Exported for the registry's drift guard: clippy and cargo-test consume this
+/// whole set while declaring only `.rs` plus a `Cargo.toml` opt-in.
+pub const RUST_PATHS: &[&str] = &[
     ".rs",
     "Cargo.toml",
     "Cargo.lock",
     "rustfmt.toml",
     "clippy.toml",
 ];
+
+/// What `cargo fmt` is handed. Exported so `registry.rs` declares the scope
+/// from the same constant — see `lint_json_yaml::EXTS`.
+pub const EXTS: &[&str] = &[".rs"];
 
 fn is_rust_path(f: &str) -> bool {
     let name = f.rsplit('/').next().unwrap_or(f);
@@ -103,6 +113,41 @@ fn cargo_argv() -> Option<Vec<String>> {
     which("cargo").map(|c| vec![c])
 }
 
+/// Resolve cargo and verify the component, or warn and give up.
+///
+/// Split out from `each_root` because `fmt` now runs TWO passes — a `--check`
+/// and, when repairing, a write — and the second must not re-probe rustfmt
+/// (a second `cargo fmt --version` per manifest root) nor duplicate the
+/// resolution it would have to get identical.
+fn cargo_for(roots: &[PathBuf], component: Option<&str>, missing: &str) -> Option<Vec<String>> {
+    let argv = cargo_argv().or_else(|| {
+        warn(missing);
+        None
+    })?;
+    if let Some(c) = component {
+        for dir in roots {
+            if !component_available(dir, c) {
+                warn(missing);
+                return None;
+            }
+        }
+    }
+    Some(argv)
+}
+
+/// Run one cargo invocation in every manifest root. True when all succeeded.
+fn run_in_roots(roots: &[PathBuf], argv: &[String], args: &[&str]) -> bool {
+    let extra: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let mut all_ok = true;
+    for dir in roots {
+        let d = dir.to_string_lossy().into_owned();
+        if !run_tool(&d, argv, &extra) {
+            all_ok = false;
+        }
+    }
+    all_ok
+}
+
 /// Shared shape: find the manifest roots, verify the component if there is one
 /// to verify, run the command in each, report once.
 ///
@@ -114,29 +159,12 @@ fn each_root(
     args: &[&str],
     missing: &str,
 ) -> Option<bool> {
-    let argv = cargo_argv().or_else(|| {
-        warn(missing);
-        None
-    })?;
-    let mut all_ok = true;
-    for dir in roots {
-        if let Some(c) = component {
-            if !component_available(dir, c) {
-                warn(missing);
-                return None;
-            }
-        }
-        let extra: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-        let d = dir.to_string_lossy().into_owned();
-        if !run_tool(&d, &argv, &extra) {
-            all_ok = false;
-        }
-    }
-    Some(all_ok)
+    let argv = cargo_for(roots, component, missing)?;
+    Some(run_in_roots(roots, &argv, args))
 }
 
 pub fn fmt(_args: &[std::ffi::OsString]) -> Outcome {
-    let files = staged_files(&[".rs"]);
+    let files = staged_files(EXTS);
     if files.is_empty() {
         return Outcome::Passed;
     }
@@ -145,28 +173,57 @@ pub fn fmt(_args: &[std::ffi::OsString]) -> Outcome {
     if roots.is_empty() {
         return Outcome::Passed;
     }
+    const MISSING: &str =
+        "Rust staged but rustfmt is not installed. `rustup component add rustfmt`.";
+    let Some(argv) = cargo_for(&roots, Some("fmt"), MISSING) else {
+        return Outcome::Unavailable;
+    };
+
     // `--all -- --check` per the project convention. It inspects the working
     // TREE rather than the index — and that is now correct, because the
     // pre-commit stage holds the unstaged changes aside for the duration, so
     // the tree IS the staged content. This comment used to call that "the same
     // trade-off cargo fmt gives everyone", which was true of the observation
     // and wrong about the conclusion: see `staged_only`.
-    match each_root(
-        &roots,
-        Some("fmt"),
-        &["fmt", "--all", "--", "--check"],
-        "Rust staged but rustfmt is not installed. `rustup component add rustfmt`.",
-    ) {
-        None => Outcome::Unavailable,
-        Some(true) => {
-            ok("Rust formatting is clean");
-            Outcome::Passed
-        }
-        Some(false) => {
-            fail(&format!("Unformatted Rust. Run {}.", hl("cargo fmt --all")));
-            Outcome::Failed
+    if run_in_roots(&roots, &argv, &["fmt", "--all", "--", "--check"]) {
+        ok("Rust formatting is clean");
+        return Outcome::Passed;
+    }
+
+    // The registry has always declared `Fix::Rewrite` for this check, and
+    // `githooks list --json` reported `"fix":"rewrite"` — which `agents_md`
+    // explicitly tells agents to trust — while no fixing code existed
+    // anywhere. Only prettier and the manifest's externals ever called
+    // `restage`. Rather than downgrade the declaration, the fixing is now
+    // real.
+    if fixing_enabled() && run_in_roots(&roots, &argv, &["fmt", "--all"]) {
+        // The non-obvious guard: `cargo fmt --all` formats the WHOLE
+        // workspace, not just the staged files — but `restage` is handed the
+        // staged `.rs` list, so nothing the author did not stage is staged
+        // here. The formatter's other edits stay in the working tree, exactly
+        // as an unrelated unstaged change would.
+        match restage(&files) {
+            Restaged::Staged => {
+                ok("Rust reformatted and re-staged");
+                return Outcome::Fixed;
+            }
+            Restaged::Failed(stuck) => {
+                fail(&format!(
+                    "cargo fmt rewrote these files but {} failed — the index still holds the \
+                     UNFORMATTED content: {}",
+                    hl("git add"),
+                    stuck.join(", ")
+                ));
+                return Outcome::Failed;
+            }
+            // Nothing staged differed, so whatever `--check` objected to was
+            // outside the staged set. Fall through and report it.
+            Restaged::Nothing => {}
         }
     }
+
+    fail(&format!("Unformatted Rust. Run {}.", hl("cargo fmt --all")));
+    Outcome::Failed
 }
 
 pub fn clippy(_args: &[std::ffi::OsString]) -> Outcome {

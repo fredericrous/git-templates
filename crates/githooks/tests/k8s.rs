@@ -46,9 +46,23 @@ fn argo_recognises_every_workflow_kind() {
     }
 }
 
+/// The one case in this repository that needs a tool to be ABSENT.
+///
+/// Every other gate here reads "skip unless the tool is installed". This one is
+/// inverted — it asserts the soft-fail branch, that a missing argo warns and
+/// lets the commit through — so installing argo does not enable it, it DISABLES
+/// it. CI therefore refuses to install argo, and says so in a step of its own.
+///
+/// The early return below used to be silent, which made that invisible from the
+/// outside: the log of a run on a machine WITH argo was byte-identical to the
+/// log of a run where this case had passed. `missing()` prints its marker only
+/// on the absent path, so the present path needs one of its own — worded
+/// distinctly, because CI's skip reporter looks for exactly one of these two
+/// markers and treats neither appearing as the case having quietly disappeared.
 #[test]
 fn argo_soft_fails_without_the_cli() {
     if !missing("argo") {
+        println!("  ! argo PRESENT — skipping (this case asserts the ABSENT branch)");
         return; // the gate only exists when the tool is absent
     }
     let r = Repo::new();
@@ -68,17 +82,32 @@ fn kube_linter_ignores_yaml_outside_the_k8s_prefixes() {
 }
 
 /// Stock rules are too noisy to enforce generically, so a repo-local config is
-/// the opt-in. Without one the hook must SAY it skipped, not lint anyway.
+/// the opt-in. Without one the hook does nothing AND SAYS NOTHING.
 ///
-/// And it must say only that: the opt-in is tested before the binary, so a repo
-/// with no config is not also asked to install a linter it does not use.
+/// CHANGE OF MIND, recorded: this case used to be
+/// `kube_linter_says_it_skipped_without_a_config`, and asserted that the notice
+/// MUST exist. Two reasons it is now the opposite. `yamllint::run` returns
+/// silently in precisely this situation and is the precedent — one of these
+/// three checks behaving differently is a difference nobody chose. And the
+/// notice fires on EVERY commit touching `kubernetes/**.yaml` in a repository
+/// that has no `.kube-linter*.yaml` and never will, which is the same "a repo
+/// that never wanted yamllint was told to install it" noise
+/// `docs/hook-architecture.md` records these three checks being fixed for.
+///
+/// The sibling assertion is KEPT: the opt-in is tested before the binary, so a
+/// repo with no config is still never asked to install a linter it does not
+/// use.
 #[test]
-fn kube_linter_says_it_skipped_without_a_config() {
+fn kube_linter_is_silent_without_a_config() {
     let r = Repo::new();
     r.stage("kubernetes/app/deploy.yaml", DEPLOY);
     let run = r.hook("pre-commit-kube-linter", &[]);
     assert!(run.passed());
-    assert!(run.says("skipping"), "no skip notice:\n{}", run.output());
+    assert!(
+        run.silent(),
+        "a repo that never opted in must hear nothing:\n{}",
+        run.output()
+    );
     assert!(
         !run.says("install"),
         "nagged a repo that never opted in:\n{}",

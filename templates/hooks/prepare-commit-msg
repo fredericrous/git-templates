@@ -20,6 +20,16 @@
 #                         global replace, so a comment containing the token gets
 #                         rewritten too, and the explanation turns into a machine
 #                         path. It did, for as long as this said otherwise.
+#                         ABSOLUTE, and checked for it below before it is used.
+#                         Git runs a hook with the working tree as the current
+#                         directory, so testing an UNSUBSTITUTED token with
+#                         `[ -x ]` asks the REPOSITORY whether it has a file by
+#                         that name — and a clone shipping an executable so
+#                         named would then be run here, on the first commit,
+#                         before any check and before any trust decision. The
+#                         unbaked shim is a supported state (3 below), so the
+#                         value has to be rejected outright rather than asked
+#                         about on disk.
 #   3. $HOME/.local/bin — the default install location, resolved at RUNTIME so
 #                         this template stays machine-agnostic. Without it, a
 #                         repo created by `git init` from a template dir that is
@@ -39,10 +49,20 @@ set -e
 HOOKS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 HOOK_NAME=$(basename -- "$0")
 
+# The baked path, and nothing relative — see 2 above. Absolute means POSIX `/…`
+# or a Windows drive path: `githooks install` bakes `C:\Users\…\githooks.exe` on
+# Git for Windows. An unbaked shim fails this and falls through to 3, which is
+# exactly what it should do.
+BAKED="__GITHOOKS_BIN__"
+case "$BAKED" in
+    /*|?:/*|?:\\*) ;;
+    *) BAKED= ;;
+esac
+
 if [ -n "$GIT_HOOKS_BIN" ] && [ -x "$GIT_HOOKS_BIN" ]; then
     BIN="$GIT_HOOKS_BIN"
-elif [ -x "__GITHOOKS_BIN__" ]; then
-    BIN="__GITHOOKS_BIN__"
+elif [ -n "$BAKED" ] && [ -x "$BAKED" ]; then
+    BIN="$BAKED"
 elif [ -x "$HOME/.local/bin/githooks" ]; then
     BIN="$HOME/.local/bin/githooks"
 elif [ -x "$HOME/.local/bin/githooks.exe" ]; then

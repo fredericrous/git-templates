@@ -143,8 +143,14 @@ fn untracked_files_are_left_alone() {
     );
 }
 
-/// Mid-merge the tree already holds somebody else's work, so taking a patch of
+/// Mid-merge the tree already holds somebody else's work, so taking a copy of
 /// it would be the wrong instrument entirely.
+///
+/// CHANGE OF MIND, recorded: this case used only to assert that the tree was
+/// untouched. That is still required and still asserted — but skipping the hold
+/// means every check judges the WORKING TREE rather than the index, and doing
+/// that in silence is the exact failure this module exists to prevent, dressed
+/// up as an ordinary clean run. So it must also SAY SO.
 #[test]
 fn nothing_is_stashed_mid_merge() {
     let r = Repo::new();
@@ -154,8 +160,69 @@ fn nothing_is_stashed_mid_merge() {
     std::fs::write(r.path(".git/MERGE_HEAD"), "deadbeef\n").expect("write");
 
     let run = r.hook("pre-commit", &[]);
-    assert!(run.passed(), "{}", run.output());
     assert_eq!(tree(&r, "x.json"), BROKEN, "the tree was touched mid-merge");
+    assert!(!r.path(".git/githooks-held").exists());
+    assert!(
+        run.says("in progress"),
+        "index fidelity was off and nothing said so:\n{}",
+        run.output()
+    );
+}
+
+/// …but ONLY when there is unstaged content. With a clean tree, fidelity is
+/// not actually off — the tree IS the index — so the notice would be noise on
+/// every commit of a merge resolution, which `registry.rs` deliberately keeps
+/// running its checks.
+#[test]
+fn mid_merge_with_a_clean_tree_says_nothing() {
+    let r = Repo::new();
+    seed(&r);
+    r.stage("x.json", VALID);
+    std::fs::write(r.path(".git/MERGE_HEAD"), "deadbeef\n").expect("write");
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(
+        !run.says("in progress"),
+        "nothing is degraded here, so nothing should be announced:\n{}",
+        run.output()
+    );
+}
+
+/// A conflicted path has no staged and unstaged halves to separate, so there
+/// is nothing this can honestly do — and it used to return "nothing held" with
+/// NO OUTPUT, leaving every check silently judging the working tree.
+/// `docs/index-fidelity-and-run-modes.md` §1 says conflicts ABORT the stage.
+///
+/// Safe by construction: git itself refuses a commit with unmerged entries, so
+/// nothing that would have succeeded is now blocked.
+#[test]
+fn a_conflicted_path_aborts_the_stage() {
+    let r = Repo::new();
+    r.stage("x.json", "{\n  \"a\": 1\n}\n");
+    r.commit("chore: seed");
+    r.git(&["checkout", "-q", "-b", "other"]);
+    r.stage("x.json", "{\n  \"a\": 2\n}\n");
+    r.commit("feat: theirs");
+    r.git(&["checkout", "-q", "main"]);
+    r.stage("x.json", "{\n  \"a\": 3\n}\n");
+    r.commit("feat: ours");
+    let merged = r.git(&["merge", "--no-commit", "other"]);
+    assert!(
+        !merged.status.success(),
+        "fixture: the merge was supposed to conflict"
+    );
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(
+        !run.passed(),
+        "a conflicted tree cannot be split, and this proceeded anyway:\n{}",
+        run.output()
+    );
+    assert!(
+        run.says("unmerged"),
+        "the refusal must name what it found:\n{}",
+        run.output()
+    );
     assert!(!r.path(".git/githooks-held").exists());
 }
 
@@ -279,11 +346,19 @@ fn restore_with_nothing_parked_is_fine() {
     assert!(out.status.success());
 }
 
-/// SIGINT mid-check must still restore. The handler itself only writes a byte
-/// to a pipe — a plain thread outside signal context does the actual restore
-/// — so this is the one test proving that indirection still ends where the
-/// old, simpler, signal-unsafe handler did: the tree back the way the author
-/// left it, and the process dead by the signal that hit it.
+/// A signal mid-check must still restore, for EVERY signal that is handled.
+///
+/// The handler itself only writes a byte to a pipe — a plain thread outside
+/// signal context does the actual restore — so this is the one test proving
+/// that indirection still ends where the old, simpler, signal-unsafe handler
+/// did: the tree back the way the author left it, and the process dead by the
+/// signal that hit it.
+///
+/// Parameterised over the signals a hook realistically meets. SIGHUP is the
+/// terminal-closed / SSH-dropped case and is at least as likely as Ctrl-C; it
+/// was NOT handled, so it orphaned the held store with nothing said. SIGQUIT
+/// (3) is handled too but deliberately left out of the table: it dumps core on
+/// some runners, which would make a passing suite look like a crash.
 ///
 /// `sleep 5` is the declared check: slow enough that the signal is guaranteed
 /// to land while it is still the thing running, cheap enough not to make a
@@ -291,7 +366,14 @@ fn restore_with_nothing_parked_is_fine() {
 /// waiting on it — `recv_timeout` below bounds that instead.
 #[cfg(unix)]
 #[test]
-fn sigint_mid_check_still_restores() {
+fn a_signal_mid_check_still_restores() {
+    for signal in ["-INT", "-HUP", "-TERM"] {
+        signal_mid_check_restores(signal);
+    }
+}
+
+#[cfg(unix)]
+fn signal_mid_check_restores(signal: &str) {
     let r = Repo::new();
     seed(&r);
     r.stage("x.json", VALID);
@@ -327,7 +409,7 @@ fn sigint_mid_check_still_restores() {
     }
 
     let signalled = Command::new("kill")
-        .arg("-INT")
+        .arg(signal)
         .arg(child.id().to_string())
         .status()
         .expect("run kill");
@@ -339,19 +421,24 @@ fn sigint_mid_check_still_restores() {
     });
     let status = rx
         .recv_timeout(std::time::Duration::from_secs(10))
-        .expect(
-            "githooks did not exit within 10s of SIGINT — \
-             the pipe/thread handoff deadlocked",
-        )
+        .unwrap_or_else(|_| {
+            panic!(
+                "githooks did not exit within 10s of {signal} — \
+                 the pipe/thread handoff deadlocked"
+            )
+        })
         .expect("wait on the child");
-    assert!(!status.success(), "SIGINT must not look like a clean pass");
+    assert!(
+        !status.success(),
+        "{signal} must not look like a clean pass"
+    );
 
     assert_eq!(
         tree(&r, "x.json"),
         BROKEN,
-        "unstaged work was not restored after SIGINT"
+        "unstaged work was not restored after {signal}"
     );
-    assert!(!store.exists(), "held files left behind after SIGINT");
+    assert!(!store.exists(), "held files left behind after {signal}");
 }
 
 /// A symlink is a link, not a file with those bytes in it. `fs::read` follows
@@ -642,4 +729,172 @@ fn try_symlink(target: &str, link: &std::path::Path) -> bool {
         let _ = (target, link);
         false
     }
+}
+
+/// A repository may contain a file whose name ends in our old marker suffix,
+/// and one did.
+///
+/// The store used to encode "this path was deleted" as a sibling file named
+/// `<name>.githooks-absent`. So a repo tracking both `notes` and
+/// `notes.githooks-absent` handed the restore an ambiguity it could not see:
+/// it read the payload of the second as a STATEMENT about the first, deleted
+/// `notes` from the working tree, and never put the real bytes back. Both
+/// halves are asserted here, because both halves were losses.
+#[test]
+fn a_tracked_file_named_like_the_absent_marker_does_not_delete_its_neighbour() {
+    let r = Repo::new();
+    seed(&r);
+    r.stage("notes", "the neighbour\n");
+    r.stage("notes.githooks-absent", "not a marker, a file\n");
+    r.commit("chore: two files, one awkward name");
+
+    // Something staged, so the hook has work to do…
+    r.stage("x.json", VALID);
+    // …and an unstaged change to the awkwardly named file, so it is held.
+    r.write("notes.githooks-absent", "edited, and not staged\n");
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "{}", run.output());
+
+    assert!(
+        r.path("notes").exists(),
+        "the neighbouring file was deleted by a suffix match"
+    );
+    assert_eq!(tree(&r, "notes"), "the neighbour\n");
+    assert_eq!(
+        tree(&r, "notes.githooks-absent"),
+        "edited, and not staged\n",
+        "the unstaged edit was never put back"
+    );
+}
+
+/// The same collision in its more serious form: the repository chose both the
+/// link name and its target.
+///
+/// `<name>.githooks-symlink` used to mean "restore `<name>` as a symlink whose
+/// target is this file's contents" — so a tracked `payload.githooks-symlink`
+/// containing an ABSOLUTE path made committing in that repository plant a
+/// symlink to it. The repo picked where it pointed; anything that wrote that
+/// path afterwards wrote through it, outside the repository entirely.
+#[test]
+fn a_tracked_file_named_like_the_symlink_marker_does_not_plant_a_symlink() {
+    let r = Repo::new();
+    seed(&r);
+
+    let outside = std::env::temp_dir().join(format!("githooks-outside-{}", std::process::id()));
+    std::fs::write(&outside, "a file the repository does not own\n").expect("write outside");
+
+    r.stage(
+        "payload.githooks-symlink",
+        &format!("{}\n", outside.display()),
+    );
+    r.commit("chore: a file whose name looks like metadata");
+
+    r.stage("x.json", VALID);
+    r.write("payload.githooks-symlink", &outside.display().to_string());
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "{}", run.output());
+
+    assert!(
+        std::fs::symlink_metadata(r.path("payload")).is_err(),
+        "the repository planted a symlink through the held store"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside).expect("outside file"),
+        "a file the repository does not own\n",
+        "the file outside the repository was touched"
+    );
+    let _ = std::fs::remove_file(&outside);
+}
+
+/// A store written by an older binary still has to be recoverable, or an
+/// upgrade mid-hold would strand exactly the work this module exists to keep.
+/// `restore_puts_back_held_files` above hand-builds one of these too.
+#[test]
+fn a_legacy_suffix_store_is_still_recovered() {
+    let r = Repo::new();
+    seed(&r);
+    r.stage("gone.txt", "will be deleted\n");
+    r.commit("chore: seed the legacy shapes");
+
+    let store = r.path(".git/githooks-held");
+    std::fs::create_dir_all(&store).expect("mkdir");
+    // The old format: payload by plain name, metadata by suffix. No index.
+    std::fs::write(store.join("x.json"), BROKEN).expect("write payload");
+    std::fs::write(store.join("gone.txt.githooks-absent"), b"").expect("write absent marker");
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("restore")
+        .current_dir(&r.dir)
+        .output()
+        .expect("githooks restore");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(tree(&r, "x.json"), BROKEN, "legacy payload not put back");
+    assert!(
+        !r.path("gone.txt").exists(),
+        "legacy absent marker not honoured"
+    );
+}
+
+/// The executable bit is uncommitted work too.
+///
+/// `git diff --name-only` lists a mode-only change, so the file was held and
+/// restored — but only its BYTES were recorded, and `git checkout` had reset
+/// the mode in between. `fs::write` preserves whatever mode the file already
+/// has, so the restored file came back with the index's mode and the `chmod`
+/// was silently gone. Every content-based assertion in this file passed
+/// throughout, which is why it took an audit to find.
+#[cfg(unix)]
+#[test]
+fn an_unstaged_chmod_survives_the_hook() {
+    use std::os::unix::fs::PermissionsExt;
+    let r = Repo::new();
+    seed(&r);
+    r.stage("deploy.sh", "#!/bin/sh\necho hi\n");
+    r.commit("chore: a script, not yet executable");
+
+    r.stage("x.json", VALID);
+    // Unstaged: both a content edit and the bit.
+    r.write("deploy.sh", "#!/bin/sh\necho edited\n");
+    std::fs::set_permissions(r.path("deploy.sh"), std::fs::Permissions::from_mode(0o755))
+        .expect("chmod");
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "{}", run.output());
+
+    let mode = std::fs::metadata(r.path("deploy.sh"))
+        .expect("stat")
+        .permissions()
+        .mode();
+    assert!(
+        mode & 0o111 != 0,
+        "the unstaged executable bit was lost (mode {mode:o})"
+    );
+    assert_eq!(tree(&r, "deploy.sh"), "#!/bin/sh\necho edited\n");
+}
+
+/// The pure-mode case, with IDENTICAL content — the one every byte-comparing
+/// assertion is blind to.
+#[cfg(unix)]
+#[test]
+fn an_unstaged_chmod_with_no_content_change_survives() {
+    use std::os::unix::fs::PermissionsExt;
+    let r = Repo::new();
+    seed(&r);
+    r.stage("tool.sh", "#!/bin/sh\n");
+    r.commit("chore: seed");
+
+    r.stage("x.json", VALID);
+    std::fs::set_permissions(r.path("tool.sh"), std::fs::Permissions::from_mode(0o755))
+        .expect("chmod");
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "{}", run.output());
+
+    let mode = std::fs::metadata(r.path("tool.sh"))
+        .expect("stat")
+        .permissions()
+        .mode();
+    assert!(mode & 0o111 != 0, "mode-only change lost (mode {mode:o})");
 }

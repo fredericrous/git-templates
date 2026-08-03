@@ -77,13 +77,120 @@ pub fn warning_sign() -> &'static str {
 }
 
 /// Emphasise a fragment inside a message, in the terminal's own accent.
+///
+/// Sanitises what it is given, because most of what is highlighted came from
+/// somewhere else: a declared check's name, a program it wants to run, a term
+/// matched in a staged file. An escape sequence inside would also break this
+/// function's own painting — the reset it emits is no longer the last word —
+/// so this is as much about the colouring being correct as about the text
+/// being safe.
 pub fn highlight(text: &str) -> String {
-    paint(text, YELLOW)
+    paint(&sanitize(text), YELLOW)
+}
+
+/// Text from a repository, made safe to hand a terminal.
+///
+/// A name or a command in `.githooks.conf` is chosen by whoever wrote the
+/// repository, and the trust prompt exists precisely so a person can read the
+/// declarations before accepting them. `\x1b[8m` is the conceal attribute:
+/// putting it in one declaration's name HID THE NEXT ONE from that prompt, so
+/// the reader saw two declarations, pressed y, and got three. The trust model
+/// was never bypassed — the rendering lied about what was being trusted, which
+/// is the same outcome by a shorter route.
+///
+/// What is escaped, and why each:
+///   * C0 (`< 0x20`) — ESC starts every sequence; CR redraws the line; BEL,
+///     backspace and the rest are all display control. TAB becomes a single
+///     space instead, because these strings sit in aligned columns and a real
+///     tab would break the layout it is trying to preserve.
+///   * DEL and C1 (`0x80..=0x9f`) — a terminal in 8-bit mode takes `0x9b` as
+///     CSI directly, with no ESC in sight.
+///   * The bidi overrides (`U+202A..=202E`, `U+2066..=2069`) and the
+///     directional marks — "Trojan Source": they reorder what is displayed
+///     without changing a byte of what is parsed.
+///
+/// Everything else passes through untouched, including all other UTF-8 and
+/// emoji: this is a display guard, not a charset policy.
+pub fn sanitize(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\t' => out.push(' '),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c if ('\u{80}'..='\u{9f}').contains(&c) => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => {
+                out.push_str(&format!("\\u{{{:04x}}}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The same, for a path that came off a walk of somebody's disk.
+///
+/// `Path::display()` does not escape control bytes, and the fleet prints paths
+/// it found by scanning directories it does not own.
+pub fn sanitize_path(p: &std::path::Path) -> String {
+    sanitize(&p.display().to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every byte a terminal would act on, and nothing else.
+    #[test]
+    fn sanitize_escapes_what_a_terminal_would_obey() {
+        // The one that hid a declaration from the trust prompt.
+        assert_eq!(sanitize("a\u{1b}[8mb"), "a\\x1b[8mb");
+        assert_eq!(sanitize("bell\u{7}"), "bell\\x07");
+        assert_eq!(sanitize("cr\r"), "cr\\x0d");
+        assert_eq!(sanitize("del\u{7f}"), "del\\x7f");
+        // 8-bit CSI: no ESC in sight.
+        assert_eq!(sanitize("csi\u{9b}"), "csi\\x9b");
+        // Trojan Source.
+        assert_eq!(sanitize("rtl\u{202e}"), "rtl\\u{202e}");
+        assert_eq!(sanitize("iso\u{2066}"), "iso\\u{2066}");
+        // A tab keeps its width without keeping its behaviour.
+        assert_eq!(sanitize("a\tb"), "a b");
+    }
+
+    /// It is a display guard, not a charset policy.
+    #[test]
+    fn sanitize_leaves_ordinary_text_alone() {
+        for s in ["plain ascii", "café", "日本語", "✓ ✗ !", "a/b-c_d.e", "🐛"] {
+            assert_eq!(sanitize(s), s, "{s:?} should pass through");
+        }
+    }
+
+    /// `highlight` wraps text in its own escapes, so text that carries an
+    /// escape of its own would break the wrapping as well as the reader.
+    #[test]
+    fn highlight_emits_only_its_own_escapes() {
+        let out = highlight("a\u{1b}[0m\u{1b}[8mb");
+        let escapes = out.matches('\u{1b}').count();
+        // Either colour is off (0) or it is exactly the pair this function
+        // writes — never the ones that came in with the text.
+        assert!(
+            escapes == 0 || escapes == 2,
+            "{out:?} has {escapes} escapes"
+        );
+        // The `[8m` TEXT survives, harmlessly — what must not survive is the
+        // ESC that would make a terminal read it as a command.
+        assert!(
+            !out.contains("\u{1b}[8m"),
+            "a conceal sequence survived: {out:?}"
+        );
+        assert!(
+            !out.contains("\u{1b}[0m\u{1b}[8m"),
+            "an injected reset survived: {out:?}"
+        );
+    }
 
     /// The point of the change: nothing emits a code above 15, because those
     /// ignore the terminal's palette entirely.

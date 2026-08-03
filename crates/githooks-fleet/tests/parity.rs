@@ -130,9 +130,14 @@ impl Fleet {
     /// The removals `propagate.sh` produced for this exact fixture, recorded
     /// from its last run before it was deleted. Relative to the fleet root so
     /// the expectation survives a different temp directory.
+    ///
+    /// **`foreign/.git/hooks/pre-push-branch-protect.sh` is deliberately NOT in
+    /// here any more.** See `the_plan_no_longer_deletes_a_hook_it_did_not_write`
+    /// for the decision and its evidence; it is still in
+    /// [`Self::golden_removals_with_remove_unrecognized`], which is the set the
+    /// opt-in flag must still reproduce exactly.
     fn golden_removals(&self) -> BTreeSet<String> {
         [
-            "foreign/.git/hooks/pre-push-branch-protect.sh",
             "pkg/.git/hooks/package.json",
             "stale/.git/hooks/pre-commit-ruff",
         ]
@@ -141,30 +146,48 @@ impl Fleet {
         .collect()
     }
 
+    /// The full set `propagate.sh` recorded, including the hook nobody asked us
+    /// to delete. `--remove-unrecognized` must still produce exactly this — the
+    /// behaviour is not gone, it stopped being the default.
+    fn golden_removals_with_remove_unrecognized(&self) -> BTreeSet<String> {
+        let mut s = self.golden_removals();
+        s.insert("foreign/.git/hooks/pre-push-branch-protect.sh".to_string());
+        s
+    }
+
     /// Rust removals, made root-relative so they compare with the golden set.
     fn rust_removals(&self) -> BTreeSet<String> {
+        self.rust_removals_with(&[])
+    }
+
+    fn rust_removals_with(&self, extra: &[&str]) -> BTreeSet<String> {
+        self.plans(extra)
+            .as_array()
+            .expect("array")
+            .iter()
+            .flat_map(|p| p["remove"].as_array().cloned().unwrap_or_default())
+            .map(|r| self.root_relative(r["path"].as_str().unwrap_or_default()))
+            .collect()
+    }
+
+    fn plans(&self, extra: &[&str]) -> serde_json::Value {
         let out = Command::new(env!("CARGO_BIN_EXE_githooks-fleet"))
             .args(["fix", "--json", "--root"])
             .arg(&self.root)
             .arg("--binary")
             .arg(&self.binary)
+            .args(extra)
             .output()
             .expect("githooks-fleet");
-        let plans: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json");
-        plans
-            .as_array()
-            .expect("array")
-            .iter()
-            .flat_map(|p| p["remove"].as_array().cloned().unwrap_or_default())
-            .map(|r| {
-                let p = r["path"].as_str().unwrap_or_default();
-                let root = self.root.to_string_lossy();
-                p.strip_prefix(root.as_ref())
-                    .unwrap_or(p)
-                    .trim_start_matches(std::path::MAIN_SEPARATOR)
-                    .replace(std::path::MAIN_SEPARATOR, "/")
-            })
-            .collect()
+        serde_json::from_slice(&out.stdout).expect("valid json")
+    }
+
+    fn root_relative(&self, p: &str) -> String {
+        let root = self.root.to_string_lossy();
+        p.strip_prefix(root.as_ref())
+            .unwrap_or(p)
+            .trim_start_matches(std::path::MAIN_SEPARATOR)
+            .replace(std::path::MAIN_SEPARATOR, "/")
     }
 }
 
@@ -191,7 +214,7 @@ fn the_plan_removes_exactly_the_recorded_set() {
     // this proves nothing, which is how the original sweep reported a clean
     // fleet it had never looked at.
     assert!(
-        golden.len() >= 3,
+        golden.len() >= 2,
         "expectation is too small to mean anything"
     );
 
@@ -200,6 +223,113 @@ fn the_plan_removes_exactly_the_recorded_set() {
     assert!(
         missing.is_empty() && extra.is_empty(),
         "plan drifted from the recorded behaviour.\n  not removed: {missing:?}\n  unexpected: {extra:?}"
+    );
+}
+
+/// DECISION, recorded rather than silently applied: this plan no longer deletes
+/// `pre-commit-*` / `pre-push-*` files it did not write, and the golden set
+/// above shrank by one entry because of it.
+///
+/// WHAT IT DID. `githooks-fleet install`, and `fix --apply`, deleted any file in
+/// `.git/hooks` matching those globs that did not carry our marker — in
+/// repositories the tool had never touched, with no confirmation, reported only
+/// as a number in a line like `repoC -1 +4`. A hand-written
+/// `pre-commit-secrets-scan` was removed that way in the reproduction. README.md
+/// has said the opposite the whole time: "a hook you wrote yourself is left
+/// alone."
+///
+/// WHERE IT CAME FROM. It was never a decision. `git show
+/// 90b0d30^:scripts/propagate.sh`, around lines 82-87, does
+/// `rm -f "$hooks"/pre-commit-* "$hooks"/pre-push-*` as a ONE-TIME migration
+/// sweep for the 16 per-check shims retired in `81cdf9d` — a glob that could not
+/// tell our retired files from anybody else's, run once, on purpose. `fix.rs`
+/// inherited it as standing behaviour and THIS FILE then pinned it as golden,
+/// which is how a migration one-liner became a promise the tool kept making
+/// forever.
+///
+/// WHAT REPLACES IT. A `Warning::UnrecognizedSubHook`, which prints and does not
+/// suppress the repository — a stranger's `pre-push-mine.sh` must not block
+/// repairing four broken dispatchers in the same directory — and an opt-in
+/// `--remove-unrecognized` that reproduces the recorded set exactly. The
+/// recorded behaviour is not lost; it stopped being what happens when you type
+/// `install`.
+#[test]
+fn the_plan_no_longer_deletes_a_hook_it_did_not_write() {
+    let f = Fleet::new("unrecognized");
+    f.healthy("clean")
+        .with_stale_ours("stale")
+        .with_foreign_sub("foreign")
+        .with_pkgjson("pkg");
+    let theirs = f.root.join("foreign/.git/hooks/pre-push-branch-protect.sh");
+    let before = std::fs::read_to_string(&theirs).expect("fixture");
+
+    // (a) By default: left alone, and NAMED.
+    let default = f.rust_removals();
+    assert!(
+        !default
+            .iter()
+            .any(|p| p.contains("pre-push-branch-protect.sh")),
+        "a hook we did not write is still on the removal list: {default:?}"
+    );
+    assert_eq!(default, f.golden_removals(), "the rest is unchanged");
+
+    let warnings: Vec<String> = f
+        .plans(&[])
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["warn"].as_array().cloned().unwrap_or_default())
+        .filter(|w| w["warning"] == "unrecognized_sub_hook")
+        .map(|w| f.root_relative(w["path"].as_str().unwrap_or_default()))
+        .collect();
+    assert_eq!(
+        warnings,
+        vec!["foreign/.git/hooks/pre-push-branch-protect.sh".to_string()],
+        "leaving it alone silently is the other half of the same bug"
+    );
+
+    // And a warning must not suppress the repository: the four dispatchers in
+    // `foreign` are still planned.
+    let foreign_plan = f
+        .plans(&[])
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["repo"].as_str().unwrap_or_default().contains("foreign"))
+        .cloned()
+        .expect("foreign planned");
+    assert!(
+        foreign_plan["refuse"].as_array().unwrap().is_empty(),
+        "a stranger's hook must not suppress the repair: {foreign_plan}"
+    );
+
+    // (b) With the flag: exactly the recorded set, no more and no less.
+    // Asserted BEFORE the apply below, which consumes the other two removals.
+    assert_eq!(
+        f.rust_removals_with(&["--remove-unrecognized"]),
+        f.golden_removals_with_remove_unrecognized(),
+        "the opt-in must reproduce propagate.sh's recorded behaviour exactly"
+    );
+
+    // (c) An actual apply must leave the bytes alone, not merely omit the path.
+    let out = Command::new(env!("CARGO_BIN_EXE_githooks-fleet"))
+        .args(["fix", "--apply", "--root"])
+        .arg(&f.root)
+        .arg("--binary")
+        .arg(&f.binary)
+        .output()
+        .expect("apply");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(&theirs).ok().as_deref(),
+        Some(before.as_str()),
+        "fix --apply deleted a hook it did not write:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("pre-push-branch-protect.sh"),
+        "and the apply report must NAME what it left alone:\n{}",
+        String::from_utf8_lossy(&out.stdout)
     );
 }
 

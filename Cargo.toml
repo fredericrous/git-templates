@@ -2,10 +2,43 @@
 resolver = "2"
 members = ["crates/githooks", "crates/githooks-fleet", "crates/githooks-runtime"]
 
+# The floor for the COMMIT PATH — `githooks` and `githooks-runtime`, which
+# inherit this. Not a guess: 1.73 was run against those two crates and failed
+# with four errors, all of them `E0658: use of unstable library feature
+# 'io_error_other'`, on `std::io::Error::other` in staged_only.rs; 1.74.0
+# compiles them clean. Everything else the source reaches for is older —
+# `OnceLock` and `is_some_and` are 1.70, let-else is 1.65.
+#
+# `githooks-fleet` deliberately does NOT inherit it and states a much higher
+# floor of its own; see its manifest for why. Declaring 1.74 workspace-wide
+# would have been a claim nothing could honour.
+#
+# CI's `msrv` job is what keeps this honest. A `rust-version` nobody compiles
+# against is a comment with extra syntax.
+[workspace.package]
+rust-version = "1.74"
+
 # Shared release posture. The hook binary runs on every commit, so size and
 # start-up cost are features.
 [profile.release]
 strip = true
 opt-level = "s"
 lto = true
-panic = "abort"
+
+# NO `panic = "abort"` here, and it must not come back. It saved 10-20KB on a
+# ~583KB binary and silently disabled two safety nets that only exist in the
+# shipped build:
+#
+#   * `dispatch::run_concurrently`'s `catch_unwind`, which isolates one
+#     panicking check so the other nineteen still report. Under abort, a panic
+#     in any check takes the whole hook down with it.
+#   * `Drop for StagedOnly`, which puts the author's unstaged work back. Drop
+#     does not run on abort, so a panicking check left that work parked in
+#     `$GIT_DIR/githooks-held` — the loss staged_only.rs calls the worst
+#     failure in this repository.
+#
+# The sharp part is that no test can catch the regression: cargo IGNORES the
+# `panic` setting for test targets, so both panic tests pass identically with
+# or without this line. `crates/githooks/tests/release_profile.rs` reads this
+# file instead, because asserting on the manifest is the only mechanism that
+# can see a setting the test profile discards.

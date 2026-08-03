@@ -28,11 +28,43 @@
 #
 # A dependency reaches the commit path through githooks-runtime as easily as
 # directly, so the check is on the RESOLVED tree rather than on a manifest.
+#
+# Every step below fails CLOSED. This script used to send cargo's stderr to
+# /dev/null and end the pipeline with `|| true`, so ANY failure to answer the
+# question — cargo missing, registry unreachable, the package renamed, a
+# manifest error, or simply being run from outside the workspace — produced an
+# empty result, which read as "no external dependencies" and printed the
+# reassuring line. The job named "hook binary has no external dependencies"
+# would have stayed green through all of them. A guard that cannot fail is
+# decoration.
 set -eu
 
-ext=$(cargo tree -p githooks --edges normal --prefix none 2>/dev/null \
-      | sed 's/ (\*)$//' | awk '{print $1}' | sort -u \
-      | grep -vE '^(githooks|githooks-runtime)$' || true)
+if ! tree_out=$(cargo tree -p githooks --edges normal --prefix none); then
+  echo "check-no-deps: cargo tree failed — the commit path is UNVERIFIED." >&2
+  echo "That is a failure, not a pass: see the error above." >&2
+  exit 1
+fi
+
+if [ -z "$tree_out" ]; then
+  echo "check-no-deps: cargo tree produced no output — nothing was verified." >&2
+  exit 1
+fi
+
+crates=$(printf '%s\n' "$tree_out" | sed 's/ (\*)$//' | awk '{print $1}' | sort -u)
+
+# The root crate must be in its own tree. If it is not, we are reading
+# something other than what we think we are, and an empty `ext` below would
+# mean nothing.
+if ! printf '%s\n' "$crates" | grep -qx 'githooks'; then
+  echo "check-no-deps: 'githooks' is absent from its own dependency tree." >&2
+  echo "Refusing to conclude anything from that. Output was:" >&2
+  printf '%s\n' "$tree_out" | sed 's/^/  /' >&2
+  exit 1
+fi
+
+# The one legitimate `|| true` in this file: `grep -v` exits 1 when nothing
+# matches, and nothing matching IS the success case here.
+ext=$(printf '%s\n' "$crates" | grep -vE '^(githooks|githooks-runtime)$' || true)
 
 if [ -n "$ext" ]; then
   echo "githooks gained external dependencies:" >&2

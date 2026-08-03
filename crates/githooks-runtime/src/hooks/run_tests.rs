@@ -20,10 +20,13 @@ use std::process::{Command, Stdio};
 /// nothing new.
 const GATE: [&str; 3] = ["typecheck", "test:unit", "test"];
 
+/// The extensions this check treats as "JS worth testing". Exported so
+/// `registry.rs` declares the scope from the same constant — see
+/// `lint_json_yaml::EXTS` for the drift this prevents.
+pub const JS_EXTS: &[&str] = &[".js", ".jsx", ".ts", ".tsx", ".vue"];
+
 fn is_js(file: &str) -> bool {
-    [".js", ".jsx", ".ts", ".tsx", ".vue"]
-        .iter()
-        .any(|e| file.ends_with(e))
+    JS_EXTS.iter().any(|e| file.ends_with(e))
 }
 
 fn parent_of(path: &str) -> &str {
@@ -178,21 +181,26 @@ pub fn run(refs: &[crate::pushrefs::PushRef]) -> Outcome {
         .unwrap_or_default();
 
     for r in refs {
-        let (local_oid, remote_oid) = (r.local_oid.as_str(), r.remote_oid.as_str());
+        let local_oid = r.local_oid.as_str();
         if local_oid == zero {
             continue; // deleting a ref pushes no code
         }
-        let range = if remote_oid == zero {
-            local_oid.to_string()
-        } else {
-            format!("{remote_oid}..{local_oid}")
-        };
-
-        let Some(changed) =
-            git::stdout_paths(&["diff-tree", "--no-commit-id", "--name-only", "-r", &range])
-        else {
-            continue;
-        };
+        // `pushrefs::changed_files_for` exists for exactly this question, and
+        // this check used to recompute it inline with all three bugs that
+        // function's doc comment records fixing:
+        //
+        //   - a brand-new branch (`remote_oid == zero`) diffed only its TIP,
+        //     so on a multi-commit push an earlier commit's `.ts` change was
+        //     invisible and the suite never ran;
+        //   - a two-dot range handed to `diff-tree` is a two-TREE compare, not
+        //     a commit walk, so a file changed and reverted later in the same
+        //     push netted to nothing;
+        //   - merge commits show NOTHING without `-m`, so a file touched only
+        //     to resolve a conflict selected no package.
+        //
+        // Every one of those let a push proceed GREEN with the suite never
+        // having run. `rust_tools::test` was already the model.
+        let changed = crate::pushrefs::changed_files_for(r, &zero);
         let changed_dirs: Vec<String> = changed
             .iter()
             .map(String::as_str)

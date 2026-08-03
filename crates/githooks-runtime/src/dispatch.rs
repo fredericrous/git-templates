@@ -160,28 +160,40 @@ where
         .collect()
 }
 
-pub fn pre_commit(ctx: &Ctx) -> Verdict {
-    let in_progress = crate::git_states_in_progress();
-    let checks = selected_during(Stage::PreCommit, &in_progress);
-
+/// Take the index-fidelity hold, or say why the caller must stop.
+///
+/// Extracted from `pre_commit` so that `githooks run` — which its own doc
+/// comment calls "a rehearsal of the hook" — can take exactly the same hold
+/// rather than judging the working tree while a real commit judges the index.
+///
+/// Around the WHOLE fan-out, not per check: twenty checks run concurrently and
+/// would fight over one working tree.
+fn hold_unstaged() -> Result<crate::staged_only::StagedOnly, Verdict> {
     // BEFORE `enter()`, not after: `enter()` is what checks out the tree and
     // parks the unstaged half, and a signal landing in the gap between that
     // and the handler being armed would hit the default disposition — dead
     // process, tree left checked out, nothing restored. The handler no-ops
     // harmlessly on a signal that arrives before there is anything held.
     crate::staged_only::install_signal_handler();
-
-    // Around the WHOLE fan-out, not per check: twenty checks run concurrently
-    // and would fight over one working tree.
-    let held = match crate::staged_only::StagedOnly::enter() {
-        Ok(guard) => guard,
+    match crate::staged_only::StagedOnly::enter() {
+        Ok(guard) => Ok(guard),
         Err(e) => {
             // Refusing to check the wrong content is the safe direction; a
             // check that read the tree would be answering about a commit
             // nobody is making.
             eprintln!("{e}");
-            return Verdict::Block;
+            Err(Verdict::Block)
         }
+    }
+}
+
+pub fn pre_commit(ctx: &Ctx) -> Verdict {
+    let in_progress = crate::git_states_in_progress();
+    let checks = selected_during(Stage::PreCommit, &in_progress);
+
+    let held = match hold_unstaged() {
+        Ok(guard) => guard,
+        Err(verdict) => return verdict,
     };
 
     let verdict = run_stage(&checks, ctx, &Overrides::read());
@@ -308,12 +320,28 @@ fn announce(report: &Report) {
     }
 }
 
+/// Point every check at `git ls-files` instead of the index.
+///
+/// THE definition, called from both entry points. There used to be two: this
+/// one, and a copy in `main.rs` built from a RAW `ls-files` — no `-z` — whose
+/// output git QUOTES for any unusual byte, so `é.json` arrived as the nine-byte
+/// literal `"\303\251.json"` and was handed to prettier and eslint as a path
+/// that does not exist. And because `override_file_set` writes a `OnceLock`,
+/// main's quoted list WON: whichever ran first was the one that counted, and
+/// main's ran first. `git.rs` documents this exact failure.
+pub fn enter_all_files_mode() {
+    crate::hooks::common::override_file_set(
+        crate::git::stdout_paths(&["ls-files"]).unwrap_or_default(),
+    );
+}
+
 /// `githooks run` — every applicable check, on demand.
 ///
 /// Two questions, and the mode says which it answers:
 ///
 /// - **staged** (default) is "would my commit pass" — the same set a commit
-///   would check, so it is a rehearsal of the hook.
+///   would check, so it is a rehearsal of the hook, and it takes the same
+///   index-fidelity hold the hook takes.
 /// - **`--all-files`** is "does my working tree pass". Deliberately NOT the same
 ///   question: on a dirty tree it reports on content that is not committed and
 ///   may never be. That is right for adopting a check into an existing
@@ -321,11 +349,69 @@ fn announce(report: &Report) {
 ///   and it is why `--all-files` takes no stash — there is no staged/unstaged
 ///   distinction to protect when the answer is "all of it".
 pub fn run_all(ctx: &Ctx, all_files: bool) -> Verdict {
+    // ORDER: the override goes in FIRST. It is what tells `fixing_enabled` and
+    // `restage` that the file set is not the index, and both are consulted
+    // from inside the checks below.
     if all_files {
-        let files = crate::git::stdout_paths(&["ls-files"]).unwrap_or_default();
-        crate::hooks::common::override_file_set(files);
+        enter_all_files_mode();
+        if crate::hooks::common::fixing_requested() {
+            println!(
+                "{} {} is set, but fixing is off for {}: the input set is the \
+                 working tree, not the index",
+                warning_sign(),
+                highlight("githooks.fix"),
+                highlight("--all-files")
+            );
+        }
+        // Stash-free, per decision 1 of docs/index-fidelity-and-run-modes.md:
+        // there is no staged/unstaged distinction to protect when the input
+        // set is `git ls-files`, so a hold would be surprising extra mutation
+        // with no correctness upside.
+        return run_stage(&selected(Stage::PreCommit), ctx, &Overrides::read());
     }
-    run_stage(&selected(Stage::PreCommit), ctx, &Overrides::read())
+
+    // Staged mode IS a rehearsal of the commit, so it takes the same hold the
+    // commit does. Without it, `githooks run` failed on garbage in the tree
+    // that `git commit` — which holds the unstaged half aside — passed, and
+    // vice versa: the two modes disagreed about the same repository, which is
+    // exactly what this mode exists not to do.
+    let held = match hold_unstaged() {
+        Ok(guard) => guard,
+        Err(verdict) => return verdict,
+    };
+    let verdict = run_stage(&selected(Stage::PreCommit), ctx, &Overrides::read());
+    // AFTER the report has been printed: dropping earlier would put the
+    // unstaged content back under a check that is still reading files.
+    drop(held);
+    verdict
+}
+
+/// `githooks run <check>` — one check by name. `None` when there is no such
+/// check, which the caller turns into a usage error.
+///
+/// Lives here rather than in `main.rs` so `registry::lookup` stays inside the
+/// runtime, and so the hold decision is made once: a named check takes the
+/// index-fidelity hold only when it is a `Stage::PreCommit` check running in
+/// staged mode. A pre-push or commit-msg check invoked by name must never
+/// touch the working tree — nothing about a push is a staging operation.
+pub fn run_named(ctx: &Ctx, name: &str, all_files: bool) -> Option<Verdict> {
+    let run_check = crate::registry::lookup(name)?;
+    if all_files {
+        enter_all_files_mode();
+        return Some(run_check(ctx));
+    }
+    let is_pre_commit_check =
+        crate::registry::one_named(name).is_some_and(|c| c.stage() == Stage::PreCommit);
+    if !is_pre_commit_check {
+        return Some(run_check(ctx));
+    }
+    let held = match hold_unstaged() {
+        Ok(guard) => guard,
+        Err(verdict) => return Some(verdict),
+    };
+    let verdict = run_check(ctx);
+    drop(held);
+    Some(verdict)
 }
 
 pub fn pre_push(ctx: &Ctx) -> Verdict {
