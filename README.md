@@ -404,6 +404,10 @@ crates/githooks-fleet/     the dashboard and the fleet fixer. Opt-in.
 zero-dependency rule and when reopening it is legitimate, the house test style
 and the commit convention are all in [CONTRIBUTING.md](CONTRIBUTING.md).
 
+Questions, "does this work with X", ideas for checks:
+[Discussions](https://github.com/fredericrous/githooks/discussions). Bugs:
+[issues](https://github.com/fredericrous/githooks/issues).
+
 By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
