@@ -40,7 +40,7 @@ jobs:
     name: hook binary has no external dependencies
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Supply chain: this binary runs on every commit with the developer's
       # credentials, so every transitive crate is code running in that
       # position. A dependency reaches the commit path through
@@ -66,7 +66,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/cache@v4
         with:
           path: |
@@ -105,7 +105,7 @@ jobs:
       # Keep in step with [workspace.package] rust-version in Cargo.toml.
       MSRV: "1.74.0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install "$MSRV" --profile minimal --no-self-update
       - name: cargo +MSRV check (githooks, githooks-runtime)
         run: |
@@ -144,7 +144,7 @@ jobs:
     timeout-minutes: 20
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/cache@v4
         with:
           path: |
@@ -228,7 +228,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: The shims parse as POSIX sh
         run: |
@@ -283,7 +283,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/cache@v4
         with:
           path: |
@@ -404,7 +404,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # WHAT IS INSTALLED HERE, AND WHY EACH ONE.
       #
