@@ -41,6 +41,18 @@ jobs:
       # tree. See scripts/check-no-deps.sh for why, and for when overriding it
       # is a reasonable call rather than a violation.
       - run: ./scripts/check-no-deps.sh
+      # And prove the guard can still say no. It used to swallow cargo's stderr
+      # and end with `|| true`, so every way of FAILING to answer the question
+      # produced the same green line as a clean tree — this job included. A
+      # check that cannot fail is indistinguishable from one that is not run,
+      # so run it once in a directory with no workspace and require a refusal.
+      - name: the guard fails closed when it cannot answer
+        run: |
+          if (cd /tmp && "$GITHUB_WORKSPACE/scripts/check-no-deps.sh"); then
+            echo "::error::check-no-deps.sh passed without verifying anything"
+            exit 1
+          fi
+          echo "refused, as it should"
 
   rust:
     name: rust
