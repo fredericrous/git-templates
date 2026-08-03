@@ -39,6 +39,54 @@ impl PushRefs {
     pub fn get(&self) -> &[PushRef] {
         self.0.get_or_init(|| parse(std::io::stdin().lock()))
     }
+
+    /// Pre-populated, so `.get()` never touches stdin at all.
+    ///
+    /// For a context with no real `pre-push` invocation to read refs from —
+    /// `githooks run <pre-push-check>` is the one today — where `.get()`
+    /// would otherwise block reading a TTY that has no ref list coming, or
+    /// (piped from `/dev/null`, say) read nothing and let the check treat an
+    /// empty ref list as "nothing to check": branch-protect calls that "no
+    /// push to a protected branch", and a scope-gated suite just never loops.
+    pub fn preloaded(refs: Vec<PushRef>) -> PushRefs {
+        let cell = OnceLock::new();
+        let _ = cell.set(refs);
+        PushRefs(cell)
+    }
+}
+
+/// Synthesise the one `PushRef` a standalone invocation — no real `pre-push`
+/// on the other end of stdin — has no other way to obtain: `@{u}..HEAD`.
+///
+/// Shared by `list --pushed` and `githooks run <pre-push-check>`, both of
+/// which need to answer "what would this check see" without an actual push
+/// in flight.
+pub fn synthetic_from_upstream() -> Result<PushRef, String> {
+    // `None` means "no upstream", i.e. a branch that has never been pushed,
+    // and that is not an error — just nothing this can answer yet.
+    let Some(upstream) =
+        crate::git::stdout(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+    else {
+        return Err(
+            "no upstream configured for the current branch — nothing has been \
+             pushed yet, so there is nothing to diff against"
+                .to_string(),
+        );
+    };
+    let Some(local_oid) = crate::git::stdout(&["rev-parse", "HEAD"]) else {
+        return Err("could not resolve HEAD".to_string());
+    };
+    let Some(remote_oid) = crate::git::stdout(&["rev-parse", "@{u}"]) else {
+        return Err(format!("could not resolve upstream {upstream}"));
+    };
+    let local_ref =
+        crate::git::stdout(&["symbolic-ref", "-q", "HEAD"]).unwrap_or_else(|| "HEAD".to_string());
+    Ok(PushRef {
+        local_ref: local_ref.clone(),
+        local_oid,
+        remote_ref: local_ref,
+        remote_oid,
+    })
 }
 
 pub fn parse<R: BufRead>(r: R) -> Vec<PushRef> {
