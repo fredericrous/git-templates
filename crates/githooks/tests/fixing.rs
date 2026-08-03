@@ -7,7 +7,7 @@
 //! last piece of the spec rather than the first.
 
 mod common;
-use common::Repo;
+use common::{missing, Repo};
 
 /// A rewriting probe, in whatever form this platform can execute.
 ///
@@ -111,6 +111,165 @@ fn a_clean_file_is_not_reported_as_fixed() {
     let run = r.hook("pre-commit", &[]);
     assert!(run.passed(), "{}", run.output());
     assert!(!run.says("fixed and re-staged"), "{}", run.output());
+}
+
+/// A `git add` that FAILS must never be read as "nothing moved".
+///
+/// The old `restage` returned a bare `bool`, so a failed `git add` was
+/// indistinguishable from a clean file. `prettier.rs` read
+/// `if wrote && restage(&files)` and, on `false`, fell through to a second
+/// `--check` against the NOW-REWRITTEN working tree — which passed. The hook
+/// printed a pass while the INDEX still held the old content, so the commit
+/// carried unformatted code and nobody was told.
+///
+/// A pre-existing `$GIT_DIR/index.lock` is how git itself is made to refuse.
+/// It also survives the retry loop, which only exists for a lock another
+/// process is about to release.
+#[test]
+fn a_failed_restage_blocks_and_names_the_files() {
+    let r = Repo::new();
+    manifest_with_fixer(&r);
+    r.git(&["config", "githooks.fix", "true"]);
+    r.stage("a.js", "const a = BAD\n");
+
+    // git refuses to write the index while this exists.
+    std::fs::write(r.path(".git/index.lock"), "").expect("plant index.lock");
+    let run = r.hook("pre-commit", &[]);
+    let _ = std::fs::remove_file(r.path(".git/index.lock"));
+
+    assert!(
+        !run.passed(),
+        "the index holds unfixed content and this called it a pass:\n{}",
+        run.output()
+    );
+    assert!(
+        run.says("a.js"),
+        "the message must name what is stuck:\n{}",
+        run.output()
+    );
+    // …and the file WAS rewritten on disk, which is what makes the stale
+    // index dangerous rather than merely untidy.
+    assert_eq!(
+        std::fs::read_to_string(r.path("a.js")).expect("read"),
+        "const a = GOOD\n"
+    );
+}
+
+/// Several fixers repair at once, and every repair lands.
+///
+/// pre-commit runs its checks concurrently, and git takes `index.lock`
+/// exclusively — so two simultaneous `git add`s in one repository make one of
+/// them fail. Before `Restaged`, that failure was silently read as "nothing
+/// moved" and the losing check's repair simply never reached the index.
+#[test]
+fn concurrent_restages_do_not_collide() {
+    let r = Repo::new();
+    rewriter(&r, REWRITER);
+    r.stage(
+        ".githooks.conf",
+        &format!(
+            "pre-commit  fmt-a  *.js  block  fix ./{REWRITER}\n\
+             pre-commit  fmt-b  *.js  block  fix ./{REWRITER}\n\
+             pre-commit  fmt-c  *.js  block  fix ./{REWRITER}\n"
+        ),
+    );
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("trust")
+        .current_dir(&r.dir)
+        .output()
+        .expect("githooks trust");
+    assert!(out.status.success(), "could not trust the manifest");
+    r.git(&["config", "githooks.fix", "true"]);
+
+    for name in ["a.js", "b.js", "c.js"] {
+        r.stage(name, "const a = BAD\n");
+    }
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "{}", run.output());
+    for name in ["a.js", "b.js", "c.js"] {
+        let staged = r.git(&["show", &format!(":{name}")]);
+        assert_eq!(
+            String::from_utf8_lossy(&staged.stdout),
+            "const a = GOOD\n",
+            "{name} was rewritten but never re-staged:\n{}",
+            run.output()
+        );
+    }
+}
+
+// ---- prettier, the built-in fixer ---------------------------------------
+
+fn prettier_repo() -> Repo {
+    let r = Repo::new();
+    r.write(".prettierrc", "{}\n");
+    r.git(&["add", ".prettierrc"]);
+    r
+}
+
+/// With fixing on, prettier repairs and re-stages rather than telling the
+/// author to run the command it could have run itself.
+#[test]
+fn prettier_repairs_and_restages() {
+    if missing("prettier") {
+        return;
+    }
+    let r = prettier_repo();
+    r.git(&["config", "githooks.fix", "true"]);
+    r.stage("a.ts", "const  x   =1\n");
+
+    let run = r.hook("pre-commit-prettier", &[]);
+    assert!(run.passed(), "{}", run.output());
+    assert!(run.says("reformatted and re-staged"), "{}", run.output());
+    let staged = r.git(&["show", ":a.ts"]);
+    assert_eq!(String::from_utf8_lossy(&staged.stdout), "const x = 1;\n");
+}
+
+/// With fixing OFF, the file is left byte for byte as the author wrote it.
+#[test]
+fn prettier_does_not_touch_files_when_fixing_is_off() {
+    if missing("prettier") {
+        return;
+    }
+    let r = prettier_repo();
+    r.stage("a.ts", "const  x   =1\n");
+
+    let run = r.hook("pre-commit-prettier", &[]);
+    assert!(!run.passed(), "{}", run.output());
+    assert_eq!(
+        std::fs::read_to_string(r.path("a.ts")).expect("read"),
+        "const  x   =1\n",
+        "it rewrote a file nobody asked it to rewrite"
+    );
+}
+
+/// The prettier half of the conflation: the write succeeds, `git add` does
+/// not, and the run must FAIL rather than re-checking the tree it just fixed
+/// and calling that a pass.
+#[test]
+fn prettier_blocks_when_it_cannot_restage_what_it_wrote() {
+    if missing("prettier") {
+        return;
+    }
+    let r = prettier_repo();
+    r.git(&["config", "githooks.fix", "true"]);
+    r.stage("a.ts", "const  x   =1\n");
+
+    std::fs::write(r.path(".git/index.lock"), "").expect("plant index.lock");
+    let run = r.hook("pre-commit-prettier", &[]);
+    let _ = std::fs::remove_file(r.path(".git/index.lock"));
+
+    assert!(
+        !run.passed(),
+        "the index still holds unformatted content and this passed:\n{}",
+        run.output()
+    );
+    assert!(run.says("a.ts"), "{}", run.output());
+    assert_eq!(
+        std::fs::read_to_string(r.path("a.ts")).expect("read"),
+        "const x = 1;\n",
+        "prettier did write the file — that is what makes the stale index a bug"
+    );
 }
 
 /// The interaction that makes this safe: a repair must stage only what it

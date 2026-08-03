@@ -42,6 +42,7 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 use crate::check::{Check, Fix, Outcome, Scope, Severity, Stage};
+use crate::hooks::common::Restaged;
 use crate::registry::{Ctx, CHECKS, ENTRYPOINTS};
 
 pub const MANIFEST: &str = ".githooks.conf";
@@ -342,15 +343,31 @@ impl Check for External {
                 // A declared fixer that ran clean may still have rewritten
                 // something; re-stage exactly what moved. Only its own scope,
                 // so it cannot stage a file it never looked at.
-                if fix == Fix::Rewrite
-                    && crate::hooks::common::fixing_enabled()
-                    && crate::hooks::common::restage(&scoped(scope, &in_scope))
-                {
-                    crate::hooks::common::ok(&format!(
-                        "{} fixed and re-staged",
-                        crate::ui::highlight(&self.short_name)
-                    ));
-                    return Outcome::Fixed;
+                if fix == Fix::Rewrite && crate::hooks::common::fixing_enabled() {
+                    match crate::hooks::common::restage(&scoped(scope, &in_scope)) {
+                        Restaged::Staged => {
+                            crate::hooks::common::ok(&format!(
+                                "{} fixed and re-staged",
+                                crate::ui::highlight(&self.short_name)
+                            ));
+                            return Outcome::Fixed;
+                        }
+                        // `git add` failed, so the index still holds whatever
+                        // the command has already replaced on disk. This used
+                        // to be indistinguishable from "nothing moved" and was
+                        // reported as a pass.
+                        Restaged::Failed(stuck) => {
+                            crate::hooks::common::fail(&format!(
+                                "{} rewrote files but {} failed — the index still holds the \
+                                 OLD content: {}",
+                                crate::ui::highlight(&self.short_name),
+                                crate::ui::highlight("git add"),
+                                crate::ui::sanitize(&stuck.join(", "))
+                            ));
+                            return Outcome::Failed;
+                        }
+                        Restaged::Nothing => {}
+                    }
                 }
                 Outcome::Passed
             }

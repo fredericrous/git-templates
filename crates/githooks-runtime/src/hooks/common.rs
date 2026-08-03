@@ -258,24 +258,74 @@ pub fn fixing_enabled() -> bool {
     )
 }
 
-/// Re-stage exactly the paths a fixer rewrote, and say whether anything moved.
+/// What a re-stage actually did. THREE answers, because the old `bool`
+/// conflated two of them and the conflation shipped unformatted code.
+///
+/// `prettier.rs` read `if run_quiet(write) && restage(&files) { … Fixed }`. When
+/// `git add` FAILED, `restage` returned `false` — indistinguishable from
+/// "nothing needed staging" — so control fell through to a second `--check`
+/// pass, which inspected the NOW-FORMATTED WORKING TREE, passed, printed
+/// "Prettier passed" and returned `Outcome::Passed`. The index still held the
+/// unformatted content, so the commit contained unformatted code and the hook
+/// said it had passed. `manifest.rs` had the same shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Restaged {
+    /// No path differed from the index — nothing to do, and nothing wrong.
+    Nothing,
+    /// `git add` succeeded; the index now holds the repair.
+    Staged,
+    /// `git add` failed, carrying the paths it could not stage. The index
+    /// holds content the fixer has already replaced on disk, so this MUST be
+    /// loud at every call site — and naming the files is the difference
+    /// between a message somebody can act on and one they cannot.
+    Failed(Vec<String>),
+}
+
+/// Serialises this process's own `git add` calls.
+///
+/// pre-commit runs its checks concurrently (`dispatch.rs`), and up to three of
+/// them can re-stage. git takes `$GIT_DIR/index.lock` exclusively, so two
+/// concurrent `git add`s in the same repository make one of them fail — which,
+/// before `Restaged`, was silently read as "nothing moved". Holding this across
+/// the `git add` removes self-contention entirely; the retry below is only for
+/// OTHER processes.
+static INDEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Re-stage exactly the paths a fixer rewrote, and say what happened.
 ///
 /// Safe ONLY because the pre-commit stage holds unstaged changes aside: the
 /// tree contains the staged content and nothing else, so anything a formatter
 /// touched is by definition part of this commit. Without that, re-staging would
 /// sweep in work the author deliberately kept back.
-pub fn restage(paths: &[String]) -> bool {
+pub fn restage(paths: &[String]) -> Restaged {
     let changed: Vec<String> = paths
         .iter()
         .filter(|p| !git::succeeds(&["diff", "--quiet", "--", p]))
         .cloned()
         .collect();
     if changed.is_empty() {
-        return false;
+        return Restaged::Nothing;
     }
     let mut args = vec!["add", "--"];
     args.extend(changed.iter().map(String::as_str));
-    git::succeeds(&args)
+
+    let _serialised = INDEX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Another PROCESS can hold `index.lock` — a `git status` from an editor, a
+    // second hook in a linked worktree. Back off and retry rather than
+    // reporting a transient collision as a failed repair. `git add` of the same
+    // paths is idempotent: it records the paths' current worktree content, so
+    // running it twice records the same thing twice and cannot double-stage.
+    const BACKOFF_MS: [u64; 3] = [50, 150, 400];
+    if git::succeeds(&args) {
+        return Restaged::Staged;
+    }
+    for wait in BACKOFF_MS {
+        std::thread::sleep(std::time::Duration::from_millis(wait));
+        if git::succeeds(&args) {
+            return Restaged::Staged;
+        }
+    }
+    Restaged::Failed(changed)
 }
 
 pub fn ok(msg: &str) {
@@ -321,6 +371,36 @@ mod tests {
         }
         assert!(found.ends_with(".cmd"), "got {found}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// "Nothing moved" and "`git add` FAILED" are different answers, and the
+    /// old `bool` gave the same one for both.
+    ///
+    /// That conflation is what shipped unformatted code: `prettier.rs` read
+    /// `if wrote && restage(&files)`, so a failed `git add` fell through to a
+    /// second `--check` against the now-formatted WORKING TREE, which passed —
+    /// while the INDEX still held the unformatted content the commit would
+    /// carry.
+    ///
+    /// An absolute path outside any repository is a `git add` git will always
+    /// refuse, which is the only way to reach the failing branch without
+    /// sabotaging a real index.
+    #[test]
+    fn restage_distinguishes_nothing_from_failure() {
+        let outside = std::env::temp_dir()
+            .join("githooks-restage-outside-any-repo")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            restage(std::slice::from_ref(&outside)),
+            Restaged::Failed(vec![outside]),
+            "a `git add` git refuses must report Failed, never Nothing"
+        );
+        assert_eq!(
+            restage(&[]),
+            Restaged::Nothing,
+            "no paths is nothing to do, and nothing wrong"
+        );
     }
 
     #[test]
