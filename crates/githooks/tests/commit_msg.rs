@@ -98,6 +98,45 @@ fn groups_footers_after_one_blank_line() {
     assert!(out.contains("body\n\nCo-Authored-By"));
 }
 
+/// A subject that merely LOOKS like a trailer must not eat the trailer block.
+///
+/// `fix: pre-commit: stop hanging` contains the fragment `pre-commit: s`, which
+/// the old anywhere-in-the-line footer rule accepted. `group_footer` then
+/// scanned every line from the bottom, never found a non-footer, split at index
+/// 0 and emitted the subject INSIDE the footer group behind a blank line. git
+/// strips that leading blank, the subject ends up glued to the trailer with no
+/// blank line between them, and `%(trailers)` reports NOTHING for a commit that
+/// visibly carries a `Co-Authored-By`.
+///
+/// Only an end-to-end commit can assert that last part: `%(trailers)` is git's
+/// own parse of the stored message, not something the hook can be asked for.
+#[test]
+fn a_colon_in_the_subject_does_not_destroy_the_trailers() {
+    let r = Repo::new();
+    let (ok, out) = rewrite(
+        &r,
+        "fix: pre-commit: stop hanging\n\nCo-Authored-By: a <a@x>\n",
+    );
+    assert!(ok, "hook rejected the message: {out:?}");
+
+    r.stage("f.txt", "x");
+    let msg = r.path("MSG");
+    r.git(&[
+        "commit",
+        "-q",
+        "--no-verify",
+        "-F",
+        msg.to_str().expect("utf8 path"),
+    ]);
+
+    let logged = r.git(&["log", "-1", "--pretty=%(trailers:key=Co-Authored-By)"]);
+    let trailers = String::from_utf8_lossy(&logged.stdout).into_owned();
+    assert!(
+        trailers.contains("Co-Authored-By: a <a@x>"),
+        "git saw no trailers ({trailers:?}) in the rewritten message {out:?}"
+    );
+}
+
 /// Every type in the vocabulary must be accepted — this is what caught the
 /// commit-type/branch-prefix divergence being real rather than theoretical.
 #[test]
