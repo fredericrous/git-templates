@@ -41,6 +41,34 @@ const REWRITER: &str = "rewrite.sh";
 #[cfg(not(unix))]
 const REWRITER: &str = "rewrite.cmd";
 
+/// The same probe, but rewriting exactly the ONE file it is handed — so
+/// several of them can run at once without racing each other's `sed`.
+#[cfg(unix)]
+fn one_file_rewriter(r: &Repo, name: &str) {
+    r.write(
+        name,
+        "#!/bin/sh\nf=\"$1\"\n[ -f \"$f\" ] || exit 0\nsed -i.bak 's/BAD/GOOD/' \"$f\" && rm -f \"$f.bak\"\n",
+    );
+    let p = r.path(name);
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    r.git(&["add", name]);
+}
+
+#[cfg(not(unix))]
+fn one_file_rewriter(r: &Repo, name: &str) {
+    r.write(
+        name,
+        "@echo off\r\npowershell -NoProfile -Command \"$c = Get-Content -Raw '%1'; [IO.File]::WriteAllText('%1', ($c -replace 'BAD','GOOD'))\"\r\n",
+    );
+    r.git(&["add", name]);
+}
+
+#[cfg(unix)]
+const ONE_FILE_REWRITER: &str = "rewrite-one.sh";
+#[cfg(not(unix))]
+const ONE_FILE_REWRITER: &str = "rewrite-one.cmd";
+
 /// Declare it as an external so the test exercises the same machinery a user
 /// would reach for, on every platform.
 fn manifest_with_fixer(r: &Repo) {
@@ -164,13 +192,16 @@ fn a_failed_restage_blocks_and_names_the_files() {
 #[test]
 fn concurrent_restages_do_not_collide() {
     let r = Repo::new();
-    rewriter(&r, REWRITER);
+    // ONE FILE EACH, deliberately: three concurrent `sed -i` passes over the
+    // same file would be a race in the FIXTURE, and this case is about the
+    // race in `git add`.
+    one_file_rewriter(&r, ONE_FILE_REWRITER);
     r.stage(
         ".githooks.conf",
         &format!(
-            "pre-commit  fmt-a  *.js  block  fix ./{REWRITER}\n\
-             pre-commit  fmt-b  *.js  block  fix ./{REWRITER}\n\
-             pre-commit  fmt-c  *.js  block  fix ./{REWRITER}\n"
+            "pre-commit  fmt-a  *.js  block  fix ./{ONE_FILE_REWRITER} a.js\n\
+             pre-commit  fmt-b  *.js  block  fix ./{ONE_FILE_REWRITER} b.js\n\
+             pre-commit  fmt-c  *.js  block  fix ./{ONE_FILE_REWRITER} c.js\n"
         ),
     );
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_githooks"))

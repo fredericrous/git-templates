@@ -9,7 +9,10 @@
 //! worktree has none of its own) → PATH → uvx (unpinned LATEST, with a warning,
 //! because it flags issues the CI-pinned version does not — phantom failures).
 
-use super::common::{fail, hl, ok, repo_root, run as run_tool, staged_files, warn, which};
+use super::common::{
+    fail, fixing_enabled, hl, ok, repo_root, restage, run as run_tool, run_quiet, staged_files,
+    warn, which, Restaged,
+};
 use crate::check::Outcome;
 use crate::git;
 use std::path::Path;
@@ -95,27 +98,45 @@ pub fn ruff(_args: &[std::ffi::OsString]) -> Outcome {
         ));
     }
 
-    // `--` before the file list at each of these: a staged file named e.g.
-    // `-x.py` would otherwise be read as a flag by ruff's own parser.
+    // The registry has always declared `Fix::Rewrite` for this check, and
+    // `githooks list --json` reported `"fix":"rewrite"` — which `agents_md`
+    // explicitly tells agents to trust — while no fixing code existed
+    // anywhere. Only prettier and the manifest's externals ever called
+    // `restage`. Rather than downgrade the declaration, the fixing is now
+    // real.
+    //
+    // Repair FIRST and QUIETLY, then let the check passes below decide. Ruff
+    // legitimately leaves findings it cannot fix, unlike `cargo fmt`, so the
+    // repair pass's own exit code says nothing about the verdict — and running
+    // it loudly would print the surviving offenders twice.
+    let mut repaired = false;
+    if fixing_enabled() {
+        let _ = run_quiet(&root, &argv, &with_files(&["check", "--fix"], &files));
+        let _ = run_quiet(&root, &argv, &with_files(&["format"], &files));
+        match restage(&files) {
+            Restaged::Staged => repaired = true,
+            Restaged::Failed(stuck) => {
+                fail(&format!(
+                    "ruff rewrote these files but {} failed — the index still holds the OLD \
+                     content: {}",
+                    hl("git add"),
+                    stuck.join(", ")
+                ));
+                return Outcome::Failed;
+            }
+            Restaged::Nothing => {}
+        }
+    }
+
     let mut failed = false;
-    let mut check: Vec<String> = vec!["check".into(), "--force-exclude".into(), "--".into()];
-    check.extend(files.iter().cloned());
-    if !run_tool(&root, &argv, &check) {
+    if !run_tool(&root, &argv, &with_files(&["check"], &files)) {
         fail(&format!(
             "Ruff lint issues. Run {}. Offenders above.",
             hl("ruff check --fix")
         ));
         failed = true;
     }
-
-    let mut fmt: Vec<String> = vec![
-        "format".into(),
-        "--check".into(),
-        "--force-exclude".into(),
-        "--".into(),
-    ];
-    fmt.extend(files.iter().cloned());
-    if !run_tool(&root, &argv, &fmt) {
+    if !run_tool(&root, &argv, &with_files(&["format", "--check"], &files)) {
         fail(&format!(
             "Ruff found unformatted files. Run {} on the files listed above.",
             hl("ruff format")
@@ -124,13 +145,33 @@ pub fn ruff(_args: &[std::ffi::OsString]) -> Outcome {
     }
 
     if failed {
+        // A repair that could not finish the job still blocks — and whatever it
+        // DID fix is already staged, so the next attempt starts from there.
         return Outcome::Failed;
+    }
+    if repaired {
+        ok("Ruff fixed and re-staged");
+        return Outcome::Fixed;
     }
     // An unpinned ruff RAN, and its verdict was clean — that is a pass, not a
     // gap. The caveat above is advice about which ruff spoke, not a claim that
     // none did.
     ok("Ruff passed");
     Outcome::Passed
+}
+
+/// `<sub…> --force-exclude -- <files>`.
+///
+/// `--force-exclude` on every pass so ruff honours the project's `exclude`
+/// even though the paths are handed to it explicitly. `--` before the file
+/// list because a staged file named e.g. `-x.py` would otherwise be read as a
+/// flag by ruff's own parser.
+fn with_files(sub: &[&str], files: &[String]) -> Vec<String> {
+    let mut argv: Vec<String> = sub.iter().map(|s| (*s).to_string()).collect();
+    argv.push("--force-exclude".into());
+    argv.push("--".into());
+    argv.extend(files.iter().cloned());
+    argv
 }
 
 pub fn pyright(_args: &[std::ffi::OsString]) -> Outcome {

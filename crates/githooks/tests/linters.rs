@@ -267,6 +267,62 @@ fn ruff_reports_lint_and_format_problems_when_the_repo_opts_in() {
     assert!(!r.hook("pre-commit-ruff", &[]).passed());
 }
 
+/// `pre-commit-ruff` declared `Fix::Rewrite` with no fixing code at all — only
+/// prettier and the manifest's externals ever called `restage` — so
+/// `githooks list --json` reported `"fix":"rewrite"`, which `agents_md` tells
+/// agents to trust, for a check that could never repair anything.
+///
+/// Unlike `cargo fmt`, ruff legitimately leaves findings it cannot fix, so
+/// the repair pass's exit code decides nothing: the verdict comes from a fresh
+/// pair of check passes afterwards.
+#[test]
+fn ruff_fixes_what_it_can_and_still_blocks_on_the_rest() {
+    if missing("ruff") && missing("uvx") {
+        return;
+    }
+    let r = Repo::new();
+    r.write("pyproject.toml", "[tool.ruff]\n");
+    r.git(&["config", "githooks.fix", "true"]);
+    // `import os` is auto-fixable (F401); the undefined name is not.
+    r.stage("a.py", "import os\nprint( undefined_name )\n");
+
+    let run = r.hook("pre-commit-ruff", &[]);
+    assert!(
+        !run.passed(),
+        "an unfixable finding must still block:\n{}",
+        run.output()
+    );
+    let on_disk = std::fs::read_to_string(r.path("a.py")).expect("read");
+    assert!(
+        !on_disk.contains("import os"),
+        "the fixable finding should have been repaired: {on_disk:?}"
+    );
+    let staged = r.git(&["show", ":a.py"]);
+    assert_eq!(
+        String::from_utf8_lossy(&staged.stdout),
+        on_disk,
+        "whatever ruff did fix must be staged, so the next attempt starts from there"
+    );
+}
+
+/// With fixing OFF the file must come back byte for byte as it was written.
+#[test]
+fn ruff_leaves_files_alone_when_fixing_is_off() {
+    if missing("ruff") && missing("uvx") {
+        return;
+    }
+    let r = Repo::new();
+    r.write("pyproject.toml", "[tool.ruff]\n");
+    r.stage("a.py", "import os\n");
+
+    assert!(!r.hook("pre-commit-ruff", &[]).passed());
+    assert_eq!(
+        std::fs::read_to_string(r.path("a.py")).expect("read"),
+        "import os\n",
+        "it rewrote a file nobody asked it to rewrite"
+    );
+}
+
 #[test]
 fn pyright_skips_a_repo_with_no_pyright_config() {
     let r = Repo::new();

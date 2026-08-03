@@ -91,6 +91,86 @@ fn cargo_fmt_rejects_unformatted_rust_and_accepts_clean() {
     assert!(run.says("Rust formatting is clean"));
 }
 
+/// The registry has always declared `Fix::Rewrite` for `pre-commit-cargo-fmt`,
+/// and `githooks list --json` reported `"fix":"rewrite"` — which `agents_md`
+/// tells agents to trust — while no fixing code existed anywhere. Only
+/// prettier and the manifest's externals ever called `restage`. So an agent
+/// could set `githooks.fix true` and wait forever for a repair.
+#[test]
+fn cargo_fmt_repairs_and_restages_when_asked() {
+    if missing("cargo") {
+        return;
+    }
+    let r = Repo::new();
+    r.git(&["config", "githooks.fix", "true"]);
+    crate_files(&r, "fn main(){let _x=1;}\n");
+
+    let run = r.hook("pre-commit-cargo-fmt", &[]);
+    assert!(
+        run.passed(),
+        "the repair should let it through: {}",
+        run.stdout
+    );
+    assert!(run.says("reformatted and re-staged"), "{}", run.stdout);
+
+    let staged = r.git(&["show", ":src/main.rs"]);
+    assert_eq!(
+        String::from_utf8_lossy(&staged.stdout),
+        "fn main() {\n    let _x = 1;\n}\n",
+        "the repair reached the index, not just the disk"
+    );
+}
+
+/// With fixing OFF the file must come back byte for byte as it was written.
+#[test]
+fn cargo_fmt_leaves_files_alone_when_fixing_is_off() {
+    if missing("cargo") {
+        return;
+    }
+    let r = Repo::new();
+    crate_files(&r, "fn main(){let _x=1;}\n");
+
+    assert!(!r.hook("pre-commit-cargo-fmt", &[]).passed());
+    assert_eq!(
+        std::fs::read_to_string(r.path("src/main.rs")).expect("read"),
+        "fn main(){let _x=1;}\n",
+        "it rewrote a file nobody asked it to rewrite"
+    );
+}
+
+/// The guard that makes the repair safe: `cargo fmt --all` formats the WHOLE
+/// workspace, but `restage` is handed only the staged `.rs` list. A second,
+/// unformatted, UNSTAGED file in the same crate is reformatted on disk (cargo's
+/// doing) and must NOT appear in the index.
+#[test]
+fn a_repair_does_not_stage_an_unrelated_unformatted_file() {
+    if missing("cargo") {
+        return;
+    }
+    let r = Repo::new();
+    r.git(&["config", "githooks.fix", "true"]);
+    // A clean, committed baseline for both files.
+    crate_files(&r, "mod other;\nfn main() {}\n");
+    r.stage("src/other.rs", "pub fn q() {}\n");
+    r.commit("chore: seed");
+
+    // The change being committed: staged and unformatted.
+    r.stage("src/main.rs", "mod other;\nfn main(){let _x=1;}\n");
+    // A second unformatted file in the same crate, deliberately KEPT BACK.
+    r.write("src/other.rs", "pub fn q(){let _y=2;}\n");
+
+    let run = r.hook("pre-commit-cargo-fmt", &[]);
+    assert!(run.passed(), "{}", run.stdout);
+
+    let staged = r.git(&["diff", "--cached", "--name-only"]);
+    let staged = String::from_utf8_lossy(&staged.stdout);
+    assert!(staged.contains("src/main.rs"), "{staged}");
+    assert!(
+        !staged.contains("src/other.rs"),
+        "the repair swept in work the author kept back: {staged}"
+    );
+}
+
 /// `-D warnings` is the point: an ordinary rustc warning has to fail the
 /// commit, not merely print.
 #[test]

@@ -782,6 +782,64 @@ mod tests {
         }
     }
 
+    /// Which checks contain code that repairs and re-stages, stated by hand.
+    ///
+    /// `pre-commit-cargo-fmt` and `pre-commit-ruff` both declared
+    /// `Fix::Rewrite` with NO fixing code anywhere — only `prettier.rs` and
+    /// `manifest.rs` ever called `restage`/`fixing_enabled`. `githooks list
+    /// --json` reported `"fix":"rewrite"` for them regardless, and `agents_md`
+    /// explicitly directs agents to trust that JSON, so an agent would set
+    /// `githooks.fix true` and wait for a repair that could never arrive.
+    const HAS_FIXING_CODE: &[(&str, bool)] = &[
+        ("pre-commit-argo-lint", false),
+        ("pre-commit-ban-terms", false),
+        ("pre-commit-cargo-fmt", true),
+        ("pre-commit-clippy", false),
+        ("pre-commit-kube-linter", false),
+        ("pre-commit-kubeconform", false),
+        ("pre-commit-lint-js", false),
+        ("pre-commit-lint-json-yaml", false),
+        ("pre-commit-merge-conflict", false),
+        ("pre-commit-package-lock", false),
+        ("pre-commit-prettier", true),
+        ("pre-commit-pyright", false),
+        ("pre-commit-ruff", true),
+        ("pre-commit-usual-name", false),
+        ("pre-commit-yamllint", false),
+        ("pre-push-branch-protect", false),
+        ("pre-push-branch-pattern", false),
+        ("pre-push-pull-rebase", false),
+        ("pre-push-run-tests-js", false),
+        ("pre-push-cargo-test", false),
+    ];
+
+    /// A `Fix::Rewrite` declaration is a PROMISE, and the set of checks that
+    /// keep it must equal the set that make it.
+    #[test]
+    fn every_rewrite_declaration_has_a_fixer() {
+        let declared: BTreeSet<&str> = CHECKS
+            .iter()
+            .filter(|check| check.fix == super::Fix::Rewrite)
+            .map(|check| check.name)
+            .collect();
+        let implemented: BTreeSet<&str> = HAS_FIXING_CODE
+            .iter()
+            .filter(|(_, has)| *has)
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(
+            declared, implemented,
+            "a check declaring Fix::Rewrite with no fixer lies to `githooks list --json`, \
+             and a check with a fixer that does not declare it can never be reached"
+        );
+
+        // …and the table must cover every check, so a new one cannot be added
+        // without somebody answering the question.
+        let listed: BTreeSet<&str> = HAS_FIXING_CODE.iter().map(|(name, _)| *name).collect();
+        let all: BTreeSet<&str> = CHECKS.iter().map(|check| check.name).collect();
+        assert_eq!(listed, all, "HAS_FIXING_CODE does not cover CHECKS");
+    }
+
     /// The reconciliation tests that used to live here are gone, and that is
     /// the point of the refactor: there is no second table to disagree with.
     #[test]

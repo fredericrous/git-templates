@@ -244,6 +244,26 @@ pub fn run(root: &str, argv: &[String], extra: &[String]) -> bool {
     cmd.status().map(|s| s.success()).unwrap_or(false)
 }
 
+/// As [`run`], but with the tool's own output discarded.
+///
+/// For a pass whose only job is to decide something — prettier's `--check`,
+/// ruff's `--fix` sweep — where the offenders are printed once, by the pass
+/// that reports them, rather than twice.
+pub fn run_quiet(root: &str, argv: &[String], extra: &[String]) -> bool {
+    let Some((program, rest)) = argv.split_first() else {
+        return true;
+    };
+    let mut cmd = Command::new(program);
+    cmd.args(rest)
+        .args(extra)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    strip_git_env(&mut cmd);
+    cmd.status().map(|s| s.success()).unwrap_or(false)
+}
+
 /// Whether the user asked for checks to repair what they find.
 ///
 /// OFF by default. `git config githooks.fix true` turns it on, per repository,

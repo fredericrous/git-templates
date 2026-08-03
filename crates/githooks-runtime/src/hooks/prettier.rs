@@ -3,11 +3,10 @@
 
 use super::common::{
     fail, first_existing, fixing_enabled, hl, ok, repo_root, resolve_tool, restage,
-    run as run_tool, staged_files, warn, Restaged,
+    run as run_tool, run_quiet, staged_files, warn, Restaged,
 };
 use crate::check::Outcome;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 /// Everything prettier is asked to look at.
 ///
@@ -146,22 +145,4 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
     list.extend(files);
     let _ = run_tool(&root, &argv, &list);
     Outcome::Failed
-}
-
-/// Like `common::run` but silent — the check pass only decides the verdict; the
-/// offending files are printed by the `--list-different` pass after it.
-fn run_quiet(root: &str, argv: &[String], extra: &[String]) -> bool {
-    let Some((program, rest)) = argv.split_first() else {
-        return true;
-    };
-    Command::new(program)
-        .args(rest)
-        .args(extra)
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
