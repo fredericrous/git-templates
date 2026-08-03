@@ -174,6 +174,10 @@ To get a message past it, fix the message.
    the PR — a page missing from `docs/SUMMARY.md` fails there.
 4. Say **why** in the description. A diff shows what changed; the review needs
    the alternative you rejected.
+5. If an upgrader would notice the change, say so under `Unreleased` in
+   [CHANGELOG.md](CHANGELOG.md) — in sentences, what they get, not what the
+   diff did. The release guard refuses to tag a version whose section is
+   missing, and the published notes open with it.
 
 Documentation lives in `docs/`, versioned with the code and published as a
 book. It is not a wiki, deliberately: a wiki cannot be reviewed in a pull

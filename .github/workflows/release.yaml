@@ -59,6 +59,15 @@ jobs:
             echo "::error::Commit the version bump FIRST, confirm HEAD moved, then tag."
             exit 1
           fi
+          # The same bargain as the version check: the release notes lead
+          # with CHANGELOG.md's section for this version, so a missing
+          # section would publish a release that opens with nothing. Refuse
+          # now, while writing it costs one commit instead of a re-release.
+          if ! awk -v ver="v$manifest" '$1 == "##" && $2 == ver { found = 1 } END { exit !found }' CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## v$manifest' section."
+            echo "::error::Write what the upgrader gets, then tag."
+            exit 1
+          fi
           echo "version=$manifest" >> "$GITHUB_OUTPUT"
           echo "dry_run=$dry" >> "$GITHUB_OUTPUT"
 
@@ -190,9 +199,24 @@ jobs:
             echo "release ${GITHUB_REF_NAME} already exists — refreshing its assets"
             gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
           else
+            # Notes an upgrader can read, then the generated PR list. Bare
+            # --generate-notes published this repository's PR titles as the
+            # whole story, and they are written for the history, not for
+            # somebody deciding whether to upgrade. The guard job already
+            # proved the CHANGELOG section exists. Matching on $2 rather
+            # than a prefix so extracting v1.0.2 can never grab v1.0.21.
+            notes=$(mktemp)
+            awk -v ver="${GITHUB_REF_NAME}" '
+              $1 == "##" && $2 == ver { grab = 1; next }
+              $1 == "##" && grab      { exit }
+              grab                    { print }
+            ' CHANGELOG.md > "$notes"
+            printf '\n---\n\n' >> "$notes"
+            gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="${GITHUB_REF_NAME}" --jq .body >> "$notes"
             gh release create "${GITHUB_REF_NAME}" \
               --title "${GITHUB_REF_NAME}" \
-              --generate-notes \
+              --notes-file "$notes" \
               dist/*
           fi
       - name: Dry run summary
