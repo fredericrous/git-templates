@@ -151,6 +151,23 @@ set those are one `githooks trust` away from running on your first commit in a
 repository you may have cloned only to read. If you set this, **trust
 deliberately** rather than letting installation be the moment you decided.
 
+## One view across every repo
+
+`githooks-fleet` — installed separately, on purpose — answers the questions a
+directory full of repositories accumulates: which repos are covered, which
+shims went stale after an upgrade, what every check is doing where, and which
+repository is quietly carrying a `hook.skip` somebody forgot.
+
+![the githooks-fleet dashboard scanning a fleet of repositories](docs/assets/fleet-demo.gif)
+
+```sh
+githooks-fleet install --root ~/Developer   # shims into every repo at once
+githooks-fleet                              # report the fleet
+githooks-fleet tui                          # the dashboard above
+```
+
+Design record: [the fleet dashboard](docs/fleet-dashboard.md).
+
 ## Trust: a repository you clone cannot run its own checks
 
 `.githooks.conf` is committed — that is the point, a team shares a check by

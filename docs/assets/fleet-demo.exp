@@ -1,0 +1,36 @@
+# The keyboard for fleet-demo.sh's recording: drives `githooks-fleet tui`
+# over the synthetic fleet on a fixed schedule, inside the pty asciinema
+# provides. See fleet-demo.sh for the full recipe.
+#
+# Two non-obvious lines. `log_user 0` around spawn keeps the recorder's
+# checkout path out of the recording — the same argument as the isolated HOME.
+# And the beats between keys are `expect -timeout N eof`, not `sleep`: expect
+# only drains the pty while inside an expect command, so a sleep would buffer
+# every frame and dump them all at once when the recording ends.
+set timeout 30
+set repo_root [file dirname [file dirname [file dirname [file normalize $argv0]]]]
+
+log_user 0
+spawn $repo_root/target/release/githooks-fleet tui --root /tmp/fleet-root --depth 2 \
+    --binary $env(HOME)/.local/bin/githooks
+log_user 1
+
+expect -timeout 4 eof
+send "j"
+expect -timeout 1 eof
+send "j"
+expect -timeout 1 eof
+send "j"
+expect -timeout 2 eof
+send "\r"
+expect -timeout 4 eof
+send "j"
+expect -timeout 1 eof
+send "j"
+expect -timeout 2 eof
+send "\033"
+expect -timeout 2 eof
+send "h"
+expect -timeout 3 eof
+send "q"
+expect eof
