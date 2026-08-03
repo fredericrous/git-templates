@@ -1,0 +1,38 @@
+## mdBook configuration.
+##
+## `src = "."` rather than the conventional `src/`: these pages existed as
+## `docs/*.md` long before there was a book, they are linked from the README, from
+## commit messages and from doc comments in the source, and several tests name
+## them by path. Moving them under `docs/src/` to satisfy a default would break
+## every one of those links to gain nothing a one-line setting cannot.
+##
+## The consequence to know about: mdBook renders what SUMMARY.md lists, and warns
+## about the rest. Adding a page under `docs/` means adding it to SUMMARY.md, or
+## it is a file in the repository that the site does not have.
+
+[book]
+title = "githooks"
+description = "Git hooks that catch a bad commit before it exists — a single Rust binary, no runtime dependencies, and an uninstall that removes exactly what it wrote."
+authors = ["Frederic Rousseau"]
+language = "en"
+src = "."
+
+[build]
+## OUTSIDE the source directory, deliberately. With `src = "."` the default
+## `docs/book` would put the rendered site inside the directory being rendered,
+## so each build would try to ingest the previous build's output. `target/` is
+## already gitignored, so this also keeps `git status` clean after a local
+## `mdbook build docs`.
+build-dir = "../target/book"
+create-missing = false
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/fredericrous/githooks"
+edit-url-template = "https://github.com/fredericrous/githooks/edit/main/docs/{path}"
+site-url = "/githooks/"
+
+[output.html.fold]
+enable = true
+level = 1
