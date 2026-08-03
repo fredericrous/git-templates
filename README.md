@@ -1,22 +1,22 @@
 # Git Templates with hooks
 
-[![CI](https://github.com/fredericrous/git-templates/actions/workflows/ci.yaml/badge.svg)](https://github.com/fredericrous/git-templates/actions/workflows/ci.yaml)
+[![CI](https://github.com/fredericrous/githooks/actions/workflows/ci.yaml/badge.svg)](https://github.com/fredericrous/githooks/actions/workflows/ci.yaml)
 
 Git Starter Template with opinionated hooks to help you create beautiful commits with high quality standards..and emojis ✨
 
 <img src="https://user-images.githubusercontent.com/702227/125003867-1b012f00-e050-11eb-8641-748ef806c639.png" width="800">
 
-*If there is an issue with a hook, please open an issue and consult the section [Opt Out](https://github.com/fredericrous/git-templates/wiki/Opt-Out) for a workaround.*
+*If there is an issue with a hook, please open an issue and consult the section [Opt Out](https://github.com/fredericrous/githooks/wiki/Opt-Out) for a workaround.*
 
 ## The workflow
 
-First, `commit`. A nice template [message](https://github.com/fredericrous/git-templates/blob/main/message) appears to help you write a meaningful commit description that passes the requirements.
-The message saved, [validators](https://github.com/fredericrous/git-templates/wiki/Hooks-implemented) run in parallel. If there is an issue, the commit is aborted
+First, `commit`. A nice template [message](https://github.com/fredericrous/githooks/blob/main/message) appears to help you write a meaningful commit description that passes the requirements.
+The message saved, [validators](https://github.com/fredericrous/githooks/wiki/Hooks-implemented) run in parallel. If there is an issue, the commit is aborted
 Ready to push? once `git push` is started, the tests runs for the module you updated, branch name is checked. The branch is pushed. Bravo
 
-The wiki explore in details [this workflow](https://github.com/fredericrous/git-templates/wiki/Coding-Flow)
+The wiki explore in details [this workflow](https://github.com/fredericrous/githooks/wiki/Coding-Flow)
 
-The wiki also lists all the [implemented hooks](https://github.com/fredericrous/git-templates/wiki/Hooks-implemented)
+The wiki also lists all the [implemented hooks](https://github.com/fredericrous/githooks/wiki/Hooks-implemented)
 
 ## Setup
 
@@ -25,7 +25,7 @@ Clone the repository to a convenient place:
 ```sh
 mkdir -p ~/.config/git
 cd ~/.config/git
-git clone https://github.com/fredericrous/git-templates.git
+git clone https://github.com/fredericrous/githooks.git
 ```
 
 The clone creates `~/.config/git/git-templates/`, so there is nothing named
@@ -307,12 +307,12 @@ requirements of the shell implementation and are no longer needed.
 
 ## Wiki
 
-- [Coding Flow](https://github.com/fredericrous/git-templates/wiki/Coding-Flow) - an explanation of where the hooks fit in your git "flow"
-- [Commit Prefix](https://github.com/fredericrous/git-templates/wiki/Commit-Prefix) - list of prefix your commit summaries should contain
-- [Hooks Implemented](https://github.com/fredericrous/git-templates/wiki/Hooks-implemented) - all the hooks that are triggered when you execute a git command
-- [Ideas of hooks to implement](https://github.com/fredericrous/git-templates/wiki/Ideas-of-hooks-to-implement) - a list of ideas, not a roadmap
-- [Opt Out](https://github.com/fredericrous/git-templates/wiki/Opt-Out) - bypass a check, a hook or uninstall it
-- [Similar Projects](https://github.com/fredericrous/git-templates/wiki/Similar-projects)
+- [Coding Flow](https://github.com/fredericrous/githooks/wiki/Coding-Flow) - an explanation of where the hooks fit in your git "flow"
+- [Commit Prefix](https://github.com/fredericrous/githooks/wiki/Commit-Prefix) - list of prefix your commit summaries should contain
+- [Hooks Implemented](https://github.com/fredericrous/githooks/wiki/Hooks-implemented) - all the hooks that are triggered when you execute a git command
+- [Ideas of hooks to implement](https://github.com/fredericrous/githooks/wiki/Ideas-of-hooks-to-implement) - a list of ideas, not a roadmap
+- [Opt Out](https://github.com/fredericrous/githooks/wiki/Opt-Out) - bypass a check, a hook or uninstall it
+- [Similar Projects](https://github.com/fredericrous/githooks/wiki/Similar-projects)
 
 ## Contribute
 

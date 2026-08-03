@@ -24,7 +24,7 @@ rust-version = "1.74"
 # a release where the two disagree is a release nobody can install.
 version = "1.0.0"
 license = "MIT"
-repository = "https://github.com/fredericrous/git-templates"
+repository = "https://github.com/fredericrous/githooks"
 authors = ["Frederic Rousseau"]
 edition = "2021"
 
