@@ -17,7 +17,7 @@ categories = ["development-tools", "command-line-utilities"]
 [dependencies]
 # `version` beside `path`: cargo uses the path locally and crates.io uses the
 # version, so publishing without it produces a crate nobody can build.
-githooks-runtime = { path = "../githooks-runtime", version = "1.0.0" }
+githooks-runtime.workspace = true
 
 # Test-only: asserting on parsed JSON structure rather than substrings for
 # `list --json`. Does not touch the shipped binary — check-no-deps.sh's
