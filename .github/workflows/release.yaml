@@ -1,0 +1,194 @@
+name: Release
+
+# Cutting a release means: a tag, prebuilt binaries for every platform the hooks
+# claim to support, and checksums. Until this existed the only install path was
+# `git clone` into a specific config directory — a 2015 install story for a Rust
+# binary, and the reason `curl | sh` and `brew install` were impossible.
+#
+# Triggered by the TAG, never by a branch push. The tag is the decision.
+
+on:
+  push:
+    tags: ["v*"]
+  # So a release can be rehearsed end to end without publishing one.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (dry run — no release is published)"
+        required: false
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # The tag and the manifest must agree BEFORE anything is built.
+  #
+  # This is the footgun that motivated the whole job: a commit-msg hook rejects
+  # a commit, the shell carries on to `git tag`, and the tag lands on the OLD
+  # head — so CI builds and publishes the new version number from stale code.
+  # Registries are immutable; the wrong bytes under a version cannot be
+  # replaced, only superseded. Checking costs four lines and runs first.
+  guard:
+    name: the tag says what the manifest says
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      dry_run: ${{ steps.v.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          set -euo pipefail
+          manifest=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            dry=false
+          else
+            tag="${{ inputs.tag }}"
+            tag="${tag#v}"
+            [ -n "$tag" ] || tag="$manifest"
+            dry=true
+          fi
+          echo "manifest=$manifest tag=$tag dry_run=$dry"
+          if [ "$manifest" != "$tag" ]; then
+            echo "::error::tag v$tag does not match [workspace.package] version $manifest."
+            echo "::error::Commit the version bump FIRST, confirm HEAD moved, then tag."
+            exit 1
+          fi
+          echo "version=$manifest" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$dry" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.target }}
+    needs: guard
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      # One broken target must not hide the others: a partial release is
+      # something to see in full, not to discover one platform at a time.
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          # Static, so it runs on distros older than the runner's glibc — the
+          # usual reason a "linux" binary fails for somebody.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            packages: musl-tools
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            packages: gcc-aarch64-linux-gnu
+            linker: aarch64-linux-gnu-gcc
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain for ${{ matrix.target }}
+        run: rustup target add ${{ matrix.target }}
+      - name: Install cross-compilation packages
+        if: matrix.packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+      - name: Point cargo at the cross linker
+        if: matrix.linker != ''
+        run: |
+          target_upper=$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')
+          echo "CARGO_TARGET_${target_upper}_LINKER=${{ matrix.linker }}" >> "$GITHUB_ENV"
+
+      # Both binaries: `githooks` is the hook runtime and the only one anybody
+      # strictly needs; `githooks-fleet` is the opt-in dashboard, and shipping
+      # it here is what stops it being a build-from-source-only feature.
+      - run: cargo build --release --target ${{ matrix.target }} --bin githooks --bin githooks-fleet
+
+      - name: Archive
+        id: archive
+        run: |
+          set -euo pipefail
+          version="${{ needs.guard.outputs.version }}"
+          name="githooks-${version}-${{ matrix.target }}"
+          staging="dist/$name"
+          mkdir -p "$staging"
+          # The shims travel WITH the binary. A release that shipped only the
+          # executable would leave `init.templateDir` users with nothing to
+          # point git at, which is half the product.
+          cp -r templates "$staging/"
+          cp README.md LICENSE "$staging/"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/githooks.exe" "$staging/"
+            cp "target/${{ matrix.target }}/release/githooks-fleet.exe" "$staging/"
+            (cd dist && 7z a "$name.zip" "$name" > /dev/null)
+            echo "asset=dist/$name.zip" >> "$GITHUB_OUTPUT"
+          else
+            cp "target/${{ matrix.target }}/release/githooks" "$staging/"
+            cp "target/${{ matrix.target }}/release/githooks-fleet" "$staging/"
+            (cd dist && tar czf "$name.tar.gz" "$name")
+            echo "asset=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Prove the thing we are about to hand people actually runs. A release
+      # asset that cannot execute is the one defect no amount of `cargo test`
+      # catches, because tests never touch the packaged artifact.
+      - name: The packaged binary runs
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-pc-windows-msvc'
+        run: |
+          set -euo pipefail
+          version="${{ needs.guard.outputs.version }}"
+          bin="dist/githooks-${version}-${{ matrix.target }}/githooks"
+          # An `if`, not `[ … ] && …`: under `set -e` a false test as the last
+          # command of a line is a FAILING step, so the short form would abort
+          # every non-Windows target here.
+          if [ "${{ runner.os }}" = "Windows" ]; then bin="$bin.exe"; fi
+          "$bin" --help | grep -q 'agents-md'
+          "$bin" list --json > /dev/null || true
+          echo "the packaged binary answers --help"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ steps.archive.outputs.asset }}
+          if-no-files-found: error
+
+  publish:
+    name: publish the release
+    needs: [guard, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -la
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+      # A dry run stops here, having built and checksummed everything. The only
+      # step it skips is the irreversible one.
+      - name: Publish
+        if: needs.guard.outputs.dry_run == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/*
+      - name: Dry run summary
+        if: needs.guard.outputs.dry_run == 'true'
+        run: |
+          echo "### Dry run — nothing published" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat dist/SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

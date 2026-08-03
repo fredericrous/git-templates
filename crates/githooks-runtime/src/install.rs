@@ -29,9 +29,23 @@ use crate::ui::{error_sign, highlight, valid_sign, warning_sign};
 pub const PLACEHOLDER: &str = "__GITHOOKS_BIN__";
 
 /// The one shim. All four git-invoked hooks are the same file — it passes its
-/// own filename through — and `shims_on_disk_match_the_embedded_one` keeps this
-/// copy honest against `templates/hooks/`.
-pub const SHIM: &str = include_str!("../../../templates/hooks/pre-commit");
+/// own filename through — and `shims_on_disk_match_the_embedded_one` keeps the
+/// repository's `templates/hooks/` honest against this copy.
+///
+/// The canonical text lives INSIDE this crate, and that is a packaging
+/// constraint rather than a preference. It used to be
+/// `include_str!("../../../templates/hooks/pre-commit")`, reaching up to the
+/// repository root — which works in a checkout and cannot work in a published
+/// crate, because `cargo package` tars up this directory and nothing above it.
+/// The tarball compiled nowhere: `couldn't read src/../../../templates/hooks/
+/// pre-commit`. crates.io is immutable, so that would have been a broken
+/// release that could only be yanked, never fixed in place.
+///
+/// The repository's `templates/hooks/` still holds the four installable copies
+/// — that directory IS the product for anyone pointing `init.templateDir` at a
+/// clone, and it has to be real files rather than symlinks because Git for
+/// Windows materialises those as text files containing a path.
+pub const SHIM: &str = include_str!("../templates/hooks/pre-commit");
 
 /// The ownership question, and every other "may we touch this file?" answer,
 /// now live in [`crate::hookfile`] — one implementation that fails closed,
@@ -866,6 +880,17 @@ mod tests {
     #[test]
     fn shims_on_disk_match_the_embedded_one() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../templates/hooks");
+        // Absent when this crate is built from its PUBLISHED tarball, which
+        // contains this directory and nothing above it. There is no drift to
+        // catch in that situation — the only shim present is the one compiled
+        // in — so say so rather than fail a test about a file that is not
+        // supposed to be there.
+        if !Path::new(dir).is_dir() {
+            println!(
+                "! no repository checkout here — nothing to compare the embedded shim against"
+            );
+            return;
+        }
         for name in DISPATCHERS {
             let disk = std::fs::read_to_string(Path::new(dir).join(name))
                 .unwrap_or_else(|e| panic!("read {name}: {e}"));
