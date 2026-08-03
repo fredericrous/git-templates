@@ -8,4 +8,21 @@ members = ["crates/githooks", "crates/githooks-fleet", "crates/githooks-runtime"
 strip = true
 opt-level = "s"
 lto = true
-panic = "abort"
+
+# NO `panic = "abort"` here, and it must not come back. It saved 10-20KB on a
+# ~583KB binary and silently disabled two safety nets that only exist in the
+# shipped build:
+#
+#   * `dispatch::run_concurrently`'s `catch_unwind`, which isolates one
+#     panicking check so the other nineteen still report. Under abort, a panic
+#     in any check takes the whole hook down with it.
+#   * `Drop for StagedOnly`, which puts the author's unstaged work back. Drop
+#     does not run on abort, so a panicking check left that work parked in
+#     `$GIT_DIR/githooks-held` — the loss staged_only.rs calls the worst
+#     failure in this repository.
+#
+# The sharp part is that no test can catch the regression: cargo IGNORES the
+# `panic` setting for test targets, so both panic tests pass identically with
+# or without this line. `crates/githooks/tests/release_profile.rs` reads this
+# file instead, because asserting on the manifest is the only mechanism that
+# can see a setting the test profile discards.
