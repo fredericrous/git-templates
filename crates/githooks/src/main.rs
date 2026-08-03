@@ -45,6 +45,7 @@ const USAGE: &str = "\
 usage:
     githooks --hooks-dir <dir> <hook-name> [args…]
     githooks list [--json] [--stage pre-commit|pre-push] [--pushed]
+    githooks setup [--local|--global] [--dry-run]
     githooks install [--force] | uninstall [--binary]
     githooks trust [--show|--revoke]
     githooks run [<check>] [--all-files] [--hooks-dir <dir>] | restore
@@ -57,6 +58,7 @@ usage:
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Sub {
     List,
+    Setup,
     Install,
     Uninstall,
     Run,
@@ -81,12 +83,13 @@ impl Sub {
     const fn index(self) -> usize {
         match self {
             Sub::List => 0,
-            Sub::Install => 1,
-            Sub::Uninstall => 2,
-            Sub::Run => 3,
-            Sub::Trust => 4,
-            Sub::Restore => 5,
-            Sub::AgentsMd => 6,
+            Sub::Setup => 1,
+            Sub::Install => 2,
+            Sub::Uninstall => 3,
+            Sub::Run => 4,
+            Sub::Trust => 5,
+            Sub::Restore => 6,
+            Sub::AgentsMd => 7,
         }
     }
 }
@@ -96,8 +99,9 @@ impl Sub {
 /// There were previously seven independent string comparisons scattered down
 /// `main`, each asked twice (once of `hook`, once of `rest.first()`), which is
 /// fourteen places for the set of verbs to be. This is one.
-const SUBCOMMANDS: [(&str, Sub); 7] = [
+const SUBCOMMANDS: [(&str, Sub); 8] = [
     ("list", Sub::List),
+    ("setup", Sub::Setup),
     ("install", Sub::Install),
     ("uninstall", Sub::Uninstall),
     ("run", Sub::Run),
@@ -255,6 +259,12 @@ fn run_sub(sub: Sub, args: &[OsString]) -> i32 {
         Sub::Uninstall => report(githooks_runtime::install::uninstall(
             args.iter().any(|a| a == "--binary"),
         )),
+        // `githooks setup` — the four commit-style keys, asked once. A separate
+        // verb rather than a prompt inside `install`, which has to stay
+        // answerable by nobody: it runs under `githooks-fleet install`, in
+        // provisioning scripts, and never at all for the `init.templateDir`
+        // users whose hooks arrive with a clone.
+        Sub::Setup => report(githooks_runtime::setup::command(args)),
         Sub::Restore => report(githooks_runtime::staged_only::restore_command()),
         Sub::Trust => report(githooks_runtime::trust::command(args)),
         Sub::Run => run_mode(args),

@@ -99,6 +99,26 @@ fn opted_in_it_tests_the_pushed_commits() {
     );
 }
 
+/// `on` is a boolean to git, and now to us.
+///
+/// This key used to be read by a hand-rolled `matches!(v, "true" | "1" | "yes")`
+/// — our own dialect wearing git's clothes. `git config githooks.testPushedTree
+/// on` is valid git-config(1), looked like it worked, and silently did nothing.
+/// It now goes through `git config --type=bool`, which IS the definition.
+#[test]
+fn gits_own_spelling_of_true_turns_it_on() {
+    let r = Repo::new();
+    let (tip, base) = diverging(&r);
+    r.git(&["config", "githooks.testPushedTree", "on"]);
+
+    let (code, out) = pre_push(&r, &tip, &base);
+    assert_ne!(code, 0, "`on` did not enable the pushed-tree run:\n{out}");
+    assert!(
+        !out.contains("WORKING TREE"),
+        "it fell back to the working tree:\n{out}"
+    );
+}
+
 /// The developer's tree is theirs. A push must not touch it, and must not leave
 /// a worktree registered behind either.
 #[test]

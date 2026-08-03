@@ -228,7 +228,14 @@ pub struct Setting {
     pub label: &'static str,
     pub value: String,
     pub default: String,
+    /// The effective value differs from the shipped one — the same meaning
+    /// `CheckListing::severity_overridden` carries.
     pub overridden: bool,
+    /// Somebody set this key, wherever the value landed. Distinct from
+    /// `overridden` on purpose: a key pinned to the default value is still
+    /// worth showing the origin of, because a reader deciding whether to
+    /// change it wants to know a file already mentions it.
+    pub set_here: bool,
     pub scope: Scope,
 }
 
@@ -282,7 +289,8 @@ fn row(key: &'static str, label: &'static str, value: String, default: String) -
     Setting {
         key,
         label,
-        overridden: scope != Scope::Default,
+        overridden: value != default,
+        set_here: scope != Scope::Default,
         value,
         default,
         scope,

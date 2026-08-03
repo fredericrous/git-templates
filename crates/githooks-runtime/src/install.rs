@@ -445,7 +445,25 @@ pub fn run(force: bool) -> Result<(), String> {
     bake_repo_hooks(&binary, force)?;
     offer_trust();
     offer_agents_md();
+    point_at_setup();
     Ok(())
+}
+
+/// Name the commit-style settings, once, at the moment somebody acquires them.
+///
+/// A PRINT, never a prompt. `install` has to remain answerable by nobody: it
+/// runs under `githooks-fleet install --root`, in provisioning scripts, and not
+/// at all for the `init.templateDir` users whose hooks arrive with a clone. A
+/// third question would break all three; a line of output breaks none of them,
+/// and it puts the dial in front of the one person guaranteed to be reading.
+fn point_at_setup() {
+    let s = crate::commit_style::Style::resolve();
+    println!(
+        "  commit style: gitmoji {}, subject ≤{}, description ≤{} — `githooks setup` to change",
+        s.gitmoji.as_str(),
+        s.subject_max,
+        s.description_max
+    );
 }
 
 /// Ask about the manifest, once, at the moment somebody is already deciding
