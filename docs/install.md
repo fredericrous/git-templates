@@ -58,8 +58,25 @@ cd githooks && cargo build --release
 ./target/release/githooks install
 ```
 
-`cargo install githooks` is not live yet — the crates.io publish is still
-pending.
+Or from [crates.io](https://crates.io/crates/githooks), which builds the same
+source:
+
+```sh
+cargo install githooks
+```
+
+Or with Homebrew:
+
+```sh
+brew tap fredericrous/tap
+brew trust fredericrous/tap
+brew install githooks
+```
+
+The `brew trust` line is Homebrew's policy for every tap outside its own core,
+not something specific to this one — a formula is code, and Homebrew now asks
+you to decide about running it explicitly. Which is the same argument this tool
+makes about a repository's declared checks.
 
 ### Requirements
 
