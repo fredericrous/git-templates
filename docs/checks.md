@@ -1,0 +1,139 @@
+# The checks
+
+Four git hooks are installed — `pre-commit`, `commit-msg`,
+`prepare-commit-msg`, `pre-push` — and behind them twenty named checks, plus
+any your repository declares in [`.githooks.conf`](custom-checks.md).
+
+This page is the catalogue. **It is not the answer to "what will run in my
+repository"** — for that, ask:
+
+```sh
+githooks list                       # here, and why not
+githooks list --stage pre-push      # one trigger
+githooks list --json                # the same, machine-readable
+```
+
+Most checks are **inert** in most repositories, by design. A check fires only
+when the commit touches files it understands *and* the repository carries the
+configuration that opts into that tool. A JavaScript repository never invokes
+cargo; a repository with no `ruff.toml` never needs ruff. `githooks list`
+prints the condition each inert check is waiting on.
+
+## Reading the table
+
+- **id** — `<trigger>-<name>`. Any of the three spellings (full id, short name,
+  trigger) can address it in `hook.skip` and `githooks.severity`; see
+  [configuration](configuration.md).
+- **fires when** — the scope. `always` means it has no file condition.
+- **fixes** — the check can rewrite the file rather than only complain. Those
+  rewrites are staged; see [run modes](index-fidelity-and-run-modes.md).
+- Checks marked **soft** warn and skip when their tool is missing, rather than
+  blocking a commit, because CI is the hard gate and not every developer has
+  every toolchain installed.
+
+## `commit-msg`
+
+Validates the summary line and reformats the message. Cannot be bypassed with
+`--no-verify`.
+
+**Validates:** a subject is present and at most 72 characters; it carries a
+[conventional type prefix](commit-convention.md); a description follows the
+prefix; the description is at most 50 characters.
+
+**Formats:** prepends the type's gitmoji, hard-wraps the body at 72 columns,
+and groups the trailing footers with one blank line before them.
+
+Write the bare subject with no emoji of your own — the gitmoji is prepended for
+you, and a manually added one eats into the 50-character budget.
+
+## `prepare-commit-msg`
+
+Appends the issue id found in the branch name to the footer: JIRA first
+(`ABC-1234`), else a bare Kanbanize id (`1234`).
+
+Only for a commit you are authoring. `-m`, `-t`, a merge, a squash and
+`--amend` all pass a source in `$2` and are left alone.
+
+## `pre-commit`
+
+All fifteen run **concurrently**, and a panic in one is isolated so the other
+fourteen still report.
+
+| id | fires when | what it does |
+|---|---|---|
+| `pre-commit-argo-lint` | `.yaml` `.yml` + `kustomization.yaml`/`.yml` | Argo CD app lint. **soft** |
+| `pre-commit-ban-terms` | `.js` `.jsx` `.ts` `.tsx` `.vue` | Refuses focused/debug leftovers (`describe.only`, `debugger`, …) in staged JS/TS. Scoped to what this commit touches, and re-checked against staged content with comments and string literals blanked. |
+| `pre-commit-cargo-fmt` | `.rs` + `Cargo.toml` | `cargo fmt`. **fixes** |
+| `pre-commit-clippy` | `.rs` + `Cargo.toml` | `cargo clippy` |
+| `pre-commit-kube-linter` | `.yaml` `.yml` + `.kube-linter*.yaml`/`.yml` | kube-linter. **soft** |
+| `pre-commit-kubeconform` | `.yaml` `.yml` + `kustomization.yaml`/`.yml` | Schema-validates rendered manifests. **soft** |
+| `pre-commit-lint-js` | `.js` `.jsx` `.ts` `.tsx` `.vue` + `package.json` | ESLint, only in repos that carry an eslint config. |
+| `pre-commit-lint-json-yaml` | `.json` `.yaml` `.yml` | Parses staged JSON/YAML so a syntax error never reaches the repo. **soft** |
+| `pre-commit-merge-conflict` | always | Refuses staged files still carrying conflict markers. |
+| `pre-commit-package-lock` | `package.json` | Keeps `package.json` and its lockfile in step, scoped per directory — one project's lockfile does not satisfy another's in a monorepo, and a `package.json` with no lockfile beside it never demands one. |
+| `pre-commit-prettier` | a prettier config is present | Format check. **fixes** |
+| `pre-commit-pyright` | `.py` `.pyi` + `pyrightconfig.json`/`.jsonc`/`pyproject.toml` | Type check. |
+| `pre-commit-ruff` | `.py` `.pyi` + `ruff.toml`/`.ruff.toml`/`pyproject.toml` | Lint and format. **fixes** |
+| `pre-commit-usual-name` | always | Warns the first time you commit under a given name/email, so a misconfigured `user.name` is noticed at commit one rather than commit twenty. **Never blocks.** |
+| `pre-commit-yamllint` | `.yaml` `.yml` + `.yamllint`/`.yamllint.yaml`/`.yml` | Strict YAML lint, where a repo has opted in. |
+
+Both Python checks prefer the repository's **pinned** tool over an ambient
+latest, in this order: `uv run --no-sync` (the lockfile-pinned one CI runs) →
+the worktree's `.venv` → the *main* worktree's `.venv` (a linked worktree has
+none of its own) → `PATH` → `uvx`, which is unpinned latest and therefore warns,
+because it flags issues the CI-pinned version does not.
+
+### Checks that are paused mid-operation
+
+Most content checks do not run during a merge, rebase, cherry-pick or revert:
+half the tree is somebody else's work and you cannot fix it from inside the
+operation anyway.
+
+`merge-conflict` and `ban-terms` are deliberately **not** paused. Those are
+exactly the checks you want during a resolution commit — leaving a conflict
+marker in the commit that *resolves* a merge is the bug, and importing a banned
+term from the other branch is the other one. An earlier version skipped the
+whole `pre-commit` stage during a cherry-pick, which silenced both.
+
+## `pre-push`
+
+These run **in sequence**, cheapest and most decisive first: refuse a forbidden
+push before validating a name, and validate everything structural before paying
+for a test suite.
+
+| id | fires when | what it does |
+|---|---|---|
+| `pre-push-branch-protect` | always | Refuses a direct push to `main` or `master`. |
+| `pre-push-branch-pattern` | always | Requires `prefix/branch-name` (e.g. `feat/3002-image-crop`), unless the branch already exists on the remote. |
+| `pre-push-pull-rebase` | always | Rebases the branch onto **its own** upstream before pushing, and warns — never acts — when the default branch has moved ahead. Never touches a dirty tree, and aborts cleanly on conflict rather than leaving a half-rebased state. |
+| `pre-push-run-tests-js` | `.js` `.jsx` `.ts` `.tsx` `.vue` + `package.json` | Runs each touched JS package's gate. |
+| `pre-push-cargo-test` | `.rs` + `Cargo.toml` | `cargo test`. |
+
+`pull-rebase`'s constraints are scar tissue worth naming. An older shell
+version ran `git pull --rebase origin HEAD`, where the remote ref `HEAD`
+resolves to the remote's *default* branch — so every push silently rebased onto
+main, autostashing uncommitted work along the way.
+
+### What a push actually tests
+
+By default `pre-push` runs your suite against the **working tree**, and says
+so. That is fast and usually what you want, but it is not what you are pushing:
+an uncommitted fix makes a broken commit look green.
+
+```sh
+git config githooks.testPushedTree true
+```
+
+turns on the accurate answer — the suite runs in a throwaway checkout of the
+commits being pushed, and your tree is not touched. It costs a second checkout
+and a build that cannot reuse your `target/` cache, which is why it is opt-in.
+
+## Adding one
+
+A check is a module plus one registry entry in
+`crates/githooks-runtime/src/registry.rs`; see
+[hook architecture](hook-architecture.md) and
+[CONTRIBUTING.md](https://github.com/fredericrous/githooks/blob/main/CONTRIBUTING.md).
+
+If the check belongs to your repository rather than to everybody's, declare it
+in [`.githooks.conf`](custom-checks.md) instead — no fork required.

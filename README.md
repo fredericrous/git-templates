@@ -1,93 +1,111 @@
-# Git Templates with hooks
+# githooks
+
+**Catch the bad commit before it exists — and take the whole thing back out in one command.**
 
 [![CI](https://github.com/fredericrous/githooks/actions/workflows/ci.yaml/badge.svg)](https://github.com/fredericrous/githooks/actions/workflows/ci.yaml)
+[![Release](https://img.shields.io/github/v/release/fredericrous/githooks?label=release)](https://github.com/fredericrous/githooks/releases/latest)
+[![License](https://img.shields.io/github/license/fredericrous/githooks)](LICENSE)
 
-Git Starter Template with opinionated hooks to help you create beautiful commits with high quality standards..and emojis ✨
+A single Rust binary that runs twenty checks on `git commit` and `git push`:
+commit-message conventions, merge-conflict markers, linters and formatters for
+the languages your repository actually uses, branch rules, your test suite.
+Nothing runs in a repository you did not ask, nothing is installed you cannot
+name, and uninstall removes exactly what install wrote.
 
-<img src="https://user-images.githubusercontent.com/702227/125003867-1b012f00-e050-11eb-8641-748ef806c639.png" width="800">
+![githooks catching a commit and letting the fixed one through](docs/assets/githooks-demo.gif)
 
-*If there is an issue with a hook, please open an issue and consult the section [Opt Out](https://github.com/fredericrous/githooks/wiki/Opt-Out) for a workaround.*
-
-## The workflow
-
-First, `commit`. A nice template [message](https://github.com/fredericrous/githooks/blob/main/message) appears to help you write a meaningful commit description that passes the requirements.
-The message saved, [validators](https://github.com/fredericrous/githooks/wiki/Hooks-implemented) run in parallel. If there is an issue, the commit is aborted
-Ready to push? once `git push` is started, the tests runs for the module you updated, branch name is checked. The branch is pushed. Bravo
-
-The wiki explore in details [this workflow](https://github.com/fredericrous/githooks/wiki/Coding-Flow)
-
-The wiki also lists all the [implemented hooks](https://github.com/fredericrous/githooks/wiki/Hooks-implemented)
-
-## Setup
-
-Clone the repository to a convenient place:
+## Install
 
 ```sh
-mkdir -p ~/.config/git
-cd ~/.config/git
-git clone https://github.com/fredericrous/githooks.git
+curl -fsSL https://raw.githubusercontent.com/fredericrous/githooks/main/install/install.sh | sh
 ```
 
-The clone creates `~/.config/git/git-templates/`, so there is nothing named
-`templates/hooks/` in the directory you are standing in. This snippet used to
-end with `chmod +x templates/hooks/*`, which matched nothing — and in `fish`, a
-glob with no matches is a hard error rather than a silent no-op, so the line
-either did nothing or aborted the setup depending on your shell. It is gone
-rather than corrected: `githooks install` (below) sets the mode on the shims it
-writes, so nobody needs to.
-
-Setup your gitconfig
+That downloads a release binary, verifies it against the published
+`SHA256SUMS`, and puts it in `~/.local/bin`. It **enables nothing**: hooks are
+turned on per repository, by you, afterwards.
 
 ```sh
-git config --global commit.template ~/.config/git/git-templates/message
+cd <your-repo> && githooks install   # this repository only
+githooks list                        # what would run here, and why not
 ```
 
-### Two ways to turn hooks on
+Prefer not to pipe a script into a shell? Download a binary and its checksum
+from [Releases](https://github.com/fredericrous/githooks/releases/latest) —
+prebuilt for Linux (gnu/musl, x86_64 and aarch64), macOS (Intel and Apple
+silicon) and Windows. Or build from source: `cargo build --release`.
 
-**Per repository** — the default. Nothing runs anywhere you did not ask:
+`cargo install githooks` is not live yet; the crates.io publish is still
+pending.
+
+## Uninstall
+
+```sh
+githooks uninstall              # this repository
+githooks uninstall --binary     # …and remove ~/.local/bin/githooks too
+```
+
+Uninstall is listed second on purpose. These hooks can block a commit, so the
+honest question to answer first is how you get out — and the answer is that
+`uninstall` removes our four shims and **nothing else**. A hook you wrote
+yourself is left where it is and named in the output, whatever it is; a hook it
+cannot even read is named too rather than passed over in silence. Your
+`hook.skip` and `githooks.severity` settings are never touched, because those
+are your statements about your repository.
+
+This is also why the README does not tell you to run
+`rm $(git rev-parse --git-dir)/hooks/*`. That glob deletes every hook in the
+directory — including ones other tools installed and ones you wrote — to remove
+four files that belong to us.
+
+To bypass a single run rather than uninstall: `git commit --no-verify`.
+To turn off one check permanently, see [Turning a check off, or down](#turning-a-check-off-or-down).
+
+## What actually runs
+
+`githooks list` answers that for the repository you are standing in, and it is
+the honest answer rather than the catalogue: most checks are **inert** in most
+repositories, because a repo with no `ruff.toml` never needs ruff.
+
+```
+pre-commit
+  ● ban-terms
+  ○ cargo-fmt         inert here — needs .rs + Cargo.toml
+  ● lint-json-yaml
+  ● merge-conflict
+  ○ prettier          inert here — needs .prettierrc | .prettierrc.json | …
+  ● usual-name
+pre-push
+  ● branch-protect
+  ● branch-pattern
+  ● pull-rebase
+  ○ cargo-test        inert here — needs .rs + Cargo.toml
+
+  ● runs here   ○ inert   ⊘ skipped via hook.skip   ✗ declaration unusable
+```
+
+Twenty built-in checks across four git hooks, plus any your repository declares
+itself. The full list, with what each one needs before it fires, is in
+[the checks reference](docs/checks.md).
+
+## Two ways to turn hooks on
+
+**Per repository** — the default, and nothing runs anywhere you did not ask:
 
 ```sh
 cd <your-repo> && githooks install
-githooks-fleet install --root ~/Developer   # or in bulk
+githooks-fleet install --root ~/Developer   # or in bulk, across many repos
 ```
 
-`githooks install --force` replaces a hook the installer would otherwise refuse:
-one that is present but carries no marker of ours, or one that is a symlink
-(where writing normally would rewrite whatever it points at). Without the flag
+`githooks install --force` replaces a hook the installer would otherwise
+refuse: one present but carrying no marker of ours, or one that is a symlink
+(where writing normally would rewrite whatever it points at). Without the flag,
 install names every such file and writes none of them, because a hook somebody
-else put there is somebody else's; `--force` is how you say it is yours to
-replace, and the output then names what it took rather than just counting what
-it wrote.
+else put there is somebody else's.
 
 Two things `--force` does **not** override, deliberately. A **tracked** file is
-never written — that is source belonging to a checkout, and it is the guard that
-was got wrong twice. And a path that is a directory or a device is refused
-whatever you pass, because that is not "a hook that is there", it is a sign
-something else is going on; refusing costs one `rm`.
-
-Neither of these deletes a hook it did not write. A `pre-commit-*` or
-`pre-push-*` file in `.git/hooks` without our marker is reported and left
-exactly where it is; `githooks-fleet --remove-unrecognized` opts into removing
-them, and is spelled that way rather than `--remove-stale` because "stale" means
-our own retired shims, which are a different thing entirely.
-
-And off again — which removes our shims and nothing else. A hook you wrote
-yourself is left alone and named, whatever it is: a hook it cannot even read is
-named too, rather than passed over in silence. `hook.skip` and
-`githooks.severity` are never touched, because those are your statements about
-your repository:
-
-```sh
-githooks uninstall              # add --binary to take ~/.local/bin/githooks too
-githooks-fleet uninstall --root ~/Developer
-```
-
-`githooks uninstall` also takes its shims back out of the template directory
-below, and — if `init.templateDir` is still set — says so loudly with the
-command to unset it. Without that, an uninstall you believed had finished left
-every future `git clone` re-installing the hooks. A template directory that is
-itself a checkout of this repository is never deleted from; those files are
-tracked source and belong to the checkout.
+never written — that is source belonging to a checkout, and it is the guard
+this project got wrong twice. And a path that is a directory or a device is
+refused whatever you pass.
 
 **Everywhere, forever** — an opt-in, and a real one:
 
@@ -95,59 +113,66 @@ tracked source and belong to the checkout.
 git config --global init.templateDir ~/.config/git/git-templates/templates
 ```
 
-Git copies that directory into `.git/hooks` on every `init` **and every clone**,
-so from then on every repository you clone runs these hooks without being asked
-again. That is the convenience, and it is worth having: you never forget to
-install, and `githooks-fleet` never shows you an uncovered repo.
+Git copies that directory into `.git/hooks` on every `init` **and every
+clone**, so from then on every repository you clone runs these hooks without
+being asked again. That is the convenience, and it is worth having.
 
 It is also a standing grant, so it is worth stating what you granted. A cloned
-repository can declare its own checks in `.githooks.conf`, and with this key set
-those run on your first commit in it — a repository you may have cloned only to
-read. If you set this, **trust the manifest deliberately** rather than relying on
-installation to be the moment you decided:
+repository can declare its own checks in `.githooks.conf`, and with this key
+set those are one `githooks trust` away from running on your first commit in a
+repository you may have cloned only to read. If you set this, **trust
+deliberately** rather than letting installation be the moment you decided.
+
+## Trust: a repository you clone cannot run its own checks
+
+`.githooks.conf` is committed — that is the point, a team shares a check by
+committing it. The consequence is that cloning a repository and committing to
+it would otherwise run commands that repository chose, and neither of those
+acts is one anybody performs *as a decision about trust*.
+
+So a cloned repository's declared checks are **inert until you say otherwise**:
 
 ```sh
 githooks trust          # show what this repo declares, and accept it
 githooks trust --show   # what is trusted here
+githooks trust --revoke
 ```
 
-Full reasoning in
-[docs/index-fidelity-and-run-modes.md](docs/index-fidelity-and-run-modes.md) §0.
+The record is keyed on the file's **content**, not its path, so a `git pull`
+that adds a command does not inherit the consent given to the file before it.
+The fingerprint is `git hash-object --no-filters`, and the `--no-filters` is
+not decoration: plain `hash-object` applies the clean filter and eol conversion
+that the repository's own committed `.gitattributes` asks for, which would let
+a repository choose the transform its own consent is taken through.
 
-Copy the hooks to existing repositories
+Full reasoning: [the trust model](docs/trust.md).
+
+## Turning a check off, or down
+
+Every check has an id, `<trigger>-<name>` — `pre-commit-clippy`. Three things
+name it, and both config surfaces read all three the same way:
 
 ```sh
-cd <folder-of-your-repo>
-git init
+git config --add hook.skip pre-commit-clippy   # that one check
+git config --add hook.skip clippy              # that check, on either trigger
+git config --add hook.skip pre-commit          # every pre-commit check
 ```
 
-## Update
-
-Update the local clone to the latest version
+`githooks.severity.<key>` takes the same three, and keeps the signal — the
+check still runs and still reports, it just stops failing the commit:
 
 ```sh
-cd ~/.config/git/git-templates/templates
-git pull
+git config githooks.severity.clippy warn
+git config githooks.severity.pre-commit warn
 ```
 
-Update the target repository
+Where several keys reach one check the most specific wins: full id, then short
+name, then trigger. Nothing matches by substring — `hook.skip e` reaches
+nothing at all, and skipping `lint-js` leaves `lint-json-yaml` alone.
 
-```sh
-cd <your-repo> && githooks install        # re-bake the shims here
-githooks-fleet fix --root ~/Developer     # or see what the whole fleet needs
-githooks-fleet fix --apply --root ~/Developer
-```
-
-Ordinary binary updates need none of this: every shim points at the one binary,
-so `make install` reaches all 96 repositories at once. Re-installing is only
-needed when the shim SET changes — a hook added, removed or renamed.
-
-This used to say `rm $(git rev-parse --git-dir)/hooks/*` followed by `git init`,
-and that is exactly the thing this project argues against two paragraphs
-earlier. The glob deletes every hook in the directory, including ones other
-tools installed and ones you wrote yourself, to update four files that belong to
-us. `githooks uninstall` exists so that removing our hooks never means removing
-yours; a `rm *` in the README undid that promise in one line.
+A skipped check is announced on every commit, so a config line nobody remembers
+writing cannot go on silently disabling things. More in
+[opting out](docs/opting-out.md) and [configuration](docs/configuration.md).
 
 ## Custom checks
 
@@ -159,53 +184,9 @@ pre-commit    shellcheck  *.sh    block     scripts/lint-shell.sh
 pre-push      smoke       *       warn      make smoke
 ```
 
-They run alongside the built-ins and obey the same `hook.skip` and
-`githooks.severity.<key>` controls, addressed the same three ways: by full id
-(`pre-commit-shellcheck`), by trigger (`pre-commit`), or by short name
-(`shellcheck`). `githooks list` shows what would run here.
-Full reference: [docs/custom-checks.md](docs/custom-checks.md).
-
-## Naming a check, to turn it off or down
-
-Every check has an id, `<trigger>-<name>` — `pre-commit-clippy`. Three things
-name it, and both config surfaces read all three the same way:
-
-```sh
-git config --add hook.skip pre-commit-clippy   # that one check
-git config --add hook.skip clippy              # that check, on either trigger
-git config --add hook.skip pre-commit          # every pre-commit check
-```
-
-`githooks.severity.<key>` takes the same three:
-
-```sh
-git config githooks.severity.clippy warn       # runs, reports, does not block
-git config githooks.severity.pre-commit warn   # the whole trigger
-```
-
-Where several keys reach one check the most specific wins — full id, then short
-name, then trigger — so you can downgrade a trigger and exempt one check from it.
-Nothing matches by substring: `hook.skip e` reaches nothing at all, and skipping
-`lint-js` leaves `lint-json-yaml` alone.
-
-A skipped check is announced on every commit, so a config line nobody remembers
-writing cannot go on silently disabling things. `githooks list` shows the current
-state of a repo; `githooks-fleet` shows it across all of them, with `TRIGGER` as
-its own column.
-
-## What a push actually tests
-
-By default `pre-push` runs your suite against the **working tree**, and now says
-so. That is fast and usually what you want, but it is not what you are pushing:
-an uncommitted fix makes a broken commit look green.
-
-```sh
-git config githooks.testPushedTree true
-```
-
-turns on the accurate answer — the suite runs in a throwaway checkout of the
-commits being pushed, and your tree is not touched. It costs a second checkout
-and a build that cannot reuse your `target/` cache, which is why it is opt-in.
+They run alongside the built-ins, obey the same `hook.skip` and
+`githooks.severity` controls, and are inert until trusted. Full reference:
+[custom checks](docs/custom-checks.md).
 
 ## Running the checks yourself
 
@@ -218,142 +199,138 @@ githooks list                   # what would run here, and why not
 
 The two questions are different on purpose. `--all-files` on a dirty tree
 reports on content that is not committed and may never be — which is what you
-want when adopting a check into an existing repository, where `git add .` is not
-an acceptable way to measure the mess.
+want when adopting a check into an existing repository, where `git add .` is
+not an acceptable way to measure the mess.
+
+## What a push actually tests
+
+By default `pre-push` runs your suite against the **working tree**, and says
+so. That is fast and usually what you want, but it is not what you are pushing:
+an uncommitted fix makes a broken commit look green.
+
+```sh
+git config githooks.testPushedTree true
+```
+
+turns on the accurate answer — the suite runs in a throwaway checkout of the
+commits being pushed, and your tree is not touched. It costs a second checkout
+and a build that cannot reuse your `target/` cache, which is why it is opt-in.
 
 ## For coding agents
 
 `githooks list --json` is the same answer as `githooks list`, machine-readable:
-every check's declared and effective severity (accounting for a
-`githooks.severity.*` override), whether it fires here and why not, and its
-command if it is a declared external. `--stage` filters to one trigger;
-`--pushed` scopes to what your *next push* would actually carry — `@{u}..HEAD`
-— rather than the whole tracked tree:
+every check's declared and effective severity, whether it fires here and why
+not, and its command if it is a declared external. `--stage` filters to one
+trigger; `--pushed` scopes to what your *next push* would carry (`@{u}..HEAD`)
+rather than the whole tracked tree.
 
 ```sh
-githooks list --json
-githooks list --json --stage pre-push
 githooks list --json --stage pre-push --pushed
+githooks agents-md          # write a self-verifying pointer into AGENTS.md
+githooks agents-md --check  # exit non-zero if it has drifted
 ```
 
-`githooks agents-md` writes a short, self-verifying pointer to the above into
-`AGENTS.md`, scoped to a `<!-- githooks:start -->` / `<!-- githooks:end -->`
-block — it only ever touches that span, so the rest of the file stays yours:
+`agents-md` only ever touches a `<!-- githooks:start -->` / `<!-- githooks:end -->`
+span, so the rest of the file stays yours.
 
-```sh
-githooks agents-md          # write it, or bring it up to date
-githooks agents-md --check  # exit non-zero if it has drifted (missing is fine — opt-in)
-```
+## Why you can let this near your commits
 
-`githooks install` offers to add this block interactively, the same way it
-offers `githooks trust`. Across a fleet, `githooks-fleet` reports each repo's
-state as its own `AGENTS` column, and `fix --apply --agents-md` (or
-`install --agents-md`) rolls the block out — or repairs drift — everywhere at
-once; like every other fleet write, it is opt-in per invocation, never bundled
-into a plain `--apply`.
+A prompt theme is cosmetic. This blocks commits and pushes, reads every staged
+file, and runs with your credentials while nobody is watching — so the claim it
+has to earn is not "delightful", it is "harmless".
 
-Design notes live in `docs/`, and each says at the top what of it ships:
-[hook-architecture.md](docs/hook-architecture.md) (the `Check` trait),
-[index-fidelity-and-run-modes.md](docs/index-fidelity-and-run-modes.md) (trust,
-staged-only checking and run modes — what `pre-commit`, `lefthook` and `husky`
-were worth taking from, and what was refused),
-[fleet-dashboard.md](docs/fleet-dashboard.md),
-[hook-skip-management.md](docs/hook-skip-management.md) and
-[rust-migration.md](docs/rust-migration.md) (history, kept for its reasoning).
+- **The commit path links no external crates.** `githooks` and
+  `githooks-runtime` are std-only, and `scripts/check-no-deps.sh` fails a build
+  that changes that — fails *closed*, so a cargo error or an unreachable
+  registry is a failure rather than a reassuring green tick. `githooks-fleet`
+  takes dependencies quite happily; it is installed separately and runs when
+  asked.
+- **634 tests**, run on Linux, macOS and Windows, alongside `cargo fmt
+  --check`, `clippy -D warnings`, an MSRV floor of 1.74 compiled for the commit
+  path, and `cargo-audit`.
+- **v1.0.0 followed a full security review**, and each finding landed with a
+  committed reproduction: a drive-by RCE via a relative path in the shim; a
+  held-store format that let a repository delete a tracked file and plant a
+  symlink outside the worktree; a trust prompt a repository could conceal
+  declarations from; guards that wrote through symlinks onto tracked source; a
+  commit subject shaped like a trailer destroying commit trailers;
+  `pre-commit-pyright` blocking every commit it ran on.
+- **Your uncommitted work is the thing that must never be lost.** The release
+  profile deliberately omits `panic = "abort"` so that the `Drop` that restores
+  unstaged work still runs when a check panics — with a test asserting on the
+  manifest, because cargo ignores that setting for test targets and no
+  behavioural test could catch the regression.
+
+Threat model and private reporting: [SECURITY.md](SECURITY.md).
 
 ## Windows
 
-Everything works, with one setup difference: there is no symlink.
-
-Install with the binary itself — Git for Windows ships `bash` and coreutils but
-not `make`:
+Everything works, with one setup difference: there is no symlink. Install with
+the binary itself — Git for Windows ships `bash` and coreutils but not `make`:
 
 ```sh
 cargo build --release
 ./target/release/githooks install
 ```
 
-That is the same command `make install` runs on every platform.
-
 On macOS/Linux `~/.config/git/git-templates` is usually a symlink to the
-checkout, so `init.templateDir` can point at a stable XDG path. Windows does not
-create symlinks without Developer Mode or elevation, so point git straight at
-the checkout instead:
+checkout, so `init.templateDir` can point at a stable XDG path. Windows does
+not create symlinks without Developer Mode or elevation, so point git straight
+at the checkout instead:
 
 ```sh
-git config --global init.templateDir 'C:/path/to/git-templates/templates'
+git config --global init.templateDir 'C:/path/to/githooks/templates'
 ```
 
 Nothing else changes. The shims never need the symlink: they resolve the binary
-at runtime, trying `$GIT_HOOKS_BIN`, the baked path, `~/.local/bin/githooks` and
-`~/.local/bin/githooks.exe`, then `PATH`. The installer detects the `.exe`
-suffix on its own.
+at runtime, trying `$GIT_HOOKS_BIN`, the baked path, `~/.local/bin/githooks`
+and `~/.local/bin/githooks.exe`, then `PATH`.
 
 ## Requirements
 
-- **Git 2.31+**
+- **Git 2.31+** — `git rev-parse --path-format=absolute` landed there, and
+  three places depend on it. On an older git those return nothing rather than
+  failing loudly, which is the worst shape for a version floor: the tool
+  appears to work and quietly resolves the wrong paths.
 
-2.31, not the 2.22 this said. `git rev-parse --path-format=absolute` landed in
-2.31, and three places depend on it: `install.rs` resolving the hooks directory,
-`hooks/common.rs` finding the git common dir, and `hooks/python_tools.rs`
-locating a linked worktree's main `.venv`. On an older git those return nothing
-rather than failing loudly, which is the worst shape for a version floor — the
-tool appears to work and quietly resolves the wrong paths.
+The hooks are a single binary with no runtime dependencies. Each check brings
+its own tool requirement only where you have opted into that check. ZSH,
+NodeJS and ripgrep were requirements of the shell implementation and are no
+longer needed.
 
-The hooks are a single Rust binary with no runtime dependencies; each check
-brings its own tool requirement only where you have opted into that check (a
-repo with no `ruff.toml` never needs ruff). ZSH, NodeJS and ripgrep were
-requirements of the shell implementation and are no longer needed.
+## Documentation
 
-## Wiki
+The full documentation is in [`docs/`](docs/), versioned with the code and
+published as a book:
 
-- [Coding Flow](https://github.com/fredericrous/githooks/wiki/Coding-Flow) - an explanation of where the hooks fit in your git "flow"
-- [Commit Prefix](https://github.com/fredericrous/githooks/wiki/Commit-Prefix) - list of prefix your commit summaries should contain
-- [Hooks Implemented](https://github.com/fredericrous/githooks/wiki/Hooks-implemented) - all the hooks that are triggered when you execute a git command
-- [Ideas of hooks to implement](https://github.com/fredericrous/githooks/wiki/Ideas-of-hooks-to-implement) - a list of ideas, not a roadmap
-- [Opt Out](https://github.com/fredericrous/githooks/wiki/Opt-Out) - bypass a check, a hook or uninstall it
-- [Similar Projects](https://github.com/fredericrous/githooks/wiki/Similar-projects)
+- [Installing and activating](docs/install.md)
+- [The checks](docs/checks.md) · [Configuration](docs/configuration.md) ·
+  [Opting out](docs/opting-out.md)
+- [The trust model](docs/trust.md) · [Custom checks](docs/custom-checks.md)
+- [Where the hooks fit in your flow](docs/coding-flow.md) ·
+  [Commit conventions](docs/commit-convention.md)
+- Decision records for maintainers: [hook architecture](docs/hook-architecture.md),
+  [index fidelity and run modes](docs/index-fidelity-and-run-modes.md),
+  [skip management](docs/hook-skip-management.md),
+  [the fleet dashboard](docs/fleet-dashboard.md),
+  [the Rust migration](docs/rust-migration.md)
 
-## Contribute
+## Contributing
 
-**Everything is Rust, in `crates/`.** This section used to say "if a script is
-simple implement it in shell script… use javascript… a lot of devs have nodejs
-installed", which is precisely the design the migration undid — and it sat
-twenty lines below the sentence saying ZSH and NodeJS are no longer needed. A
-new check is a module plus one registry entry, not a script.
+Everything is Rust, in `crates/`:
 
 ```
 crates/githooks-runtime/   the checks, registry and dispatchers. std only.
-crates/githooks/           the hook binary. Runs on every commit.
+crates/githooks/           the hook binary. Runs on every commit. std only.
 crates/githooks-fleet/     the dashboard and the fleet fixer. Opt-in.
 ```
 
-**The commit path stays dependency-free.** `githooks` and `githooks-runtime`
-link no external crates, and `scripts/check-no-deps.sh` fails a build that
-changes that. It is a strong default, not a prohibition, and the script itself
-explains when reopening it is a legitimate call rather than a violation — read
-it before arguing either way. `githooks-fleet` takes dependencies quite happily
-(ratatui, crossterm, serde); it is installed separately and runs when asked.
+`make check` is the CI-parity target — run it before you push. Setup, the
+zero-dependency rule and when reopening it is legitimate, the house test style
+and the commit convention are all in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-The make targets:
+By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-- `make lint` — exactly what CI's `rust` job gates on: `cargo fmt --check` and
-  `cargo clippy --all-targets -- -D warnings`. Note that this repo's OWN
-  `pre-commit-clippy` runs a wider one (`--workspace --all-features`), so the
-  hook can reject a commit CI would accept.
-- `make test` — `scripts/check-no-deps.sh` plus `cargo test`. Kept clippy-free
-  so the inner loop is fast. `make test RUN=<suite>` runs one.
-- `make check` — `lint` then `test`. **`make` with no target runs this.**
-- `make install` — builds and runs `githooks install`, which puts the binary in
-  `~/.local/bin` and writes the shims into this repo and the template dir. It
-  refuses to touch a template dir that is a checkout; see
-  `crates/githooks-runtime/src/install.rs`.
-- `make install-fleet` — the dashboard, installed separately and on purpose.
-- `make propagate` — push the shim SET to every repo. Dry run; `APPLY=1` writes.
-  Only needed when a hook is added, removed or renamed.
-- `make deps` — the dependency guard on its own.
+## License
 
-The toolchain is pinned in `rust-toolchain.toml`, and the floor the commit path
-may require is `rust-version` in `Cargo.toml` (1.74), enforced by CI's `msrv`
-job. Both are deliberate PRs to change: under `-D warnings` a new clippy release
-is a breaking change, which is the whole reason the pin exists.
+[MIT](LICENSE).

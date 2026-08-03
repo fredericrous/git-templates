@@ -1,0 +1,67 @@
+name: Feature request
+description: A new check, a new option, or a change to how something behaves.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two things worth knowing before you write this up, because they change the answer:
+
+        - **A check that is right for your repository does not need to be in everybody's binary.**
+          Declare it in a committed `.githooks.conf` and your whole team gets it, with the same
+          `hook.skip` and `githooks.severity` controls as any built-in. See
+          [custom checks](https://github.com/fredericrous/githooks/blob/main/docs/custom-checks.md).
+        - **The commit path links no external crates**, enforced in CI. A built-in that needs a
+          dependency belongs in `githooks-fleet`, which is installed separately. See
+          [CONTRIBUTING.md](https://github.com/fredericrous/githooks/blob/main/CONTRIBUTING.md).
+
+        There is also a page of
+        [ideas already thrown around](https://github.com/fredericrous/githooks/blob/main/docs/ideas.md),
+        some with a reason they have not been built.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What goes wrong today, in terms of something that actually happened. Not the feature — the problem.
+      placeholder: |
+        Our team keeps committing Terraform that has not been `terraform fmt`ed, and CI catches it
+        twenty minutes later.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like it to do
+      description: Include what it should do when the tool it needs is absent — warn and skip, or block?
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: When should it be inert?
+      description: |
+        Most checks fire only when the commit touches files they understand *and* the repository
+        carries the config that opts into that tool — so a JS repo never invokes cargo.
+        What is the equivalent condition here?
+      placeholder: "`.tf` or `.tfvars` staged, and a `.terraform.lock.hcl` or `versions.tf` in that directory."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you considered instead
+      description: Including whether `.githooks.conf` would do it, and why it would not be enough.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: deps
+    attributes:
+      label: Dependencies
+      options:
+        - label: This can be implemented in the commit path using only `std` and `git`, or it belongs in `githooks-fleet`.
+          required: false

@@ -1,0 +1,102 @@
+# Commit and branch conventions
+
+Two vocabularies, kept in one place —
+`crates/githooks-runtime/src/vocabulary.rs` — with a test that fails unless
+every name is either shared between them or declared an exception *with a
+reason*.
+
+That test exists because they drifted: 8 of 12 commit types were rejected as
+branch prefixes, so `docs/…` and `refactor/…` could not be pushed even though
+`docs:` and `refactor:` were valid commit types. It cost two branch renames
+before anyone looked.
+
+## The commit subject
+
+```
+<type>[optional scope][optional !]: <description>
+```
+
+Enforced by `commit-msg`, which **cannot** be bypassed with `--no-verify`:
+
+- a subject is present, and is at most **72** characters;
+- it carries one of the types below, followed by a required colon and space;
+- a description follows the prefix, and is at most **50** characters.
+
+An optional scope is a noun in parentheses naming a section of the codebase:
+`fix(parser): …`. A `!` before the colon marks a breaking change.
+
+**Write the bare subject with no emoji.** `prepare-commit-msg`/`commit-msg`
+prepend the type's gitmoji for you; one you add by hand eats into the
+50-character description budget and can push you over.
+
+## The types
+
+Migrated from the old wiki's "Commit Prefix" page and re-derived from
+`COMMIT_TYPES`, which is the authority — the wiki's table had drifted from what
+the hook actually prepends.
+
+| icon | type | for |
+|---|---|---|
+| 👷 | `build` | the CI or build system |
+| 🔧 | `chore` | configuration, auxiliary tooling, generated docs |
+| 📝️ | `docs` | documentation only |
+| ✨ | `feat` | a new feature |
+| 🐛 | `fix` | a bug fix |
+| ⚡️ | `perf` | a performance improvement |
+| ♻️ | `refactor` | neither fixes a bug nor adds a feature |
+| ⏪️ | `revert` | reverting; ideally via `git revert` |
+| 🎨 | `style` | structure or formatting of the code |
+| 🚨 | `test` | adding, updating or fixing tests |
+| ➕ | `add` | adding files as part of a larger feature |
+| ➖ | `remove` | the opposite of `add` |
+
+## The rest of the message
+
+`commit-msg` also reformats what you wrote, rather than rejecting it for
+whitespace:
+
+- hard-wraps the body at 72 columns;
+- ensures one blank line after the subject;
+- groups the trailing footers, with one blank line before them.
+
+`prepare-commit-msg` appends an issue id found in the branch name — JIRA first
+(`ABC-1234`), else a bare Kanbanize id (`1234`) — but only for a commit you are
+authoring. `-m`, `-t`, a merge, a squash and `--amend` all pass a source in
+`$2` and are left alone.
+
+The footer scaffold lives in
+[`message`](https://github.com/fredericrous/githooks/blob/main/message):
+
+```sh
+git config --global commit.template ~/.config/git/git-templates/message
+```
+
+## Branch names
+
+`pre-push-branch-pattern` requires `prefix/branch-name` — for example
+`feat/3002-image-crop` — unless the branch already exists on the remote, in
+which case renaming it is nobody's idea of an improvement.
+
+Prefixes: `add`, `automation`, `build`, `chore`, `docs`, `feat`, `fix`,
+`hotfix`, `perf`, `refactor`, `remove`, `revert`, `style`, `test`.
+
+Only `chore/` allows dots, because they suit version-bump branches
+(`chore/duro-1.50.50`) and would only be noise elsewhere. Git already rejects
+the dangerous forms (`..`, a trailing `.lock`).
+
+Two prefixes are deliberately not commit types, and the reason is recorded in
+the source rather than in anyone's memory:
+
+- **`hotfix`** — an urgency, not a kind of change. The commits inside it are
+  still `fix:`.
+- **`automation`** — bot-authored branches; their commits carry their own
+  types.
+
+The rejection message is *rendered from the same lists*, so what you are told
+always matches what is enforced.
+
+## Where these come from
+
+- <https://git-scm.com/docs/git-commit>
+- <https://www.conventionalcommits.org/en/v1.0.0/>
+- <https://gitmoji.dev/>
