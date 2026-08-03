@@ -150,9 +150,16 @@ fn main() {
 
     if rest.first().is_some_and(|a| a == "agents-md") || hook.as_deref() == Some("agents-md") {
         let check_only = rest.iter().any(|a| a == "--check");
-        let path = path_flag(&rest).unwrap_or_else(|| {
-            PathBuf::from(githooks_runtime::hooks::common::repo_root()).join("AGENTS.md")
-        });
+        let path = match path_flag(&rest) {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                PathBuf::from(githooks_runtime::hooks::common::repo_root()).join("AGENTS.md")
+            }
+            Err(e) => {
+                eprintln!("githooks: {e}");
+                std::process::exit(2);
+            }
+        };
         let code = if check_only {
             match githooks_runtime::agents_md::check(&path) {
                 Ok(githooks_runtime::agents_md::CheckResult::NotPresent) => {
@@ -267,14 +274,17 @@ fn stage_flag(rest: &[OsString]) -> Result<Option<Stage>, String> {
 }
 
 /// `--path <file>` for `agents-md`.
-fn path_flag(rest: &[OsString]) -> Option<PathBuf> {
+fn path_flag(rest: &[OsString]) -> Result<Option<PathBuf>, String> {
     let mut iter = rest.iter();
     while let Some(a) = iter.next() {
         if a == "--path" {
-            return iter.next().map(PathBuf::from);
+            let v = iter
+                .next()
+                .ok_or_else(|| "--path requires a value".to_string())?;
+            return Ok(Some(PathBuf::from(v)));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Whether `githooks run <name>` needs a synthetic push ref list — `name` is
