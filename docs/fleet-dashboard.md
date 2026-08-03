@@ -102,44 +102,111 @@ an explicit action.
 
 ```
 FleetScan {
-  root             : PathBuf
-  depth            : usize
-  git_dirs_found   : usize
-  hook_dirs_seen   : usize
-  managed_seen     : usize
-  unmanaged_seen   : usize
-  unreadable       : Vec<PathBuf>
-  excluded_dirs    : usize
-  repos            : Vec<Repo>
+  root               : PathBuf
+  depth              : usize
+  git_dirs_found     : usize
+  hook_dirs_seen     : usize
+  managed_seen       : usize
+  unmanaged_seen     : usize
+  unreadable         : Vec<PathBuf>
+  hooks_outside_seen : usize      // repos whose hooks resolve somewhere we will not touch
+  excluded_dirs      : usize
+  repos              : Vec<Repo>
 }
 
 Repo {
-  path         : PathBuf        // displayed repo-relative to the scan root
-  managed      : bool           // ≥1 shim dispatches to the binary
-  shims        : [ShimState; 4] // commit-msg, pre-commit, pre-push, prepare-commit-msg
-  stale_ours   : Vec<String>    // our old shims/check shims that are no longer shipped
-  foreign_subs : Vec<String>    // hand-written pre-commit-* / pre-push-* sub-hooks
-  hook_pkgjson : Option<String> // vestigial hooks/package.json from the node era
-  baked        : BakeState      // which binary path the shims point at
-  languages    : LangSet        // rust | js | python | k8s — from manifest presence
-  skips        : Vec<String>    // git config --get-all hook.skip
+  path              : PathBuf        // displayed repo-relative to the scan root
+  managed           : bool           // ≥1 shim dispatches to the binary
+  shims             : [ShimState; 4] // commit-msg, pre-commit, pre-push, prepare-commit-msg
+  stale_ours        : Vec<String>    // OUR old shims that are no longer shipped
+  foreign_subs      : Vec<String>    // hand-written pre-commit-* / pre-push-* sub-hooks
+  hook_pkgjson      : Option<String> // vestigial hooks/package.json from the node era
+  baked             : BakeState      // which binary path the shims point at
+  languages         : LangSet        // rust | js | python | k8s — from manifest presence
+  skips             : Vec<String>    // git config --get-all hook.skip
+  hooks_dir         : HooksDir       // where the hooks are, and whether we may touch them
+  shares_hooks_with : Option<PathBuf> // a repo already seen that owns this hooks dir
 }
 
 ShimState = Ok            // installed bytes match the expected baked template
-          | Drifted(hash) // present, but not the expected baked template
+          | Drifted       // present, readable text, not the expected baked template
           | Missing
+          | Symlink{target}    // a link — writing here would rewrite something else
+          | Unreadable{why}    // a binary, a directory, a permissions error, a hard link
 BakeState = Current       // == installed binary path
           | Stale(path)   // points somewhere else — the GUI-client failure mode
           | Unbaked       // __GITHOOKS_BIN__ placeholder intact
           | Mixed         // shims disagree with each other
+HooksDir  = In{path}      // inside the repo's worktree, or its git common dir
+          | Outside{path} // reported, never created, never written to
+          | Unknown{why}  // git would not say — not a state to guess out of
 
 FixPlan {
-  repo    : PathBuf
-  refuse  : Vec<Refusal> // tracked files, unreadable hooks dir, non-managed repo, ...
-  remove  : Vec<Removal>
-  write   : Vec<WriteShim>
+  repo      : PathBuf
+  repo_abs  : PathBuf
+  intent    : "repair" | "activate"
+  hooks     : HooksDir
+  refuse    : Vec<Refusal> // suppresses the WHOLE repo
+  warn      : Vec<Warning> // printed; suppresses NOTHING
+  remove    : Vec<Removal>
+  write     : Vec<WriteShim>
 }
+
+Refusal = unmanaged | unreadable_hooks | tracked{path}
+        | tracked_unknown{path, why}      // git could not answer — never read as "no"
+        | foreign_hook{names} | agents_md_malformed{path} | unbakeable_binary{binary}
+        | hooks_dir_outside_repo{path} | hooks_dir_unknown{why}
+Warning = unrecognized_sub_hook{path}     // a hook we did not write. NOT deleted.
+        | hooks_dir_outside_repo{path}
 ```
+
+### Two channels, and why a warning is not a weak refusal
+
+A **refusal** suppresses the whole repository: a half-applied fix is how a repo
+ends up with both `pre-commit-ruff.zsh` and `pre-commit-ruff`, running ruff
+twice. A **warning** prints and changes nothing about what gets done — a
+stranger's `pre-push-mine.sh` must not block repairing four broken dispatchers
+in the same directory.
+
+Folding the two together forces a choice between "say nothing" and "do nothing",
+and this tool has been on both sides of it. `hooks_dir_outside_repo` is the one
+condition on both channels, deliberately: the warning names the directory so
+somebody can go and look at their `core.hooksPath`, the refusal is what stops
+the write.
+
+### `foreign_subs` is REPORTED, not removed
+
+`install` and `fix --apply` used to delete every `.git/hooks` file matching
+`pre-commit-*` / `pre-push-*` that did not carry our marker, in repositories
+they had never touched, reported only as a number. That was inherited wholesale
+from a one-time migration sweep in `scripts/propagate.sh` (see
+`git show 90b0d30^:scripts/propagate.sh`, around lines 82-87) and then pinned as
+golden by `tests/parity.rs`.
+
+They are now `Warning::UnrecognizedSubHook` and are left exactly where they are.
+`--remove-unrecognized` puts them back on the removal list, and is deliberately
+not spelled `--remove-stale`: "stale" means `stale_ours`, which IS ours and is
+still removed by default, and reusing that word for other people's files is
+what would get somebody to type it casually.
+
+### `hooks_dir` and `shares_hooks_with`
+
+`hooks_dir` exists because a scanned repository's `core.hooksPath` may be an
+absolute path anywhere on the disk, and activation used to `create_dir_all` it
+and write four 0o755 files into it. The fleet now refuses anything that does not
+resolve inside the repository's own worktree or its git common directory.
+
+Note the deliberate asymmetry: **per-repo `githooks install` keeps honouring its
+own repository's `core.hooksPath`**, absolute or not — you are standing in that
+repository and configured it yourself. The fleet refuses, because it is walking
+ninety-six repositories it did not configure.
+
+`shares_hooks_with` exists because a submodule's and a linked worktree's hooks
+live in the superproject/main repo. Both now appear in `repos` (their `.git` is a
+FILE, which the walk used to skip outright, making every submodule on the machine
+invisible), so one hooks directory is reachable from two rows. The first
+repository seen in the walk's sorted order owns it; the others plan nothing and
+display as covered-by.
 
 `languages` matters because a check that never fires is not the same as a check
 that is broken: `pre-commit-clippy` in a Python repo is *correctly* inert. The
@@ -175,10 +242,20 @@ drifted merely because `__GITHOOKS_BIN__` was replaced.
   number that actually proves fleet health, and it is the number the text script
   got wrong. It is always `N/M`, never a bare adjective.
 - `SHIMS` is four glyphs, one per dispatcher, in fixed order. `●` ok, `◐`
-  drifted, `○` missing. Position encodes *which* hook without spending a column
-  on its name.
+  drifted, `○` missing, `!` a symlink, `?` unreadable. Position encodes *which*
+  hook without spending a column on its name. `!` and `?` are deliberately OFF
+  the ●◐○ scale: those three run from healthy to absent, and a dispatcher that
+  is a link to a tracked file is not "somewhat installed" — writing there
+  rewrites the other file, and it must not read as a milder `◐`.
 - `STATE` is a redundant text summary of the same information, so the screen
-  survives `NO_COLOR` and CVD.
+  survives `NO_COLOR` and CVD. It also carries the two states that are not about
+  the shims at all: `covered by <path>` (a linked worktree or submodule whose
+  hooks another row owns) and `! hooks elsewhere` (a `core.hooksPath` we will not
+  follow), both of which would otherwise read as `! unmanaged` and send somebody
+  looking for a missing install.
+- A repository whose dispatchers are SYMLINKS no longer counts as `managed`,
+  even when the link points at one of our own shims. That is the intended
+  trade: `fix` reports it instead of writing through the link.
 - `DECL` counts the checks a repository declares in `.githooks.conf`, and reads
   `2!1` when one of those lines cannot be parsed — a check somebody committed
   that has never once run. `2` and `2!1` describing the same repository is the
@@ -243,6 +320,24 @@ The `● / ○ / ⊘` distinction is the important one. A Python repo showing `�
 clippy` is healthy; the same glyph must never be used for "broken". Three states,
 three glyphs, three words in the legend — no colour required to read it.
 
+The detail pane also carries, above the dispatchers, the resolved `hooks dir`
+(always, not only when something is wrong with it — a reader who cannot see the
+directory cannot tell a repo we declined to touch from one that had nothing to
+do) and, when set, `shares hooks  covered by <path>`.
+
+Below them, leftovers are TWO blocks, not one:
+
+```
+│ LEFTOVERS OF OURS (nothing dispatches these — fix removes them)                 │
+│   pre-commit-ruff                                                               │
+│                                                                                 │
+│ NOT OURS (left alone — nothing dispatches these either)                         │
+│   pre-push-branch-protect.sh                                                    │
+```
+
+They shared a heading for two releases while `fix --apply` silently deleted the
+second list. Same word, opposite fates.
+
 ## Screen 3 — Hook-centric view (`h`)
 
 Transposes the matrix. Answers "where does `pre-commit-pyright` actually apply,
@@ -286,7 +381,19 @@ what would be removed and written, per file, from a typed Rust `FixPlan`.
 Nothing in this tool deletes a file without showing the list and taking a second
 keypress. Given `make install` has destroyed tracked source twice in this repo's
 history, the dashboard's write path gets the same fail-closed treatment: it
-refuses any path git reports as tracked.
+refuses any path git reports as tracked — **and any path git will not answer
+about**, which is a distinct state (`tracked_unknown`) and not a "no". `fatal:
+detected dubious ownership` is what git says about every repository owned by
+another uid, which is every repository inside a container bind mount, and a
+guard that reads that as "untracked" fails open in exactly the environment where
+the user cannot see what happened.
+
+Every write and every remove — in `fix`, in `install`, and in `uninstall` — goes
+through `githooks_runtime::hookfile`, the single owner of "is this ours, and may
+we touch it?". It never follows a symlink, never treats an unreadable file as
+absent, and stages each write to a sibling temporary that is `rename`d into
+place, so replacing a link is the only thing that can happen and writing through
+one is not a code path that exists.
 
 ## Performance
 

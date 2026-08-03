@@ -44,6 +44,12 @@ cd <your-repo> && githooks install
 githooks-fleet install --root ~/Developer   # or in bulk
 ```
 
+Neither of these deletes a hook it did not write. A `pre-commit-*` or
+`pre-push-*` file in `.git/hooks` without our marker is reported and left
+exactly where it is; `githooks-fleet --remove-unrecognized` opts into removing
+them, and is spelled that way rather than `--remove-stale` because "stale" means
+our own retired shims, which are a different thing entirely.
+
 And off again — which removes our shims and nothing else. A hook you wrote
 yourself is left alone and named, whatever it is: a hook it cannot even read is
 named too, rather than passed over in silence. `hook.skip` and
