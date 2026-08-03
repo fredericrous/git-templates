@@ -1031,7 +1031,10 @@ fn a_binary_not_on_path_is_still_copied() {
     init_repo(&repo);
 
     // A PATH with no githooks in it — git still has to be reachable.
-    let (code, out) = install_on_path(&s, &repo, "/usr/bin:/bin");
+    // The inherited PATH: it has git, and identity matching means an
+    // unrelated githooks on it is not mistaken for the one under test.
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    let (code, out) = install_on_path(&s, &repo, &inherited);
     assert_eq!(code, 0, "{out}");
 
     let copied = s.path(".local/bin/githooks");
@@ -1067,8 +1070,13 @@ fn run_from(s: &Sandbox, exe: &Path, cwd: &Path, dir: &str) -> (i32, String) {
         .env("USERPROFILE", &s.0)
         .env("XDG_CONFIG_HOME", s.path(".config"))
         .env_remove("GITHOOKS_BIN_DIR")
-        // git must stay reachable; the sandbox dir is what the test is about.
-        .env("PATH", format!("{dir}:/usr/bin:/bin"))
+        // git must stay reachable, so this PREPENDS to the inherited PATH
+        // rather than replacing it — and joins with `env::join_paths`, because
+        // the separator is `;` on Windows and a hand-built `a:b` string leaves
+        // that runner with no git at all. Matching is by file IDENTITY, not by
+        // name, so an unrelated githooks already on PATH cannot be mistaken
+        // for this one.
+        .env("PATH", path_with(dir))
         .output()
         .expect("run githooks install");
     (
@@ -1124,4 +1132,14 @@ fn a_build_directory_on_path_is_not_baked() {
         s.path(".local/bin/githooks").exists() || s.path(".local/bin/githooks.exe").exists(),
         "and did not copy it somewhere durable instead:\n{out}"
     );
+}
+
+/// `dir` prepended to the inherited PATH, joined the way this platform joins
+/// paths. A hand-built `"a:b"` is wrong on Windows and leaves the runner
+/// without git.
+fn path_with(dir: &str) -> std::ffi::OsString {
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs = vec![std::path::PathBuf::from(dir)];
+    dirs.extend(std::env::split_paths(&inherited));
+    std::env::join_paths(dirs).expect("join PATH")
 }
