@@ -585,9 +585,36 @@ fn on_path_already(me: &Path) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .map(|dir| dir.join(&name))
+        .filter(|cand| !in_a_build_dir(cand))
         .find(|cand| cand.canonicalize().is_ok_and(|real| real == me_real))
         .map(|cand| absolute(&cand))
         .filter(|abs| is_bakeable(&abs.to_string_lossy()))
+}
+
+/// Whether `p` sits inside a cargo build directory.
+///
+/// "On PATH" alone is not the question — the question is whether the path will
+/// still be there tomorrow, and a build directory is precisely the one that
+/// will not. `cargo clean`, or any rebuild, and the shims baked against it
+/// resolve nothing.
+///
+/// This is not hypothetical and it is not only about `cargo run`: **cargo
+/// prepends the build directory to PATH when it runs tests on Windows**, so
+/// `target/debug` genuinely appears there. That took out four existing install
+/// tests on the Windows runner and nowhere else, which is a fair description of
+/// how the loose predicate would have failed a user, too.
+///
+/// `CACHEDIR.TAG` is cargo's own marker for the directory, written since 1.55
+/// and standardised for exactly this — "a program wrote this, do not treat it
+/// as durable". Asking for it beats matching on the name `target`, which is
+/// configurable and is also an ordinary word for a directory. Bounded to a few
+/// levels so a stray tag high up somebody's home directory cannot disqualify
+/// every path on the system.
+fn in_a_build_dir(p: &Path) -> bool {
+    p.ancestors()
+        .skip(1)
+        .take(4)
+        .any(|dir| dir.join("CACHEDIR.TAG").is_file())
 }
 
 /// Copy the running binary to a stable location, and return where it now lives.

@@ -1080,3 +1080,48 @@ fn run_from(s: &Sandbox, exe: &Path, cwd: &Path, dir: &str) -> (i32, String) {
         ),
     )
 }
+
+/// A build directory on PATH must never be baked, even though it IS on PATH.
+///
+/// cargo prepends its build directory to PATH when running tests on Windows,
+/// so this is the state the suite itself runs in there — and a shim baked
+/// against `target/debug` stops resolving the moment anybody rebuilds.
+#[test]
+fn a_build_directory_on_path_is_not_baked() {
+    let s = Sandbox::new("builddir");
+    let repo = s.path("repo");
+    init_repo(&repo);
+
+    // A directory carrying cargo's own marker for "this is build output".
+    let build = s.path("proj/target/debug");
+    std::fs::create_dir_all(&build).expect("mkdir");
+    std::fs::write(
+        s.path("proj/target/CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .expect("write tag");
+    let placed = build.join(if cfg!(windows) {
+        "githooks.exe"
+    } else {
+        "githooks"
+    });
+    std::fs::copy(env!("CARGO_BIN_EXE_githooks"), &placed).expect("copy");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&placed, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    let (code, out) = run_from(&s, &placed, &repo, &build.to_string_lossy());
+    assert_eq!(code, 0, "{out}");
+
+    let baked = baked_in(&repo);
+    assert!(
+        !baked.contains("target"),
+        "baked a build directory, which the next rebuild empties: {baked}"
+    );
+    assert!(
+        s.path(".local/bin/githooks").exists() || s.path(".local/bin/githooks.exe").exists(),
+        "and did not copy it somewhere durable instead:\n{out}"
+    );
+}
