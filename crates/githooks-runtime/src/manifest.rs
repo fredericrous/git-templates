@@ -286,8 +286,10 @@ impl Check for External {
             } => (scope, program, args, *fix),
             Kind::Unusable { why } => {
                 crate::hooks::common::warn(&format!(
-                    "{MANIFEST}: {} — {why}",
-                    crate::ui::highlight(&self.short_name)
+                    "{MANIFEST}: {} — {}",
+                    crate::ui::highlight(&self.short_name),
+                    // Carries repo tokens: `BadStage("…")` quotes the manifest.
+                    crate::ui::sanitize(why)
                 ));
                 return Outcome::Unavailable;
             }
@@ -328,9 +330,11 @@ impl Check for External {
             // error that does not exist.
             Err(e) => {
                 crate::hooks::common::warn(&format!(
-                    "{MANIFEST}: {} could not run {} — {e}",
+                    "{MANIFEST}: {} could not run {} — {}",
                     crate::ui::highlight(&self.short_name),
-                    crate::ui::highlight(program)
+                    crate::ui::highlight(program),
+                    // The io error's text embeds the program name it tried.
+                    crate::ui::sanitize(&e.to_string())
                 ));
                 Outcome::Unavailable
             }
@@ -640,25 +644,50 @@ pub(crate) fn externals() -> &'static [External] {
     EXTERNALS.get_or_init(|| {
         let root = crate::hooks::common::repo_root();
         let root = Path::new(&root);
-        let declared = read(root);
-        // Untrusted declarations are kept and DISABLED, not dropped. The names
-        // stay visible in `githooks list`, in the dashboard and in the "could
-        // not run" roll-up, because a repository quietly declaring checks that
-        // never run is the failure this project is arranged against — and the
-        // reader needs to know there is a decision waiting for them.
-        match crate::trust::why(crate::trust::state(root)) {
-            None => declared,
-            Some(reason) => declared
-                .into_iter()
-                .map(|external| External {
-                    kind: Kind::Unusable {
-                        why: reason.to_string(),
-                    },
-                    ..external
-                })
-                .collect(),
-        }
+        // ONE read. The bytes that get PARSED and the bytes that get HASHED
+        // have to be the same bytes: this used to `read(root)` and then let
+        // `trust::state` open the file a second time, so anything that changed
+        // it in between — a `git checkout`, a watcher, a `make` target already
+        // running — produced a trust decision about content that is not the
+        // content about to be executed. `record_verified` closes this at trust
+        // time and has a test named for it; the run path had the same gap.
+        let Ok(bytes) = std::fs::read(root.join(MANIFEST)) else {
+            return Vec::new();
+        };
+        // Non-UTF-8 yields no externals, as it always has: `parse` takes a
+        // `&str`, and a manifest we cannot read as text is one we cannot act
+        // on. Not lossy — that would invent a manifest nobody wrote.
+        let Ok(text) = String::from_utf8(bytes.clone()) else {
+            return Vec::new();
+        };
+        gate(parse(&text), crate::trust::state_of(root, &bytes))
     })
+}
+
+/// Apply a trust verdict to what the manifest declared.
+///
+/// Untrusted declarations are kept and DISABLED, not dropped. The names stay
+/// visible in `githooks list`, in the dashboard and in the "could not run"
+/// roll-up, because a repository quietly declaring checks that never run is the
+/// failure this project is arranged against — and the reader needs to know
+/// there is a decision waiting for them.
+///
+/// Split out from `externals` because that function is a `OnceLock` keyed on
+/// the process's own repository and so cannot be tested; this is the part with
+/// the rule in it.
+pub(crate) fn gate(declared: Vec<External>, state: crate::trust::State) -> Vec<External> {
+    match crate::trust::why(state) {
+        None => declared,
+        Some(reason) => declared
+            .into_iter()
+            .map(|external| External {
+                kind: Kind::Unusable {
+                    why: reason.to_string(),
+                },
+                ..external
+            })
+            .collect(),
+    }
 }
 
 #[cfg(test)]

@@ -26,8 +26,14 @@
 //! reproduce it by hand to check what they trusted:
 //!
 //! ```text
-//! $ git hash-object .githooks.conf
+//! $ git hash-object --no-filters .githooks.conf
 //! ```
+//!
+//! `--no-filters` is not decoration. Without it git applies the clean filter
+//! and eol conversion that the repository's own committed `.gitattributes`
+//! asks for — so the repository would be choosing the transform its consent is
+//! taken through, and two manifests this parser reads differently can be given
+//! the same id. Consent is bound to the bytes we PARSE.
 
 use std::path::Path;
 
@@ -38,8 +44,25 @@ use crate::ui::valid_sign;
 pub const KEY: &str = "githooks.trusted";
 
 /// Content id of `path`, as git would compute it.
+///
+/// `--no-filters`, because consent is bound to CONTENT and the content that
+/// matters is the bytes we PARSE. Plain `git hash-object` applies the clean
+/// filter and eol conversion configured by the repository's own committed
+/// `.gitattributes` — so a repo that declares `.githooks.conf ident` (or
+/// `text eol=crlf`) chooses the transform its fingerprint is taken through,
+/// and two manifests we would parse differently can hash identically. The
+/// binding was to content-after-a-repo-controlled-transform.
 pub fn fingerprint(repo: &Path, manifest: &Path) -> Option<String> {
-    crate::git::stdout_in(repo, &["hash-object", manifest.to_str()?])
+    crate::git::stdout_in(repo, &["hash-object", "--no-filters", manifest.to_str()?])
+}
+
+/// The same identity, for bytes already in hand.
+///
+/// `--stdin` is never filtered, so this names exactly the buffer given to it.
+/// Used where the caller has read the file and is about to act on THAT read:
+/// hashing the path again would be a second read, and the two can differ.
+pub fn fingerprint_bytes(repo: &Path, bytes: &[u8]) -> Option<String> {
+    crate::git::stdout_piped_in(repo, &["hash-object", "--stdin"], bytes)
 }
 
 /// What the repository has recorded, if anything.
@@ -71,6 +94,23 @@ pub fn state(repo: &Path) -> State {
         // Cannot compute it, so cannot claim it matches.
         return State::Untrusted;
     };
+    verdict(repo, &current)
+}
+
+/// The same decision, about bytes the caller already holds.
+///
+/// For anyone who has read the manifest and is about to act on THAT read.
+/// Re-opening the file to decide whether the first read may run is two reads of
+/// something that can change in between, and the whole point of the record is
+/// that it names the content being executed.
+pub fn state_of(repo: &Path, source: &[u8]) -> State {
+    let Some(current) = fingerprint_bytes(repo, source) else {
+        return State::Untrusted;
+    };
+    verdict(repo, &current)
+}
+
+fn verdict(repo: &Path, current: &str) -> State {
     match recorded(repo) {
         Some(seen) if seen == current => State::Trusted,
         Some(_) => State::Changed,
@@ -140,21 +180,44 @@ pub fn why(state: State) -> Option<&'static str> {
 /// anybody can answer without seeing it, and a prompt that does not show it is
 /// a prompt that trains people to press y.
 pub fn describe(repo: &Path) -> String {
+    describe_source(
+        &std::fs::read_to_string(repo.join(crate::manifest::MANIFEST)).unwrap_or_default(),
+    )
+}
+
+/// The same listing, rendered from text the caller already read.
+///
+/// So that what is SHOWN and what is FINGERPRINTED come from one read. Two
+/// reads of a file somebody is deciding about can disagree, and the decision
+/// would then be recorded about bytes nobody was shown.
+pub fn describe_source(text: &str) -> String {
     use std::fmt::Write;
     let mut out = String::new();
-    for line in crate::manifest::read_lines(repo) {
+    for line in crate::manifest::parse_lines(text) {
         let (name, stage, parsed) = line.into_parts();
+        // Every field here is repo-controlled, and this is the text somebody
+        // is about to say yes to. Sanitised BEFORE the padding, so the column
+        // widths are computed on what is actually printed — an escape sequence
+        // is zero columns wide and would silently shift the alignment even if
+        // it did nothing worse. See `ui::sanitize` for what a concealed
+        // declaration bought.
+        let name = crate::ui::sanitize(&name);
         match parsed {
             Ok(declared) => {
                 let _ = writeln!(
                     out,
                     "      {name:<14} {:<10} {}",
                     stage.as_str(),
-                    declared.command()
+                    crate::ui::sanitize(&declared.command())
                 );
             }
             Err(why) => {
-                let _ = writeln!(out, "      {name:<14} {:<10} ! {why}", stage.as_str());
+                let _ = writeln!(
+                    out,
+                    "      {name:<14} {:<10} ! {}",
+                    stage.as_str(),
+                    crate::ui::sanitize(&why.to_string())
+                );
             }
         }
     }
@@ -225,11 +288,16 @@ pub fn command(args: &[std::ffi::OsString]) -> Result<(), String> {
         return Ok(());
     }
 
+    // One read: the bytes shown are the bytes fingerprinted, and
+    // `record_verified` then confirms they are still the bytes on disk. Read
+    // twice, and the listing somebody approved need not be what got recorded.
     let manifest = root.join(crate::manifest::MANIFEST);
-    let fp = fingerprint(root, &manifest)
+    let source =
+        std::fs::read(&manifest).map_err(|e| format!("cannot read {}: {e}", manifest.display()))?;
+    let fp = fingerprint_bytes(root, &source)
         .ok_or_else(|| format!("cannot hash {}", manifest.display()))?;
     println!("{} declares:", crate::manifest::MANIFEST);
-    print!("{}", describe(root));
+    print!("{}", describe_source(&String::from_utf8_lossy(&source)));
     record_verified(root, &fp)?;
     println!("{} trusted ({fp})", valid_sign());
     Ok(())
@@ -361,7 +429,7 @@ mod tests {
         let ours = fingerprint(&d, &manifest).expect("fingerprint");
         let theirs = String::from_utf8_lossy(
             &std::process::Command::new("git")
-                .args(["hash-object", manifest.to_str().unwrap()])
+                .args(["hash-object", "--no-filters", manifest.to_str().unwrap()])
                 .current_dir(&d)
                 .output()
                 .expect("git")
@@ -371,5 +439,58 @@ mod tests {
         .to_string();
         assert_eq!(ours, theirs);
         let _ = std::fs::remove_dir_all(&d);
+    }
+    /// A repository must not choose the transform its own consent is taken
+    /// through.
+    ///
+    /// `.gitattributes` is committed, so the repo picks the clean filter; plain
+    /// `git hash-object` applies it. With one that collapses everything to a
+    /// constant, two manifests this parser reads DIFFERENTLY are given the same
+    /// id — so a trusted fingerprint would cover content nobody reviewed.
+    #[test]
+    fn a_clean_filter_cannot_make_two_manifests_share_a_fingerprint() {
+        let d = repo("filter");
+        std::fs::write(d.join(".gitattributes"), ".githooks.conf filter=flatten\n")
+            .expect("write attributes");
+        let ok = std::process::Command::new("git")
+            .args(["config", "--local", "filter.flatten.clean", "echo same"])
+            .current_dir(&d)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            return; // no git to configure; nothing to assert
+        }
+        let manifest = d.join(crate::manifest::MANIFEST);
+
+        write_manifest(&d, "pre-commit  a  *  block  echo one\n");
+        let filtered_a = raw_hash(&d, &manifest);
+        let ours_a = fingerprint(&d, &manifest).expect("fingerprint a");
+
+        write_manifest(&d, "pre-commit  b  *  block  rm -rf /\n");
+        let filtered_b = raw_hash(&d, &manifest);
+        let ours_b = fingerprint(&d, &manifest).expect("fingerprint b");
+
+        assert_eq!(
+            filtered_a, filtered_b,
+            "fixture: the clean filter should have collapsed both manifests"
+        );
+        assert_ne!(
+            ours_a, ours_b,
+            "the fingerprint followed a repo-controlled filter"
+        );
+    }
+
+    fn raw_hash(dir: &std::path::Path, manifest: &std::path::Path) -> String {
+        String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .args(["hash-object", manifest.to_str().unwrap()])
+                .current_dir(dir)
+                .output()
+                .expect("git")
+                .stdout,
+        )
+        .trim()
+        .to_string()
     }
 }

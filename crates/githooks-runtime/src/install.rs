@@ -290,15 +290,26 @@ fn offer_trust() {
         warning_sign(),
         crate::manifest::MANIFEST
     );
-    print!("{}", crate::trust::describe(root));
-    // Fingerprint what was just shown BEFORE asking, not after: `confirm()`
-    // blocks on a keypress, sometimes for several seconds, and a file
-    // rewritten in that window must not be trusted under the guise of the
-    // content that was actually displayed. `record_verified` re-checks this
-    // fingerprint still matches once the answer is in, rather than trusting
-    // whatever happens to be on disk by then.
+    // Read ONCE, then show and fingerprint that same buffer. `confirm()` blocks
+    // on a keypress, sometimes for several seconds, and a file rewritten in
+    // that window must not be trusted under the guise of the content that was
+    // displayed — `record_verified` re-checks this fingerprint once the answer
+    // is in. Reading separately to show and to hash would leave the same gap
+    // one step earlier: the listing approved need not be the one recorded.
     let manifest = root.join(crate::manifest::MANIFEST);
-    let Some(fp) = crate::trust::fingerprint(root, &manifest) else {
+    let Ok(source) = std::fs::read(&manifest) else {
+        println!(
+            "{} could not read {}",
+            warning_sign(),
+            crate::manifest::MANIFEST
+        );
+        return;
+    };
+    print!(
+        "{}",
+        crate::trust::describe_source(&String::from_utf8_lossy(&source))
+    );
+    let Some(fp) = crate::trust::fingerprint_bytes(root, &source) else {
         println!(
             "{} could not hash {}",
             warning_sign(),

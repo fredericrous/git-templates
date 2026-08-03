@@ -304,11 +304,16 @@ pub fn print_text(listings: &[CheckListing]) {
         // Where a check CAME FROM belongs next to its name, not appended
         // after a reason that is often empty. A reader scanning this list
         // wants to know which of these their repository added.
+        // A declared check's name and its reason both come from the
+        // repository's manifest, and `githooks list` is read at least as often
+        // as the trust prompt. Sanitised before padding, so the column width is
+        // computed on what is printed — see `ui::sanitize`.
+        let short_name = ui::sanitize(&l.short_name);
         let label = match l.source {
-            Source::Declared => format!("{} (declared)", l.short_name),
-            Source::Builtin => l.short_name.clone(),
+            Source::Declared => format!("{short_name} (declared)"),
+            Source::Builtin => short_name,
         };
-        println!("  {glyph} {label:<26} {}", l.reason);
+        println!("  {glyph} {label:<26} {}", ui::sanitize(&l.reason));
     }
     println!();
     println!("  ● runs here   ○ inert   ⊘ skipped via hook.skip   ✗ declaration unusable");

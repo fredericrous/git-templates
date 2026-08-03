@@ -352,6 +352,16 @@ fn selection_cursor(color: bool) -> Span<'static> {
 
 /// `●` ok, `◐` drifted, `○` missing — position encodes WHICH hook, so the
 /// column costs four characters instead of four names.
+/// The repository path as the table shows it.
+///
+/// Split out to be testable: a `Frame` renderer is not, and this is the one
+/// place scanned-disk text becomes terminal output in the dashboard. ratatui's
+/// `Cell` keeps zero-width graphemes and crossterm writes them through, so a
+/// directory named with control bytes in it would be rendered verbatim.
+fn repo_cell(r: &Repo) -> String {
+    githooks_runtime::ui::sanitize_path(&r.path)
+}
+
 fn shim_glyphs(r: &Repo) -> String {
     r.shims
         .iter()
@@ -528,8 +538,7 @@ fn table(f: &mut Frame, area: Rect, app: &App) {
     let body: Vec<Row> = rows
         .iter()
         .map(|repo| {
-            let path = repo.path.to_string_lossy().into_owned();
-            let mut cells = vec![Cell::from(path)];
+            let mut cells = vec![Cell::from(repo_cell(repo))];
             if mid {
                 let g = shim_glyphs(repo);
                 let all_ok = g.chars().all(|c| c == '●');

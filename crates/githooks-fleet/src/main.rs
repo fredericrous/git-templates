@@ -21,6 +21,17 @@ mod tui;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+/// A path, safe to print.
+///
+/// Every path this tool shows was found by walking directories somebody else
+/// owns, and `Path::display()` escapes nothing — a repository or a directory
+/// can be named with control bytes in it. `--json` output is deliberately not
+/// routed through here: it is a machine contract, and `json.rs` already escapes
+/// what JSON requires.
+fn shown(p: &Path) -> String {
+    githooks_runtime::ui::sanitize_path(p)
+}
+
 const USAGE: &str = "\
 usage: githooks-fleet [scan|tui|fix|install|uninstall] [--root <dir>] [--depth <n>] [--json]
 
@@ -254,7 +265,7 @@ fn main() -> ExitCode {
             if here > 0 {
                 repos += 1;
                 removed += here;
-                println!("  {} {here} shims", repo.path.display());
+                println!("  {} {here} shims", shown(&repo.path));
             }
         }
         println!("{removed} shims removed from {repos} repositories");
@@ -379,7 +390,7 @@ fn report(s: &scan::FleetScan, elapsed: std::time::Duration) {
     if !s.unreadable.is_empty() {
         println!("  {} unreadable:", s.unreadable.len());
         for p in s.unreadable.iter().take(5) {
-            println!("    {}", p.display());
+            println!("    {}", shown(p));
         }
     }
 }
@@ -395,15 +406,15 @@ fn report_fix(plans: &[fix::FixPlan]) {
         .collect();
 
     for p in &acting {
-        println!("{}", p.repo.display());
+        println!("{}", shown(&p.repo));
         for r in &p.remove {
-            println!("  rm    {}  ({:?})", r.path.display(), r.reason);
+            println!("  rm    {}  ({:?})", shown(&r.path), r.reason);
         }
         for w in p.write.iter().filter(|w| w.changes) {
-            println!("  write {}", w.path.display());
+            println!("  write {}", shown(&w.path));
         }
         if let Some(w) = &p.write_agents_md {
-            println!("  write {}", w.path.display());
+            println!("  write {}", shown(&w.path));
         }
     }
 
@@ -443,12 +454,16 @@ fn report_apply(reports: &[apply::ApplyReport]) {
                 applied += 1;
                 removed += rm;
                 written += wr;
-                println!("{}  -{rm} +{wr}", r.repo.display());
+                println!("{}  -{rm} +{wr}", shown(&r.repo));
             }
             apply::Outcome::Refused => refused += 1,
             apply::Outcome::Unchanged => unchanged += 1,
             apply::Outcome::Failed { error, at } => {
-                println!("{}  FAILED at {at}: {error}", r.repo.display());
+                println!(
+                    "{}  FAILED at {at}: {}",
+                    shown(&r.repo),
+                    githooks_runtime::ui::sanitize(error)
+                );
             }
         }
     }
