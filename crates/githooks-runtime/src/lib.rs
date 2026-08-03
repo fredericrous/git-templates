@@ -20,6 +20,8 @@
 
 pub mod agents_md;
 pub mod check;
+pub mod commit_style;
+pub mod config;
 pub mod dispatch;
 pub mod git;
 pub mod hookfile;

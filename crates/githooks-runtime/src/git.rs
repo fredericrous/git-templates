@@ -109,6 +109,37 @@ pub fn stdout_raw(args: &[&str]) -> Option<Vec<u8>> {
     out.status.success().then_some(out.stdout)
 }
 
+/// Everything a git command said: its exit code, its stdout and its stderr.
+pub struct Output {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// A git command's full result, for the caller that must tell one kind of
+/// failure from another.
+///
+/// [`stdout`] collapses every non-zero exit to `None` and discards stderr,
+/// which is the right shape for "cannot tell, do not block". It is the wrong
+/// shape for reading configuration: `git config --get` exits **1** for a key
+/// nobody set and **128** for a key set to something git itself refuses to
+/// parse, and those two must not become the same answer — one is a default,
+/// the other is a mistake somebody needs to be told about. See `config`.
+pub fn output(args: &[&str]) -> Option<Output> {
+    let out = Command::new("git")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    Some(Output {
+        // A process killed by a signal has no code. Treat that as "git did not
+        // answer" rather than inventing one; the caller falls back.
+        code: out.status.code()?,
+        stdout: String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+    })
+}
+
 /// True when the command exits 0. Output discarded.
 pub fn succeeds(args: &[&str]) -> bool {
     Command::new("git")

@@ -169,6 +169,19 @@ pub fn emoji_for(commit_type: &str) -> &'static str {
         .unwrap_or("")
 }
 
+/// The type an emoji stands for — [`emoji_for`] read backwards.
+///
+/// This is what makes the `replace` gitmoji placement survive an amend: the
+/// stored subject `✨  add a cart` carries its type only in the emoji, so
+/// re-validating it means recovering `feat` from `✨`. Well defined because
+/// `each_type_has_its_own_emoji` holds the emojis distinct.
+pub fn type_for_emoji(emoji: &str) -> Option<&'static str> {
+    COMMIT_TYPES
+        .iter()
+        .find(|t| t.emoji == emoji)
+        .map(|t| t.name)
+}
+
 /// The branch contract, rendered for the rejection message so what a user is
 /// told always matches what is enforced.
 pub fn branch_contract() -> String {
@@ -249,6 +262,31 @@ mod tests {
             names(BRANCH_PREFIXES, |p| p.name).len(),
             BRANCH_PREFIXES.len()
         );
+    }
+
+    /// Two types sharing an emoji would make [`type_for_emoji`] a coin toss,
+    /// and the `replace` gitmoji placement stores the emoji INSTEAD of the type
+    /// — so a duplicate would silently rewrite one type into another on the
+    /// next amend.
+    #[test]
+    fn each_type_has_its_own_emoji() {
+        let emojis = names(COMMIT_TYPES, |t| t.emoji);
+        assert_eq!(
+            emojis.len(),
+            COMMIT_TYPES.len(),
+            "two commit types share an emoji: {emojis:?}"
+        );
+    }
+
+    /// Every type recovers from its own emoji, and nothing else does.
+    #[test]
+    fn an_emoji_names_the_type_it_was_written_for() {
+        for t in COMMIT_TYPES {
+            assert_eq!(type_for_emoji(t.emoji), Some(t.name), "{}", t.name);
+            assert_eq!(emoji_for(t.name), t.emoji);
+        }
+        assert_eq!(type_for_emoji("🚀"), None);
+        assert_eq!(type_for_emoji(""), None);
     }
 
     /// Dots are a chore-only affordance for version bumps.
