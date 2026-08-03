@@ -301,7 +301,7 @@ has to earn is not "delightful", it is "harmless".
 - **No network, ever.** The binary phones nothing home — no telemetry, no
   update checks, no fetches. With the commit path std-only, there is not even
   an HTTP client linked to do it with.
-- **634 tests**, run on Linux, macOS and Windows, alongside `cargo fmt
+- **Over six hundred tests**, run on Linux, macOS and Windows, alongside `cargo fmt
   --check`, `clippy -D warnings`, an MSRV floor of 1.74 compiled for the commit
   path, and `cargo-audit`.
 - **v1.0.0 followed a full security review**, and each finding landed with a

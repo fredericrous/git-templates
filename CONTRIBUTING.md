@@ -102,7 +102,8 @@ that is right for *one* repository can be declared in that repository's
 
 ## Tests
 
-There are 634 of them and they are the reason changes here can be made at all.
+There are over six hundred of them and they are the reason changes here can be
+made at all.
 Two conventions matter:
 
 **Test the property, not the line.** Name the test after the guarantee it
