@@ -22,11 +22,21 @@ rust-version = "1.74"
 # are. `version` is here because they are released together: `githooks` depends
 # on `githooks-runtime`, and crates.io resolves that by VERSION, not by path, so
 # a release where the two disagree is a release nobody can install.
-version = "1.0.0"
+version = "1.0.1"
 license = "MIT"
 repository = "https://github.com/fredericrous/githooks"
 authors = ["Frederic Rousseau"]
 edition = "2021"
+
+# The one place the inter-crate version is written.
+#
+# `githooks` and `githooks-fleet` both depend on `githooks-runtime`, and
+# crates.io resolves that by VERSION while a checkout resolves it by PATH — so
+# a manifest carrying its own literal is a release where the two can disagree,
+# which is a release nobody can install. Bumping [workspace.package] version
+# above is now the whole edit.
+[workspace.dependencies]
+githooks-runtime = { path = "crates/githooks-runtime", version = "1.0.1" }
 
 # Shared release posture. The hook binary runs on every commit, so size and
 # start-up cost are features.
