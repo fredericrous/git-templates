@@ -45,13 +45,22 @@ githooks-fleet install --root ~/Developer   # or in bulk
 ```
 
 And off again — which removes our shims and nothing else. A hook you wrote
-yourself is left alone and named; `hook.skip` and `githooks.severity` are never
-touched, because those are your statements about your repository:
+yourself is left alone and named, whatever it is: a hook it cannot even read is
+named too, rather than passed over in silence. `hook.skip` and
+`githooks.severity` are never touched, because those are your statements about
+your repository:
 
 ```sh
 githooks uninstall              # add --binary to take ~/.local/bin/githooks too
 githooks-fleet uninstall --root ~/Developer
 ```
+
+`githooks uninstall` also takes its shims back out of the template directory
+below, and — if `init.templateDir` is still set — says so loudly with the
+command to unset it. Without that, an uninstall you believed had finished left
+every future `git clone` re-installing the hooks. A template directory that is
+itself a checkout of this repository is never deleted from; those files are
+tracked source and belong to the checkout.
 
 **Everywhere, forever** — an opt-in, and a real one:
 
