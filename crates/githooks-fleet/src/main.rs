@@ -47,7 +47,14 @@ usage: githooks-fleet [scan|tui|fix|install|uninstall] [--root <dir>] [--depth <
   --depth <n>    directory levels to descend  (default: 6)
   --binary <p>   the binary shims should point at (default: $HOME/.local/bin/githooks)
   --agents-md    with fix/install: also roll out the AGENTS.md pointer
+  --remove-unrecognized
+                 ALSO delete pre-commit-* / pre-push-* files this tool did not
+                 write. Off by default, and read the sentence below first.
   --json         emit the result as JSON
+
+install and fix --apply never delete a hook they did not write: a
+pre-commit-* or pre-push-* file without our marker is reported and left
+exactly where it is.
 ";
 
 #[derive(PartialEq)]
@@ -78,6 +85,17 @@ struct Args {
     /// content across up to 96 repositories is a materially bigger action
     /// than the untracked `.git/hooks` shims apply already writes.
     agents_md: bool,
+    /// Also delete `pre-commit-*` / `pre-push-*` files this tool did not write.
+    ///
+    /// Deliberately NOT called `--remove-stale`, and the naming is the safety
+    /// feature. "Stale" already means something exact here: `stale_ours`, the
+    /// retired per-check shims that carry OUR marker, which are removed by
+    /// default because they are ours to remove. Reusing that word for files
+    /// that are NOT ours is precisely what would get somebody to type this
+    /// casually — it would read as tidying up after us. It is not: it deletes
+    /// hooks other people wrote, in repositories this tool may never have
+    /// touched, and the long spelling is there to be read before it is used.
+    remove_unrecognized: bool,
 }
 
 /// `home` is threaded through rather than read from the environment here, so
@@ -92,6 +110,7 @@ fn parse(argv: &[String], home: Option<&Path>) -> Result<Args, String> {
     let mut apply = false;
     let mut binary: Option<String> = None;
     let mut agents_md = false;
+    let mut remove_unrecognized = false;
 
     let mut it = argv.iter().peekable();
     if let Some(first) = it.peek() {
@@ -137,6 +156,7 @@ fn parse(argv: &[String], home: Option<&Path>) -> Result<Args, String> {
             }
             "--apply" => apply = true,
             "--agents-md" => agents_md = true,
+            "--remove-unrecognized" => remove_unrecognized = true,
             "--binary" => {
                 binary = Some(it.next().ok_or("--binary needs a path")?.clone());
             }
@@ -162,6 +182,7 @@ fn parse(argv: &[String], home: Option<&Path>) -> Result<Args, String> {
         apply,
         binary,
         agents_md,
+        remove_unrecognized,
     })
 }
 
@@ -294,6 +315,7 @@ fn main() -> ExitCode {
                     &installed,
                     intent,
                     args.agents_md,
+                    args.remove_unrecognized,
                 )
             })
             .collect();
@@ -311,7 +333,7 @@ fn main() -> ExitCode {
                     serde_json::to_string_pretty(&reports).unwrap_or_default()
                 );
             } else {
-                report_apply(&reports);
+                report_apply(&reports, &plans);
             }
             let failed = reports
                 .iter()
@@ -423,6 +445,12 @@ fn report_fix(plans: &[fix::FixPlan]) {
         }
     }
 
+    // Warnings are printed for EVERY plan, not only the acting ones. A repo
+    // whose sole finding is "there is a hook here we did not write" needs
+    // nothing done to it and so appears in none of the three buckets above —
+    // which is exactly the repo whose warning would otherwise never be seen.
+    report_warnings(plans);
+
     println!();
     println!(
         "  {} of {} repositories would change · {} refused · {} already correct",
@@ -444,10 +472,43 @@ fn report_fix(plans: &[fix::FixPlan]) {
     println!("  DRY RUN — nothing was written.");
 }
 
+/// Everything found but not acted on, named.
+///
+/// Its own block, and its own heading, because these are the two states this
+/// tool used to handle by SILENTLY DOING SOMETHING: deleting a hook somebody
+/// else wrote (reported only as a number in `repoC -1 +4`), and writing into a
+/// directory a scanned repository named. A count cannot say either of those; a
+/// path can.
+fn report_warnings(plans: &[fix::FixPlan]) {
+    let warned: Vec<&fix::FixPlan> = plans.iter().filter(|p| !p.warn.is_empty()).collect();
+    if warned.is_empty() {
+        return;
+    }
+    println!();
+    println!("LEFT ALONE (not ours — nothing here is deleted or written):");
+    for p in warned {
+        for w in &p.warn {
+            match w {
+                fix::Warning::UnrecognizedSubHook { path } => {
+                    println!("  {}  (a hook we did not write)", shown(path));
+                }
+                fix::Warning::HooksDirOutsideRepo { path } => {
+                    println!(
+                        "  {}  ({}: core.hooksPath points OUTSIDE the repository)",
+                        shown(path),
+                        shown(&p.repo)
+                    );
+                }
+            }
+        }
+    }
+    println!("  (pass --remove-unrecognized to delete the sub-hooks above)");
+}
+
 /// What actually happened. A failure is never folded into the same count as a
 /// success, and "refused" is reported separately from "unchanged" — they look
 /// identical in a total and mean opposite things.
-fn report_apply(reports: &[apply::ApplyReport]) {
+fn report_apply(reports: &[apply::ApplyReport], plans: &[fix::FixPlan]) {
     let mut applied = 0usize;
     let (mut removed, mut written, mut refused, mut unchanged) = (0usize, 0usize, 0usize, 0usize);
     for r in reports {
@@ -476,6 +537,7 @@ fn report_apply(reports: &[apply::ApplyReport]) {
         .iter()
         .filter(|r| matches!(r.outcome, apply::Outcome::Failed { .. }))
         .count();
+    report_warnings(plans);
     println!();
     println!(
         "  {applied} of {} repositories changed · {refused} refused · {unchanged} already correct · {failed} failed",
@@ -499,6 +561,36 @@ mod tests {
         let a = parse(&["--depth".into(), "2".into(), "--json".into()], Some(home)).unwrap();
         assert_eq!(a.depth, 2);
         assert!(a.json);
+    }
+
+    /// Deleting hooks other people wrote is opt-in, and the flag's absence is
+    /// what makes it so. Asserted rather than assumed, because the default is
+    /// the whole fix.
+    #[test]
+    fn deleting_other_peoples_hooks_is_off_unless_asked_for() {
+        let home = Some(Path::new("/home/x"));
+        assert!(!parse(&[], home).unwrap().remove_unrecognized);
+        assert!(
+            !parse(&["fix".into(), "--apply".into()], home)
+                .unwrap()
+                .remove_unrecognized
+        );
+        assert!(
+            !parse(&["install".into()], home)
+                .unwrap()
+                .remove_unrecognized
+        );
+        assert!(
+            parse(&["fix".into(), "--remove-unrecognized".into()], home)
+                .unwrap()
+                .remove_unrecognized
+        );
+        // And the usage text has to say both halves out loud.
+        assert!(USAGE.contains("--remove-unrecognized"), "{USAGE}");
+        assert!(
+            USAGE.contains("never delete a hook they did not write"),
+            "{USAGE}"
+        );
     }
 
     #[test]

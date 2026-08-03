@@ -115,6 +115,9 @@ pub enum RemovalReason {
     StaleOurs,
     /// A hand-written sub-hook. Nothing dispatches these since the move
     /// in-process, so it looks installed and never runs.
+    ///
+    /// Only ever produced under `--remove-unrecognized`. By default these are
+    /// [`Warning::UnrecognizedSubHook`] and are left exactly where they are.
     ForeignSubHook,
     /// The node-era `package.json` that forced CommonJS. No hook is node now.
     VestigialPackageJson,
@@ -163,6 +166,26 @@ pub struct WriteAgentsMd {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "warning", rename_all = "snake_case")]
 pub enum Warning {
+    /// A `pre-commit-*` / `pre-push-*` file in `.git/hooks` that we did not
+    /// write. Nothing dispatches these since the checks moved in-process, so it
+    /// looks installed and never runs — worth saying, and NOT ours to delete.
+    ///
+    /// It was deleted, by default, in repositories this tool had never touched,
+    /// with no confirmation, and reported only as a number in `repoC -1 +4`. A
+    /// hand-written `pre-commit-secrets-scan` went that way in the reproduction.
+    /// README.md has stated the opposite posture the whole time: "a hook you
+    /// wrote yourself is left alone."
+    ///
+    /// The removal was never a decision. `scripts/propagate.sh` (see
+    /// `git show 90b0d30^:scripts/propagate.sh`, around lines 82-87) did
+    /// `rm -f "$hooks"/pre-commit-* "$hooks"/pre-push-*` as a ONE-TIME migration
+    /// sweep when the 16 per-check shims retired in `81cdf9d` — a glob that
+    /// could not tell our retired shims from anybody else's files, run once,
+    /// deliberately. `fix.rs` inherited it wholesale as standing behaviour and
+    /// `tests/parity.rs` then pinned it as golden, which is how a migration
+    /// one-liner became a promise the tool kept making to every repository it
+    /// ever scanned.
+    UnrecognizedSubHook { path: PathBuf },
     /// The repository's hooks resolve outside the repository itself.
     ///
     /// Also present in `refuse`, as the only condition that appears on both
@@ -261,12 +284,18 @@ pub enum Intent {
     Activate,
 }
 
+/// What it would take to bring `repo` back to the shipped state.
+///
+/// `remove_unrecognized` promotes every [`Warning::UnrecognizedSubHook`] back
+/// into a [`Removal`] — the pre-`--remove-unrecognized` behaviour, now opt-in.
+/// See that variant for what it deletes and why it used to be the default.
 pub fn plan(
     repo: &Repo,
     repo_abs: &Path,
     binary: &str,
     intent: Intent,
     agents_md: bool,
+    remove_unrecognized: bool,
 ) -> FixPlan {
     let hooks_dir = crate::scan::hooks_dir_for(repo_abs);
     let mut p = FixPlan {
@@ -336,11 +365,20 @@ pub fn plan(
             reason: RemovalReason::StaleOurs,
         });
     }
+    // NOT a removal by default. These files are not ours; see
+    // `Warning::UnrecognizedSubHook`. A warning does not suppress the repo
+    // either — a stranger's `pre-push-mine.sh` must not block repairing four
+    // broken dispatchers sitting in the same directory.
     for name in &repo.foreign_subs {
-        p.remove.push(Removal {
-            path: hooks.join(name),
-            reason: RemovalReason::ForeignSubHook,
-        });
+        let path = hooks.join(name);
+        if remove_unrecognized {
+            p.remove.push(Removal {
+                path,
+                reason: RemovalReason::ForeignSubHook,
+            });
+        } else {
+            p.warn.push(Warning::UnrecognizedSubHook { path });
+        }
     }
     if repo.hook_pkgjson {
         p.remove.push(Removal {
@@ -461,6 +499,7 @@ mod tests {
             "/bin/gh",
             Intent::Repair,
             false,
+            false,
         );
         assert_eq!(p.refuse, vec![Refusal::Unmanaged]);
         assert!(
@@ -477,7 +516,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fixplan-nohooks-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".git")).unwrap();
-        let p = plan(&repo(true), &dir, "/bin/gh", Intent::Repair, false);
+        let p = plan(&repo(true), &dir, "/bin/gh", Intent::Repair, false, false);
         assert_eq!(p.refuse, vec![Refusal::UnreadableHooks]);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -497,6 +536,7 @@ mod tests {
             Path::new("/definitely/not/here"),
             "/bin/gh",
             Intent::Repair,
+            false,
             false,
         );
         assert!(
@@ -519,18 +559,60 @@ mod tests {
         r.foreign_subs = vec!["pre-push-mine.sh".into()];
         r.hook_pkgjson = true;
 
-        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false);
-        assert_eq!(p.remove.len(), 3);
+        // CHANGED ON PURPOSE: `pre-push-mine.sh` used to be a third REMOVAL
+        // here, `ForeignSubHook`. It is not ours, so by default it is now a
+        // warning and stays where it is; the flag is what puts it back on the
+        // removal list. See `Warning::UnrecognizedSubHook` for the evidence.
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, false);
+        assert_eq!(p.remove.len(), 2, "{:?}", p.remove);
         let reasons: Vec<_> = p.remove.iter().map(|r| r.reason).collect();
         assert!(reasons.contains(&RemovalReason::StaleOurs));
-        assert!(reasons.contains(&RemovalReason::ForeignSubHook));
         assert!(reasons.contains(&RemovalReason::VestigialPackageJson));
+        assert!(!reasons.contains(&RemovalReason::ForeignSubHook));
+        assert_eq!(
+            p.warn,
+            vec![Warning::UnrecognizedSubHook {
+                path: hooks.join("pre-push-mine.sh")
+            }],
+            "and it must be NAMED, not silently skipped"
+        );
         assert_eq!(
             p.write.len(),
             4,
             "all four are written, as propagate.sh does"
         );
         assert!(p.write.iter().all(|w| w.changes), "none exist yet");
+
+        // The opt-in restores exactly the third removal, and drops the warning.
+        let opted_in = plan(&r, &dir, "/bin/gh", Intent::Repair, false, true);
+        assert_eq!(opted_in.remove.len(), 3, "{:?}", opted_in.remove);
+        assert!(opted_in
+            .remove
+            .iter()
+            .any(|r| r.reason == RemovalReason::ForeignSubHook));
+        assert!(opted_in.warn.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A hook somebody else wrote must not stop us repairing the four
+    /// dispatchers sitting next to it. That is the difference between the `warn`
+    /// channel and the `refuse` one, and folding them together would force a
+    /// choice between "say nothing" and "do nothing".
+    #[test]
+    fn a_stranger_s_hook_warns_without_suppressing_the_repair() {
+        let dir = std::env::temp_dir().join(format!("fixplan-warn-{}", std::process::id()));
+        let hooks = dir.join(".git/hooks");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&hooks).unwrap();
+
+        let mut r = repo(true);
+        r.foreign_subs = vec!["pre-push-mine.sh".into()];
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, false);
+
+        assert!(!p.refused(), "{:?}", p.refuse);
+        assert_eq!(p.write.len(), 4, "all four dispatchers still planned");
+        assert!(p.remove.is_empty());
+        assert_eq!(p.warn.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -545,7 +627,7 @@ mod tests {
         for n in DISPATCHERS {
             std::fs::write(hooks.join(n), shim::render("/bin/gh")).unwrap();
         }
-        let p = plan(&repo(true), &dir, "/bin/gh", Intent::Repair, false);
+        let p = plan(&repo(true), &dir, "/bin/gh", Intent::Repair, false, false);
         assert!(p.is_noop(), "{p:?}");
         assert_eq!(p.write.len(), 4);
         let _ = std::fs::remove_dir_all(&dir);
@@ -570,7 +652,7 @@ mod tests {
         let dir = healthy_repo_dir("optout");
         let mut r = repo(true);
         r.agents_md = AgentsMdState::Missing;
-        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false);
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, false);
         assert!(p.write_agents_md.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -581,7 +663,7 @@ mod tests {
             let dir = healthy_repo_dir("plan");
             let mut r = repo(true);
             r.agents_md = state;
-            let p = plan(&r, &dir, "/bin/gh", Intent::Repair, true);
+            let p = plan(&r, &dir, "/bin/gh", Intent::Repair, true, false);
             assert!(!p.is_noop(), "{p:?}");
             let w = p.write_agents_md.expect("must plan a write");
             assert!(w.changes);
@@ -595,7 +677,7 @@ mod tests {
         let dir = healthy_repo_dir("uptodate");
         let mut r = repo(true);
         r.agents_md = AgentsMdState::UpToDate;
-        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, true);
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, true, false);
         assert!(p.write_agents_md.is_none());
         assert!(p.is_noop(), "{p:?}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -606,7 +688,7 @@ mod tests {
         let dir = healthy_repo_dir("malformed");
         let mut r = repo(true);
         r.agents_md = AgentsMdState::Malformed;
-        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, true);
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, true, false);
         assert_eq!(
             p.refuse,
             vec![Refusal::AgentsMdMalformed {
@@ -688,7 +770,7 @@ mod tests {
 
         let mut r = repo(true);
         r.stale_ours = vec!["pre-commit-ruff".into()];
-        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false);
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, false);
 
         assert!(!p.refused(), "{:?}", p.refuse);
         assert_eq!(

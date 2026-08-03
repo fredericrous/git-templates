@@ -172,6 +172,16 @@ mod tests {
         (r, abs)
     }
 
+    /// A retired per-check shim of OURS — it carries the marker, which is the
+    /// whole reason `fix` may remove it.
+    ///
+    /// These fixtures used to omit the marker line, so what they were actually
+    /// exercising was the removal of a file this tool did NOT write. That path
+    /// is gone by default (see `Warning::UnrecognizedSubHook`), and the tests
+    /// that meant to cover `stale_ours` now say so.
+    const STALE_OURS: &str =
+        "#!/bin/sh\n# git-templates hook shim.\nexec x --hooks-dir y pre-commit-ruff\n";
+
     fn healthy_shims(hooks: &Path, binary: &str) {
         for n in shim::DISPATCHERS {
             std::fs::write(hooks.join(n), shim::render(binary)).unwrap();
@@ -182,15 +192,11 @@ mod tests {
     fn removes_the_stale_and_writes_the_shims() {
         let (root, hooks) = fixture("basic");
         healthy_shims(&hooks, "/bin/gh");
-        std::fs::write(
-            hooks.join("pre-commit-ruff"),
-            "#!/bin/sh\nexec x --hooks-dir y pre-commit-ruff\n",
-        )
-        .unwrap();
+        std::fs::write(hooks.join("pre-commit-ruff"), STALE_OURS).unwrap();
         std::fs::write(hooks.join("package.json"), "{\"//\":\"Forces Node\"}").unwrap();
 
         let (repo, abs) = scan_one(&root, "/bin/gh");
-        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair, false);
+        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair, false, false);
         let out = apply(&p);
 
         assert!(
@@ -211,21 +217,17 @@ mod tests {
     fn applying_twice_is_a_no_op_the_second_time() {
         let (root, hooks) = fixture("idempotent");
         healthy_shims(&hooks, "/bin/gh");
-        std::fs::write(
-            hooks.join("pre-commit-ruff"),
-            "#!/bin/sh\nexec x --hooks-dir y z\n",
-        )
-        .unwrap();
+        std::fs::write(hooks.join("pre-commit-ruff"), STALE_OURS).unwrap();
 
         let (repo, abs) = scan_one(&root, "/bin/gh");
         assert!(matches!(
-            apply(&plan(&repo, &abs, "/bin/gh", Intent::Repair, false)),
+            apply(&plan(&repo, &abs, "/bin/gh", Intent::Repair, false, false)),
             Outcome::Applied { .. }
         ));
 
         // Re-scan: the world changed, so the plan must be recomputed.
         let (repo2, abs2) = scan_one(&root, "/bin/gh");
-        let p2 = plan(&repo2, &abs2, "/bin/gh", Intent::Repair, false);
+        let p2 = plan(&repo2, &abs2, "/bin/gh", Intent::Repair, false, false);
         assert!(p2.is_noop(), "second plan should be empty: {p2:?}");
         assert_eq!(apply(&p2), Outcome::Unchanged);
         let _ = std::fs::remove_dir_all(&root);
@@ -240,7 +242,7 @@ mod tests {
         std::fs::remove_file(hooks.join("pre-push")).unwrap();
 
         let (repo, abs) = scan_one(&root, "/bin/gh");
-        let out = apply(&plan(&repo, &abs, "/bin/gh", Intent::Repair, false));
+        let out = apply(&plan(&repo, &abs, "/bin/gh", Intent::Repair, false, false));
         assert!(
             matches!(out, Outcome::Applied { written: 1, .. }),
             "{out:?}"
@@ -260,7 +262,7 @@ mod tests {
         healthy_shims(&hooks, "/bin/gh");
 
         let (repo, abs) = scan_one(&root, "/bin/gh");
-        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair, true);
+        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair, true, false);
         let out = apply(&p);
         assert!(matches!(out, Outcome::Applied { .. }), "{out:?}");
 
@@ -289,7 +291,7 @@ mod tests {
         healthy_shims(&hooks, "/bin/gh");
 
         let (repo, abs) = scan_one(&root, "/bin/gh");
-        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair, true);
+        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair, true, false);
         assert!(p.write_agents_md.is_some(), "plan expected a write");
 
         // Something else won the race and wrote the current block first.
@@ -320,7 +322,7 @@ mod tests {
         let before = std::fs::read_to_string(hooks.join("pre-commit")).unwrap();
 
         let (repo, abs) = scan_one(&root, "/bin/gh");
-        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair, false);
+        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair, false, false);
         assert_eq!(p.refuse, vec![Refusal::Unmanaged]);
         assert_eq!(apply(&p), Outcome::Refused);
         assert_eq!(
@@ -337,13 +339,9 @@ mod tests {
     fn removals_precede_writes() {
         let (root, hooks) = fixture("order");
         healthy_shims(&hooks, "/bin/gh");
-        std::fs::write(
-            hooks.join("pre-push-old"),
-            "#!/bin/sh\nexec x --hooks-dir y z\n",
-        )
-        .unwrap();
+        std::fs::write(hooks.join("pre-push-old"), STALE_OURS).unwrap();
         let (repo, abs) = scan_one(&root, "/bin/gh");
-        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair, false);
+        let p = plan(&repo, &abs, "/bin/gh", Intent::Repair, false, false);
         let removals: Vec<_> = p.remove.iter().map(|r| r.path.clone()).collect();
         assert!(!removals.is_empty());
         apply(&p);
@@ -361,7 +359,7 @@ mod tests {
         healthy_shims(&hooks, "/bin/gh");
         std::fs::remove_file(hooks.join("commit-msg")).unwrap();
         let (repo, abs) = scan_one(&root, "/bin/gh");
-        apply(&plan(&repo, &abs, "/bin/gh", Intent::Repair, false));
+        apply(&plan(&repo, &abs, "/bin/gh", Intent::Repair, false, false));
         let mode = std::fs::metadata(hooks.join("commit-msg"))
             .unwrap()
             .permissions()
