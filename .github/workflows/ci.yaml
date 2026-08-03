@@ -14,6 +14,13 @@ on:
   push:
     branches: ["main"]
   pull_request:
+  # For `audit` above all. A new advisory against a crate in the fleet's tree
+  # appears without anybody pushing anything, so a push-only workflow learns
+  # about it whenever the next commit happens to land — which in a repository
+  # that changes in bursts can be months. Monday morning, so a finding is read
+  # at the start of a week rather than discovered on a Friday.
+  schedule:
+    - cron: "17 6 * * 1"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -69,9 +76,153 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
       # The behavioural coverage lives in the integration tests under tests/;
       # these two just keep the source honest.
+      #
+      # `make lint` runs EXACTLY these two, so a contributor can reproduce a red
+      # `rust` job without pushing. If you change a flag here, change it there —
+      # and read the warning in that target about the THIRD, stricter clippy the
+      # repo's own pre-commit hook runs.
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
 
+  # The floor `rust-version` claims, compiled against.
+  #
+  # `-D warnings` on a floating stable is the reason `rust-toolchain.toml`
+  # pins the BUILD toolchain; this job is the other half — the oldest toolchain
+  # the source is allowed to require. Without it, `rust-version = "1.74"` is a
+  # string in a manifest that nothing ever tests, and the first use of a 1.80
+  # API would sail through every other job here.
+  #
+  # Only the COMMIT PATH is checked, and deliberately: `githooks-fleet` declares
+  # a floor of its own (1.88, forced by ratatui's tree) and could not build here.
+  msrv:
+    # Literal, not `${{ env.MSRV }}` — the `env` context is not available in a
+    # job's `name`, and an unresolvable expression there renders as an empty
+    # string rather than erroring.
+    name: msrv (the commit path builds on 1.74)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Keep in step with [workspace.package] rust-version in Cargo.toml.
+      MSRV: "1.74.0"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install "$MSRV" --profile minimal --no-self-update
+      - name: cargo +MSRV check (githooks, githooks-runtime)
+        run: |
+          set -euo pipefail
+          # Cargo 1.74 cannot PARSE a v4 lock file ("lock file version `4` was
+          # found"), which is what the committed one is, so it fails before it
+          # reaches any Rust at all. Removing it is safe and is not a weakening
+          # of the check: the two crates being checked have no external
+          # dependencies whatsoever — that is the property the `deps` job
+          # exists to enforce — so there is nothing for a lock file to pin.
+          # The checkout is disposable; nothing is committed back.
+          rm -f Cargo.lock
+          cargo "+$MSRV" check -p githooks -p githooks-runtime
+
+  # The workspace's one dependency tree, watched.
+  #
+  # `githooks` is dependency-free by policy and `deps` proves it, so the only
+  # crate with a supply chain to monitor is `githooks-fleet` (~57 packages:
+  # ratatui, crossterm, serde). Leaving the single crate that HAS a tree
+  # unwatched, in a repository whose headline dependency argument is supply
+  # chain, is the asymmetry this closes.
+  #
+  # `cargo install --locked cargo-audit`, NOT a marketplace action. Pulling an
+  # unaudited third-party action — which runs with this workflow's token — into
+  # the job whose entire purpose is supply-chain hygiene is self-defeating; the
+  # install is slower and it is the point. `--locked` so cargo-audit builds from
+  # its own published lock file rather than a fresh resolve.
+  #
+  # NON-BLOCKING, decided deliberately: an advisory is information about a
+  # dependency, not a defect in the change under review, and a scheduled run
+  # that goes red on somebody else's disclosure trains people to ignore red.
+  # Findings surface as ::warning:: annotations instead.
+  audit:
+    name: cargo audit (advisory, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}
+      - name: Install cargo-audit
+        run: command -v cargo-audit > /dev/null || cargo install --locked cargo-audit
+      # Two things about `cargo audit`'s exit code drive the shape of this, and
+      # both were found by rehearsing it rather than by reading the docs:
+      #
+      #   1. It exits NON-ZERO for both "I found vulnerabilities" and "I could
+      #      not fetch the advisory database". Those mean opposite things. The
+      #      first draft announced a fetch failure as findings — reporting an
+      #      inability to answer as an answer, the exact shape
+      #      scripts/check-no-deps.sh was rewritten to stop doing.
+      #   2. It exits ZERO for advisories classed as warnings — `unmaintained`
+      #      and `unsound`. The tree has two of those today (RUSTSEC-2024-0436,
+      #      paste, unmaintained; RUSTSEC-2026-0002, lru, unsound), so a step
+      #      that keyed on the exit code alone would print "no advisories" over
+      #      a log listing them.
+      #
+      # So the ADVISORY IDS decide, not the exit code, and the exit code only
+      # says how loudly to phrase it.
+      - name: Audit the resolved tree
+        run: |
+          set -uo pipefail
+          cargo audit --color never 2>&1 | tee /tmp/audit.log
+          rc=${PIPESTATUS[0]}
+          ids=$(grep -Eo 'RUSTSEC-[0-9]{4}-[0-9]{4}' /tmp/audit.log | sort -u)
+
+          if [ -z "$ids" ]; then
+            if [ "$rc" -eq 0 ]; then
+              echo "no advisories against the locked tree"
+            else
+              echo "::warning::cargo audit could not complete — the tree was NOT checked. This is not a clean result."
+            fi
+            exit 0
+          fi
+
+          if [ "$rc" -eq 0 ]; then
+            echo "::warning::cargo audit: advisories against the locked tree (warnings — unmaintained/unsound)"
+          else
+            echo "::warning::cargo audit: VULNERABILITIES against the locked tree"
+          fi
+          # One annotation per id, so the run summary names them instead of
+          # pointing at a wall of output.
+          printf '%s\n' "$ids" | while read -r id; do
+            echo "::warning::$id  https://rustsec.org/advisories/$id"
+          done
+
+          # Exit 0 on purpose. `continue-on-error` above already keeps the run
+          # green; this keeps the STEP from being marked failed too, so the
+          # annotations are the signal rather than a red X people learn to
+          # ignore. Flip both if this is ever promoted to blocking.
+          exit 0
+
+  # The shims are the only shell left in this repository.
+  #
+  # This job used to bill itself as a "cheap backstop for the hooks no test file
+  # covers (argo-lint, kube-linter, kubeconform, yamllint)". Those four have
+  # been Rust since phase 3 and are covered by crates/githooks/tests/k8s.rs and
+  # crates/githooks/tests/linters.rs; the comment outlived its subject by three
+  # phases. It also dispatched on the shebang across four arms, of which the
+  # `*zsh` and `*node` ones could never fire — no hook has been either since the
+  # rename.
+  #
+  # What remains is worth keeping and is stated plainly: the shims must parse
+  # under the POSIX `sh` that Git for Windows ships, which is the interpreter
+  # they name and the one platform where a syntax error would surface as a
+  # broken commit rather than a test failure. `sh -n` is the only thing here
+  # that a cargo test cannot do.
+  #
+  # Naming and recognition are already covered elsewhere and are NOT re-tested
+  # here: `registry`'s `the_shipped_shims_are_exactly_the_git_invoked_hooks`
+  # asserts the set of filenames, and `hookfile::is_our_shim` covers identifying
+  # one in the wild.
   syntax:
     name: syntax
     runs-on: ubuntu-latest
@@ -79,39 +230,54 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Cheap backstop for the hooks no test file covers (argo-lint,
-      # kube-linter, kubeconform, yamllint): a syntax error in one of those
-      # ships silently today. Parse-only, nothing is executed.
-      - name: Parse every hook
+      - name: The shims parse as POSIX sh
         run: |
-          # Dispatch on the SHEBANG, never the extension. The shims now carry
-          # NO extension at all, so there is nothing to dispatch on but the
-          # `#!` line. This check predates the rename, when the names actively
-          # lied — `pre-commit-ban-terms.js` was POSIX sh — and checking by
-          # extension ran `node --check` over a shell script.
           rc=0
           for f in templates/hooks/*; do
             [ -f "$f" ] || continue
             case "$(head -1 "$f")" in
-              # No hook is zsh any more, so zsh is not installed. The arm stays:
-              # if one reappears this errors loudly rather than skipping it.
-              *zsh)  zsh -n "$f"       || { echo "::error file=$f::zsh parse error (or zsh absent)"; rc=1; } ;;
-              *node) node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; } ;;
-              */sh)  sh -n "$f"        || { echo "::error file=$f::sh parse error"; rc=1; } ;;
-              *) echo "::error file=$f::unrecognised shebang: $(head -1 "$f")"; rc=1 ;;
+              */sh) sh -n "$f" || { echo "::error file=$f::sh parse error"; rc=1; } ;;
+              # Not a fallthrough for hypothetical interpreters — an assertion.
+              # One shim, one interpreter. If a hook ever needs another, that is
+              # a decision to make in a PR, not something for this job to
+              # quietly accommodate.
+              *) echo "::error file=$f::expected a POSIX sh shebang, found: $(head -1 "$f")"; rc=1 ;;
             esac
           done
           exit $rc
 
-  # Phase 2 of docs/rust-migration.md. Only meaningful now that no hook is zsh:
-  # until this batch, a real commit on Windows failed the moment any applicable
-  # hook was a zsh script Git for Windows cannot execute.
+      # The four shims are BYTE-IDENTICAL and always have been: one file serves
+      # every hook, passing its own filename through so the binary knows which
+      # hook to run. `sh -n` above parses each of them separately and would
+      # happily pass four different files, so it cannot see a hand-edit made to
+      # one copy — the likeliest way this set drifts, since fixing "the
+      # pre-commit shim" and forgetting the other three is a natural mistake.
+      # `cmp` is the assertion that earns this job its second step.
+      - name: All four shims are byte-identical
+        run: |
+          rc=0
+          ref=templates/hooks/pre-commit
+          [ -f "$ref" ] || { echo "::error::$ref is missing"; exit 1; }
+          for f in templates/hooks/*; do
+            [ -f "$f" ] || continue
+            cmp -s "$ref" "$f" || {
+              echo "::error file=$f::differs from $ref — the shims must be one file, copied"
+              diff -u "$ref" "$f" || true
+              rc=1
+            }
+          done
+          exit $rc
+
+  # Windows is a first-class platform here, not a smoke test.
   #
-  # The zsh SUITES cannot run here — they are zsh scripts, and porting 19 of
-  # them is a separate job. So this proves the two things that actually matter
-  # on Windows: the binary's own tests pass, and a real `git commit` goes
-  # through the shims end to end. Git for Windows ships `sh`, which is what the
-  # shims are.
+  # It could not be, once: a real commit on Windows failed the moment any
+  # applicable hook was a zsh script Git for Windows cannot execute, and the
+  # test suites were themselves zsh, so this job could only prove that a commit
+  # went through. Both halves are gone — the hooks are one binary behind `sh`
+  # shims, and the suites are cargo integration tests — so Windows now runs
+  # exactly the tests every other platform does, plus the two things only this
+  # runner can answer: that a real `git commit` goes end to end through the
+  # shims, and that an UNBAKED shim can find the binary with PATH emptied.
   windows:
     name: windows
     runs-on: windows-latest
@@ -126,11 +292,10 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
-      # The ported suites run HERE now — Phase 4's point is that Windows gets
-      # the real tests, not just a smoke, because they no longer need zsh.
-      # The full suite — 19 ported suites' worth — not a smoke. This is what
-      # Phase 4 bought: the tests no longer need zsh, so Windows runs the same
-      # ones every other platform does.
+      # The full suite, not a smoke. No tool installs here on purpose: the
+      # tool-gated cases skip, and what this job is for is the platform, not
+      # the linters — those are covered on Linux and macOS by the `test` job,
+      # which does install them and now fails if any of them is missing.
       - run: cargo test -- --show-output
 
       - name: And a real commit runs end to end through the shims
@@ -241,19 +406,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # zsh: the runner and every test are zsh scripts (default shell on macOS,
-      # absent on the Ubuntu image).
-      # fd: NOT optional — pre-push-run-tests-js shells out to `fd package.json`
-      # to find packages, so without it that hook throws and its test fails.
-      # Debian ships the binary as `fdfind` (name clash with another package).
-      # zsh is gone entirely: the hooks became sh shims over the binary, and as
-      # of Phase 4 the tests are cargo integration tests. Nothing here needs it.
+      # WHAT IS INSTALLED HERE, AND WHY EACH ONE.
       #
-      # fd and rg used to be installed here and are no longer required by any
-      # hook: the Rust ports use `git ls-files` and native matching. Both were
-      # undeclared hard dependencies whose absence produced silent WRONG answers
-      # rather than errors — see the guard added in #13, now retired with the
-      # shell it protected.
+      # The rule the steps below follow: if a test case is gated on a tool, this
+      # job installs it, and the reporter at the bottom FAILS if it turns out
+      # not to be there. The one exception is argo, which has a step of its own
+      # explaining why it must be absent.
+      #
+      # Three things this job used to install and no longer needs, kept written
+      # down because "why is that gone" is the question that reintroduces them:
+      #
+      #   zsh — the runner and every test were zsh scripts. The hooks became sh
+      #         shims over one binary and the suites became cargo integration
+      #         tests; nothing here is zsh any more.
+      #   fd  — `pre-push-run-tests-js` shelled out to `fd package.json`.
+      #   rg  — the shell hooks matched with ripgrep.
+      #
+      # fd and rg were undeclared HARD dependencies whose absence produced
+      # silent wrong answers rather than errors — a hook that found no packages
+      # and reported success. The Rust ports use `git ls-files` and native
+      # matching, so the guard added for that (#13) retired with the shell it
+      # protected.
       - name: Install ruff (macOS)
         if: runner.os == 'macOS'
         run: brew install ruff
@@ -261,6 +434,111 @@ jobs:
       - name: Install ruff (Linux)
         if: runner.os == 'Linux'
         run: pipx install ruff
+
+      # `uv` — and the ruff above is KEPT, not replaced.
+      #
+      # Three cases in linters.rs gate on `missing("ruff") && missing("uvx")`,
+      # so before this step they ran only because ruff was installed; `uvx` was
+      # never on the runner at all. Installing uv covers the other half of that
+      # gate.
+      #
+      # It also CHANGES WHICH BRANCH those cases exercise, and that is worth
+      # knowing rather than discovering. `python_tools::resolve_python_tool`
+      # tries `uv run --no-sync <tool>` FIRST — the lockfile-pinned tool a
+      # project's CI would use. The fixtures write a `pyproject.toml` containing
+      # only `[tool.ruff]` and no `[project]` table, so `uv run` finds no
+      # project, `tool_runs` sees a non-zero `--version`, and resolution falls
+      # through to the PATH ruff. So the assertions still measure ruff's
+      # verdict, but they now measure it having traversed the uv branch and
+      # rejected it — which is the first branch of that function and was
+      # previously never taken here at all.
+      - name: Install uv (macOS)
+        if: runner.os == 'macOS'
+        run: brew install uv
+
+      - name: Install uv (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          # The installer writes ~/.local/bin and edits shell rc files, which a
+          # non-interactive `run:` step never sources. $GITHUB_PATH is how a
+          # later step in the same job sees it.
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # yamllint — two cases in linters.rs were gated on it and neither had ever
+      # run in CI. Both assert real yamllint behaviour (a trailing-space finding
+      # blocks; a `-weird.yaml` filename is still content-checked rather than
+      # eaten by argparse), so they were pure decoration until now.
+      - name: Install yamllint (macOS)
+        if: runner.os == 'macOS'
+        run: brew install yamllint
+
+      - name: Install yamllint (Linux)
+        if: runner.os == 'Linux'
+        run: pipx install yamllint
+
+      # yq — and it MUST be mikefarah/yq.
+      #
+      # There are two unrelated programs called `yq`. The PyPI one (kislyuk/yq)
+      # is a jq wrapper with a different CLI; mikefarah/yq is the Go one. The
+      # hook runs `yq e 'true' -- <file>`, which is mikefarah syntax — `e`
+      # (eval) is not a kislyuk subcommand and the `--` separator, which exists
+      # here so a staged `-weird.yaml` is not read as a flag, is parsed
+      # differently. Installing the wrong one would make six cases in
+      # linters.rs fail in a way that looks like a hook bug.
+      #
+      # So: Homebrew's `yq` formula IS mikefarah's, and on Linux the release
+      # binary is fetched directly at a PINNED tag rather than through a distro
+      # package (Ubuntu's `yq` is the Python one) or `latest` (which would make
+      # this job's behaviour change without a commit).
+      - name: Install yq — mikefarah/yq (macOS)
+        if: runner.os == 'macOS'
+        run: brew install yq
+
+      - name: Install yq — mikefarah/yq (Linux)
+        if: runner.os == 'Linux'
+        env:
+          YQ_VERSION: v4.44.6
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64)          arch=amd64 ;;
+            aarch64|arm64)   arch=arm64 ;;
+            *) echo "::error::no yq build mapped for $(uname -m)"; exit 1 ;;
+          esac
+          url="https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${arch}"
+          curl -fsSL --retry 3 -o /tmp/yq "$url"
+          sudo install -m 0755 /tmp/yq /usr/local/bin/yq
+          # Prove it is the RIGHT yq before any test depends on it. The version
+          # banner names the repository, so this cannot be satisfied by the
+          # PyPI package having been picked up from somewhere else on PATH.
+          yq --version
+          yq --version | grep -q 'mikefarah/yq' \
+            || { echo "::error::PATH yq is not mikefarah/yq"; exit 1; }
+          printf 'a: 1\n' > /tmp/yqprobe.yaml
+          yq e 'true' -- /tmp/yqprobe.yaml > /dev/null \
+            || { echo "::error::yq does not accept the syntax the hook uses"; exit 1; }
+
+      # argo is NOT installed, and that is the whole point.
+      #
+      # The only argo-gated case in the suite is `argo_soft_fails_without_the_
+      # cli`, and it opens with `if !missing("argo") { return; }` — it tests the
+      # ABSENT branch, asserting that a missing toolchain warns and lets the
+      # commit through. Installing argo would silently DISABLE the one test that
+      # mentions it, which is the exact inversion of every other tool gate here.
+      #
+      # And the skip reporter below could not have told you: the early return
+      # prints nothing, so the log would read as though the case ran. The test
+      # now prints a marker of its own on that return (see k8s.rs), and this
+      # step asserts the precondition that makes it meaningful.
+      - name: argo must be ABSENT (the only argo test needs it missing)
+        run: |
+          if command -v argo > /dev/null 2>&1; then
+            echo "::error::argo is on PATH — argo_soft_fails_without_the_cli now returns early and asserts nothing"
+            exit 1
+          fi
+          echo "argo absent, as the test requires"
 
       # Fail here, with a name, rather than 14 suites down as an opaque
       # assertion failure — the hooks' hard dependencies are undeclared
@@ -282,6 +560,13 @@ jobs:
       # while silently testing far less. Install them so those suites actually
       # assert something. Resolution order in the hooks ends at PATH, so a
       # global install is enough.
+      #
+      # pyright has been installed here since this step was written, and until
+      # now NOTHING gated on it: `pre-commit-pyright` is a `Severity::Block`
+      # check — it stops commits — whose only test asserted that it does nothing
+      # in a repo with no config. The tool was present and unexercised, which is
+      # the more expensive half of the same mistake as a tool that is absent and
+      # silently skipped. linters.rs now has the two cases that need it.
       - name: Install the tools the hooks drive
         run: npm i -g eslint prettier pyright
 
@@ -305,16 +590,86 @@ jobs:
       # unnoticed: the whole point of installing the tools above is that these
       # suites run for real. A green tick over a suite that quietly skipped is
       # the failure mode worth surfacing.
+      #
       # Match the tests' actual skip marker, not the bare word: one test is
       # NAMED "Should stop at the first failure, skipping the rest of the gate",
       # so `grep skipping` warned on a perfectly healthy run. A warning that
       # cries wolf is one people learn to scroll past.
+      #
+      # THIS STEP NOW FAILS. It used to emit `::warning::` and exit 0, which
+      # means the condition it exists to detect never once turned a run red —
+      # and an annotation on an otherwise-green run is precisely the thing
+      # people scroll past. That is how eight cases (four yq, two yamllint, and
+      # the uvx half of the ruff gate) stayed unexecuted across every run of
+      # this workflow while the job reported success.
+      #
+      # The rule is an ALLOWLIST, not a blanket ban, because one skip is
+      # correct: see the `argo` step above. Anything else means a tool this job
+      # installs did not end up on PATH, or a new gate was added without an
+      # install beside it — both of which are bugs in this file, and both of
+      # which should stop the run rather than decorate it.
+      #
+      # `if: always()` and the full list is still printed on success, so the
+      # allowlist stays reviewable instead of becoming a rule nobody can see the
+      # effect of.
       - name: Report skipped suites
         if: always()
         run: |
-          if grep -q "unavailable — skipping" /tmp/hooks-test.log; then
-            echo "::warning::suites skipped despite the tools being installed:"
-            grep "unavailable — skipping" /tmp/hooks-test.log
-          else
-            echo "no suites skipped"
+          set -uo pipefail
+
+          # Tools this platform may legitimately lack, with the reason, because
+          # an allowlist without reasons grows silently.
+          #
+          #   argo — deliberately NOT installed. The only argo-gated case is
+          #          `argo_soft_fails_without_the_cli`, which asserts the
+          #          SOFT-FAIL branch: a missing toolchain must warn and let the
+          #          commit through. It therefore needs argo absent, and this
+          #          marker means the opposite of what it means for every other
+          #          tool in the list — the case RAN, and ran because the tool
+          #          is missing. `missing()` prints "unavailable — skipping"
+          #          unconditionally; only the second half is wrong here.
+          allowed="argo"
+
+          if [ ! -f /tmp/hooks-test.log ]; then
+            echo "::error::/tmp/hooks-test.log is missing — the test step did not get far enough to produce one"
+            exit 1
           fi
+
+          # `missing()` in crates/githooks/tests/common/mod.rs prints exactly
+          # `  ! <tool> unavailable — skipping`. Pull the tool name out of that.
+          skipped=$(grep -o '! [A-Za-z0-9_.+-]* unavailable — skipping' /tmp/hooks-test.log \
+                    | awk '{print $2}' | sort -u || true)
+
+          echo "--- tools skipped in this run ---"
+          if [ -z "$skipped" ]; then
+            echo "  (none)"
+          else
+            printf '%s\n' "$skipped" | sed 's/^/  /'
+          fi
+          echo "--- allowed to be absent on ${{ runner.os }} ---"
+          printf '%s\n' "$allowed" | sed 's/^/  /'
+
+          rc=0
+          for tool in $skipped; do
+            case " $allowed " in
+              *" $tool "*) ;;
+              *)
+                echo "::error::$tool was unavailable, so its cases did not run. Install it in this job, or add it to the allowlist above with a reason."
+                rc=1
+                ;;
+            esac
+          done
+
+          # The other direction, and the one that bit: a case can skip WITHOUT
+          # printing `missing()`'s marker if it returns early for its own
+          # reasons. `argo_soft_fails_without_the_cli` is exactly that, so it
+          # prints a marker of its own and this asserts the marker is there.
+          # Without this, "argo is allowlisted" would be indistinguishable from
+          # "the argo case vanished".
+          if ! grep -q 'argo PRESENT — skipping' /tmp/hooks-test.log \
+             && ! printf '%s\n' "$skipped" | grep -qx argo; then
+            echo "::error::neither argo marker appeared — the argo soft-fail case no longer reports whether it ran"
+            rc=1
+          fi
+
+          exit $rc

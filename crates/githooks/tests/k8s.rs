@@ -46,9 +46,23 @@ fn argo_recognises_every_workflow_kind() {
     }
 }
 
+/// The one case in this repository that needs a tool to be ABSENT.
+///
+/// Every other gate here reads "skip unless the tool is installed". This one is
+/// inverted — it asserts the soft-fail branch, that a missing argo warns and
+/// lets the commit through — so installing argo does not enable it, it DISABLES
+/// it. CI therefore refuses to install argo, and says so in a step of its own.
+///
+/// The early return below used to be silent, which made that invisible from the
+/// outside: the log of a run on a machine WITH argo was byte-identical to the
+/// log of a run where this case had passed. `missing()` prints its marker only
+/// on the absent path, so the present path needs one of its own — worded
+/// distinctly, because CI's skip reporter looks for exactly one of these two
+/// markers and treats neither appearing as the case having quietly disappeared.
 #[test]
 fn argo_soft_fails_without_the_cli() {
     if !missing("argo") {
+        println!("  ! argo PRESENT — skipping (this case asserts the ABSENT branch)");
         return; // the gate only exists when the tool is absent
     }
     let r = Repo::new();
