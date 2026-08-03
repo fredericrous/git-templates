@@ -905,3 +905,241 @@ fn the_default_bin_dir_is_not_flagged() {
         "warned about the default layout, which is the whole fleet:\n{out}"
     );
 }
+
+/// Run the installer with a chosen `PATH`, and with `$GITHOOKS_BIN_DIR`
+/// deliberately UNSET — the package-manager case.
+fn install_on_path(s: &Sandbox, cwd: &Path, path: &str) -> (i32, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("install")
+        .current_dir(cwd)
+        .env("HOME", &s.0)
+        .env("USERPROFILE", &s.0)
+        .env("XDG_CONFIG_HOME", s.path(".config"))
+        .env_remove("GITHOOKS_BIN_DIR")
+        .env("PATH", path)
+        .output()
+        .expect("run githooks install");
+    (
+        out.status.code().unwrap_or(-1),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+/// The baked path, read back out of a shim this install wrote.
+fn baked_in(repo: &Path) -> String {
+    let shim = std::fs::read_to_string(repo.join(".git/hooks/pre-commit")).expect("read shim");
+    shim.lines()
+        .find_map(|l| l.trim().strip_prefix("BAKED=\""))
+        .and_then(|l| l.strip_suffix('"'))
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("no baked path in the shim:\n{shim}"))
+}
+
+/// A binary a package manager already put on PATH is baked where it is.
+///
+/// Copying it would produce a second, unmanaged copy that `brew upgrade` never
+/// touches again — the machine this was written on was in exactly that state.
+#[test]
+fn a_binary_already_on_path_is_not_copied() {
+    let s = Sandbox::new("onpath");
+    let repo = s.path("repo");
+    init_repo(&repo);
+
+    // Stand the binary somewhere that IS on PATH, the way a package would.
+    let pkg = s.path("pkg/bin");
+    std::fs::create_dir_all(&pkg).expect("mkdir");
+    let placed = pkg.join(if cfg!(windows) {
+        "githooks.exe"
+    } else {
+        "githooks"
+    });
+    std::fs::copy(env!("CARGO_BIN_EXE_githooks"), &placed).expect("copy");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&placed, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    let (code, out) = run_from(&s, &placed, &repo, &pkg.to_string_lossy());
+    assert_eq!(code, 0, "{out}");
+
+    let baked = baked_in(&repo);
+    assert_eq!(
+        std::path::Path::new(&baked).canonicalize().ok(),
+        placed.canonicalize().ok(),
+        "did not bake the binary where it already was (baked {baked}):\n{out}"
+    );
+    assert!(
+        !s.path(".local/bin/githooks").exists(),
+        "made a second copy the package manager will never update:\n{out}"
+    );
+    assert!(
+        out.contains("nothing was copied"),
+        "did not say it skipped the copy:\n{out}"
+    );
+}
+
+/// The Homebrew shape: `bin/githooks` is a symlink into a VERSIONED directory.
+///
+/// The symlink is the stable name; its target is deleted on the next upgrade.
+/// Baking the resolved path would pin every repository to a version that is
+/// about to stop existing — worse than the copy this avoids.
+#[cfg(unix)]
+#[test]
+fn a_symlink_on_path_bakes_the_link_not_its_versioned_target() {
+    let s = Sandbox::new("brewshape");
+    let repo = s.path("repo");
+    init_repo(&repo);
+
+    let cellar = s.path("cellar/1.0.0/bin");
+    let bin = s.path("brew/bin");
+    std::fs::create_dir_all(&cellar).expect("mkdir");
+    std::fs::create_dir_all(&bin).expect("mkdir");
+    let real = cellar.join("githooks");
+    std::fs::copy(env!("CARGO_BIN_EXE_githooks"), &real).expect("copy");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    let link = bin.join("githooks");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+    let (code, out) = run_from(&s, &link, &repo, &bin.to_string_lossy());
+    assert_eq!(code, 0, "{out}");
+
+    let baked = baked_in(&repo);
+    assert!(
+        !baked.contains("/1.0.0/"),
+        "baked the VERSIONED path, which the next upgrade deletes: {baked}"
+    );
+    assert!(
+        baked.ends_with("brew/bin/githooks"),
+        "expected the PATH entry, got {baked}"
+    );
+}
+
+/// The build-directory case, which is why the copy exists at all: nothing on
+/// PATH, so it must still be copied somewhere `cargo clean` will not delete.
+#[test]
+fn a_binary_not_on_path_is_still_copied() {
+    let s = Sandbox::new("notonpath");
+    let repo = s.path("repo");
+    init_repo(&repo);
+
+    // A PATH with no githooks in it — git still has to be reachable.
+    // The inherited PATH: it has git, and identity matching means an
+    // unrelated githooks on it is not mistaken for the one under test.
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    let (code, out) = install_on_path(&s, &repo, &inherited);
+    assert_eq!(code, 0, "{out}");
+
+    let copied = s.path(".local/bin/githooks");
+    assert!(
+        copied.exists() || s.path(".local/bin/githooks.exe").exists(),
+        "a binary that is not on PATH must still be copied somewhere stable:\n{out}"
+    );
+}
+
+/// Setting the variable IS the request to put it somewhere specific.
+#[test]
+fn githooks_bin_dir_still_forces_a_copy() {
+    let s = Sandbox::new("forcedcopy");
+    let repo = s.path("repo");
+    init_repo(&repo);
+    let elsewhere = s.path("opt/bin");
+    std::fs::create_dir_all(&elsewhere).expect("mkdir");
+
+    let (code, out) = install_with_bin_dir(&s, &repo, &elsewhere);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        elsewhere.join("githooks").exists() || elsewhere.join("githooks.exe").exists(),
+        "GITHOOKS_BIN_DIR was ignored:\n{out}"
+    );
+}
+
+/// Invoke a specific copy of the binary, with `dir` on PATH.
+fn run_from(s: &Sandbox, exe: &Path, cwd: &Path, dir: &str) -> (i32, String) {
+    let out = Command::new(exe)
+        .arg("install")
+        .current_dir(cwd)
+        .env("HOME", &s.0)
+        .env("USERPROFILE", &s.0)
+        .env("XDG_CONFIG_HOME", s.path(".config"))
+        .env_remove("GITHOOKS_BIN_DIR")
+        // git must stay reachable, so this PREPENDS to the inherited PATH
+        // rather than replacing it — and joins with `env::join_paths`, because
+        // the separator is `;` on Windows and a hand-built `a:b` string leaves
+        // that runner with no git at all. Matching is by file IDENTITY, not by
+        // name, so an unrelated githooks already on PATH cannot be mistaken
+        // for this one.
+        .env("PATH", path_with(dir))
+        .output()
+        .expect("run githooks install");
+    (
+        out.status.code().unwrap_or(-1),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+/// A build directory on PATH must never be baked, even though it IS on PATH.
+///
+/// cargo prepends its build directory to PATH when running tests on Windows,
+/// so this is the state the suite itself runs in there — and a shim baked
+/// against `target/debug` stops resolving the moment anybody rebuilds.
+#[test]
+fn a_build_directory_on_path_is_not_baked() {
+    let s = Sandbox::new("builddir");
+    let repo = s.path("repo");
+    init_repo(&repo);
+
+    // A directory carrying cargo's own marker for "this is build output".
+    let build = s.path("proj/target/debug");
+    std::fs::create_dir_all(&build).expect("mkdir");
+    std::fs::write(
+        s.path("proj/target/CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .expect("write tag");
+    let placed = build.join(if cfg!(windows) {
+        "githooks.exe"
+    } else {
+        "githooks"
+    });
+    std::fs::copy(env!("CARGO_BIN_EXE_githooks"), &placed).expect("copy");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&placed, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    let (code, out) = run_from(&s, &placed, &repo, &build.to_string_lossy());
+    assert_eq!(code, 0, "{out}");
+
+    let baked = baked_in(&repo);
+    assert!(
+        !baked.contains("target"),
+        "baked a build directory, which the next rebuild empties: {baked}"
+    );
+    assert!(
+        s.path(".local/bin/githooks").exists() || s.path(".local/bin/githooks.exe").exists(),
+        "and did not copy it somewhere durable instead:\n{out}"
+    );
+}
+
+/// `dir` prepended to the inherited PATH, joined the way this platform joins
+/// paths. A hand-built `"a:b"` is wrong on Windows and leaves the runner
+/// without git.
+fn path_with(dir: &str) -> std::ffi::OsString {
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs = vec![std::path::PathBuf::from(dir)];
+    dirs.extend(std::env::split_paths(&inherited));
+    std::env::join_paths(dirs).expect("join PATH")
+}
