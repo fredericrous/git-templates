@@ -2,6 +2,9 @@
 name = "githooks-runtime"
 version = "0.1.0"
 edition = "2021"
+# Inherited from [workspace.package]: 1.74, the floor this crate actually sets
+# — `std::io::Error::other` in staged_only.rs is the newest std API in the tree.
+rust-version.workspace = true
 description = "The git-templates hook logic: registry, dispatchers and checks"
 license = "MIT"
 

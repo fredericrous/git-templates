@@ -2,6 +2,22 @@
 resolver = "2"
 members = ["crates/githooks", "crates/githooks-fleet", "crates/githooks-runtime"]
 
+# The floor for the COMMIT PATH — `githooks` and `githooks-runtime`, which
+# inherit this. Not a guess: 1.73 was run against those two crates and failed
+# with four errors, all of them `E0658: use of unstable library feature
+# 'io_error_other'`, on `std::io::Error::other` in staged_only.rs; 1.74.0
+# compiles them clean. Everything else the source reaches for is older —
+# `OnceLock` and `is_some_and` are 1.70, let-else is 1.65.
+#
+# `githooks-fleet` deliberately does NOT inherit it and states a much higher
+# floor of its own; see its manifest for why. Declaring 1.74 workspace-wide
+# would have been a claim nothing could honour.
+#
+# CI's `msrv` job is what keeps this honest. A `rust-version` nobody compiles
+# against is a comment with extra syntax.
+[workspace.package]
+rust-version = "1.74"
+
 # Shared release posture. The hook binary runs on every commit, so size and
 # start-up cost are features.
 [profile.release]
