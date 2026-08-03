@@ -262,41 +262,58 @@ fn main() -> ExitCode {
     if args.mode == Mode::Uninstall {
         let mut removed = 0usize;
         let mut repos = 0usize;
+        let mut left: Vec<(PathBuf, githooks_runtime::hookfile::Refuse)> = Vec::new();
+        let mut failed: Vec<(PathBuf, std::io::Error)> = Vec::new();
         for repo in scan.repos.iter().filter(|r| r.managed) {
-            let Some(hooks) = repo.hooks_dir.inside().map(Path::to_path_buf) else {
+            // A hooks directory outside the repository, or one git would not
+            // name, is not ours to delete from any more than it is ours to
+            // write to. Skipped rather than guessed at.
+            let Some(hooks) = repo.hooks_dir.inside() else {
                 continue;
             };
-            let mut here = 0usize;
-            for name in githooks_runtime::install::DISPATCHERS {
-                let path = hooks.join(name);
-                // Only ours. A hook somebody wrote is not ours to take, and
-                // this is the guard whose absence let `install` clobber one.
-                let ours = std::fs::read_to_string(&path)
-                    .map(|t| githooks_runtime::install::is_our_shim(&t))
-                    .unwrap_or(false);
-                // AND not tracked: the same guard `fix`/`apply` treat as
-                // mandatory before any removal, for the same reason —
-                // `.git/hooks` reached through a symlinked template dir can
-                // resolve into a tracked checkout, and `is_our_shim` alone
-                // does not know that. This path deletes independently of
-                // `fix::plan`/`apply::apply`, so it must repeat the check
-                // rather than rely on going through them.
-                if ours
-                    && fix::tracked_refusal(&path).is_none()
-                    && std::fs::remove_file(&path).is_ok()
-                {
-                    here += 1;
-                }
-            }
-            if here > 0 {
+            let mut result = uninstall_repo(hooks);
+            if !result.removed.is_empty() {
                 repos += 1;
-                removed += here;
-                println!("  {} {here} shims", shown(&repo.path));
+                removed += result.removed.len();
+                println!("  {} {} shims", shown(&repo.path), result.removed.len());
             }
+            left.append(&mut result.left);
+            failed.append(&mut result.failed);
         }
         println!("{removed} shims removed from {repos} repositories");
+        // Both blocks are printed even when empty-adjacent, because the whole
+        // bug was that neither existed: three different failures collapsed into
+        // one silent skip and the summary said `0 shims removed from 0
+        // repositories`, exit 0, while four shims sat untouched.
+        if !left.is_empty() {
+            println!();
+            println!("left alone (not ours):");
+            // `Refuse::explain` already names the path, and names it with the
+            // reason attached — which is the difference between "we skipped
+            // something" and "we skipped THIS, because THAT".
+            for (_, why) in &left {
+                println!("  {}", githooks_runtime::ui::sanitize(&why.explain()));
+            }
+        }
+        if !failed.is_empty() {
+            println!();
+            println!("FAILED to remove:");
+            for (path, e) in &failed {
+                println!(
+                    "  {}: {}",
+                    shown(path),
+                    githooks_runtime::ui::sanitize(&e.to_string())
+                );
+            }
+        }
         println!("hook.skip and githooks.severity were left alone.");
-        return ExitCode::SUCCESS;
+        // A shim that is still installed and still running, after the user
+        // asked for it to be gone, is not a success.
+        return if failed.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        };
     }
 
     if args.mode == Mode::Fix || args.mode == Mode::Install {
@@ -378,6 +395,65 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS
+}
+
+/// What `uninstall` did to one repository's hooks directory, in three lists.
+///
+/// Three lists because there are three outcomes and the old code had ONE:
+///
+/// ```text
+/// if ours && !is_tracked(&path) && std::fs::remove_file(&path).is_ok() { here += 1; }
+/// ```
+///
+/// "not ours", "tracked", and "the unlink failed" all fell out of that `&&`
+/// chain as the same silent skip. VERIFIED: with a read-only `.git/hooks`, this
+/// printed `0 shims removed from 0 repositories`, exited 0, and left all four
+/// shims installed and running — the repository was not even listed. A tool
+/// that reports success for work it did not do is worse than one that fails.
+///
+/// `left` is not a lesser outcome than `removed`. README promises that a hook
+/// somebody else wrote is never taken, so naming what was left is the tool
+/// keeping that promise out loud rather than quietly.
+struct RepoUninstall {
+    removed: Vec<PathBuf>,
+    left: Vec<(PathBuf, githooks_runtime::hookfile::Refuse)>,
+    failed: Vec<(PathBuf, std::io::Error)>,
+}
+
+/// Take our four dispatchers back out of one hooks directory.
+///
+/// `guard_remove(path, expect_ours = true)` decides and `remove_regular`
+/// performs, so ownership, tracked-ness, symlinks and file type are all
+/// answered by [`githooks_runtime::hookfile`] — the same module `install` and
+/// `apply` ask, rather than a fourth predicate that can disagree with them.
+/// `expect_ours` is the whole point here: `uninstall` removes only files
+/// carrying our marker, including a symlink refusal, because deleting a link
+/// and deleting the shim it points at are different acts and only one of them
+/// was asked for.
+fn uninstall_repo(hooks: &Path) -> RepoUninstall {
+    let mut out = RepoUninstall {
+        removed: Vec::new(),
+        left: Vec::new(),
+        failed: Vec::new(),
+    };
+    for name in githooks_runtime::install::DISPATCHERS {
+        let path = hooks.join(name);
+        // Nothing there is nothing to report: `uninstall` run twice must be
+        // quiet the second time, not four lines of "left alone".
+        if githooks_runtime::hookfile::classify(&path)
+            == githooks_runtime::hookfile::HookFile::Absent
+        {
+            continue;
+        }
+        match githooks_runtime::hookfile::guard_remove(&path, true) {
+            Err(refuse) => out.left.push((path, refuse)),
+            Ok(()) => match githooks_runtime::hookfile::remove_regular(&path) {
+                Ok(()) => out.removed.push(path),
+                Err(e) => out.failed.push((path, e)),
+            },
+        }
+    }
+    out
 }
 
 /// Every number carries its denominator. No bare adjectives.
