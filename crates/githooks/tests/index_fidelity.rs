@@ -643,3 +643,171 @@ fn try_symlink(target: &str, link: &std::path::Path) -> bool {
         false
     }
 }
+
+/// A repository may contain a file whose name ends in our old marker suffix,
+/// and one did.
+///
+/// The store used to encode "this path was deleted" as a sibling file named
+/// `<name>.githooks-absent`. So a repo tracking both `notes` and
+/// `notes.githooks-absent` handed the restore an ambiguity it could not see:
+/// it read the payload of the second as a STATEMENT about the first, deleted
+/// `notes` from the working tree, and never put the real bytes back. Both
+/// halves are asserted here, because both halves were losses.
+#[test]
+fn a_tracked_file_named_like_the_absent_marker_does_not_delete_its_neighbour() {
+    let r = Repo::new();
+    seed(&r);
+    r.stage("notes", "the neighbour\n");
+    r.stage("notes.githooks-absent", "not a marker, a file\n");
+    r.commit("chore: two files, one awkward name");
+
+    // Something staged, so the hook has work to do…
+    r.stage("x.json", VALID);
+    // …and an unstaged change to the awkwardly named file, so it is held.
+    r.write("notes.githooks-absent", "edited, and not staged\n");
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "{}", run.output());
+
+    assert!(
+        r.path("notes").exists(),
+        "the neighbouring file was deleted by a suffix match"
+    );
+    assert_eq!(tree(&r, "notes"), "the neighbour\n");
+    assert_eq!(
+        tree(&r, "notes.githooks-absent"),
+        "edited, and not staged\n",
+        "the unstaged edit was never put back"
+    );
+}
+
+/// The same collision in its more serious form: the repository chose both the
+/// link name and its target.
+///
+/// `<name>.githooks-symlink` used to mean "restore `<name>` as a symlink whose
+/// target is this file's contents" — so a tracked `payload.githooks-symlink`
+/// containing an ABSOLUTE path made committing in that repository plant a
+/// symlink to it. The repo picked where it pointed; anything that wrote that
+/// path afterwards wrote through it, outside the repository entirely.
+#[test]
+fn a_tracked_file_named_like_the_symlink_marker_does_not_plant_a_symlink() {
+    let r = Repo::new();
+    seed(&r);
+
+    let outside = std::env::temp_dir().join(format!("githooks-outside-{}", std::process::id()));
+    std::fs::write(&outside, "a file the repository does not own\n").expect("write outside");
+
+    r.stage(
+        "payload.githooks-symlink",
+        &format!("{}\n", outside.display()),
+    );
+    r.commit("chore: a file whose name looks like metadata");
+
+    r.stage("x.json", VALID);
+    r.write("payload.githooks-symlink", &outside.display().to_string());
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "{}", run.output());
+
+    assert!(
+        std::fs::symlink_metadata(r.path("payload")).is_err(),
+        "the repository planted a symlink through the held store"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside).expect("outside file"),
+        "a file the repository does not own\n",
+        "the file outside the repository was touched"
+    );
+    let _ = std::fs::remove_file(&outside);
+}
+
+/// A store written by an older binary still has to be recoverable, or an
+/// upgrade mid-hold would strand exactly the work this module exists to keep.
+/// `restore_puts_back_held_files` above hand-builds one of these too.
+#[test]
+fn a_legacy_suffix_store_is_still_recovered() {
+    let r = Repo::new();
+    seed(&r);
+    r.stage("gone.txt", "will be deleted\n");
+    r.commit("chore: seed the legacy shapes");
+
+    let store = r.path(".git/githooks-held");
+    std::fs::create_dir_all(&store).expect("mkdir");
+    // The old format: payload by plain name, metadata by suffix. No index.
+    std::fs::write(store.join("x.json"), BROKEN).expect("write payload");
+    std::fs::write(store.join("gone.txt.githooks-absent"), b"").expect("write absent marker");
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("restore")
+        .current_dir(&r.dir)
+        .output()
+        .expect("githooks restore");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(tree(&r, "x.json"), BROKEN, "legacy payload not put back");
+    assert!(
+        !r.path("gone.txt").exists(),
+        "legacy absent marker not honoured"
+    );
+}
+
+/// The executable bit is uncommitted work too.
+///
+/// `git diff --name-only` lists a mode-only change, so the file was held and
+/// restored — but only its BYTES were recorded, and `git checkout` had reset
+/// the mode in between. `fs::write` preserves whatever mode the file already
+/// has, so the restored file came back with the index's mode and the `chmod`
+/// was silently gone. Every content-based assertion in this file passed
+/// throughout, which is why it took an audit to find.
+#[cfg(unix)]
+#[test]
+fn an_unstaged_chmod_survives_the_hook() {
+    use std::os::unix::fs::PermissionsExt;
+    let r = Repo::new();
+    seed(&r);
+    r.stage("deploy.sh", "#!/bin/sh\necho hi\n");
+    r.commit("chore: a script, not yet executable");
+
+    r.stage("x.json", VALID);
+    // Unstaged: both a content edit and the bit.
+    r.write("deploy.sh", "#!/bin/sh\necho edited\n");
+    std::fs::set_permissions(r.path("deploy.sh"), std::fs::Permissions::from_mode(0o755))
+        .expect("chmod");
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "{}", run.output());
+
+    let mode = std::fs::metadata(r.path("deploy.sh"))
+        .expect("stat")
+        .permissions()
+        .mode();
+    assert!(
+        mode & 0o111 != 0,
+        "the unstaged executable bit was lost (mode {mode:o})"
+    );
+    assert_eq!(tree(&r, "deploy.sh"), "#!/bin/sh\necho edited\n");
+}
+
+/// The pure-mode case, with IDENTICAL content — the one every byte-comparing
+/// assertion is blind to.
+#[cfg(unix)]
+#[test]
+fn an_unstaged_chmod_with_no_content_change_survives() {
+    use std::os::unix::fs::PermissionsExt;
+    let r = Repo::new();
+    seed(&r);
+    r.stage("tool.sh", "#!/bin/sh\n");
+    r.commit("chore: seed");
+
+    r.stage("x.json", VALID);
+    std::fs::set_permissions(r.path("tool.sh"), std::fs::Permissions::from_mode(0o755))
+        .expect("chmod");
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "{}", run.output());
+
+    let mode = std::fs::metadata(r.path("tool.sh"))
+        .expect("stat")
+        .permissions()
+        .mode();
+    assert!(mode & 0o111 != 0, "mode-only change lost (mode {mode:o})");
+}
