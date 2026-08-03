@@ -6,7 +6,31 @@ mechanical pull-request list too, generated; this file is the part a human
 wrote, and the release workflow refuses to tag a version whose section is
 missing here.
 
-## Unreleased
+## v1.1.0 — 2026-08-04
+
+**The project is now amont** — French for upstream: catch it *en amont*,
+before it flows downstream. The old name, githooks, lost every search it
+entered to the githooks(5) man page, git's own documentation and half a
+dozen namesakes.
+
+This is a clean rename, deliberately without a compatibility layer:
+
+- Binaries: `amont` and `amont-fleet`; crates `amont`, `amont-runtime`,
+  `amont-fleet` on crates.io. The `githooks` crates stay at 1.0.2 and get
+  no further releases.
+- Config keys: `amont.severity.*`, `amont.commit.*`, `amont.testPushedTree`,
+  `amont.trusted`. Old `githooks.*` keys are not read — re-state what you
+  had tuned. `hook.skip` is unchanged.
+- The committed manifest is `.amont.conf` (rename yours, then re-run
+  `amont trust` — the record moved with the key). The `agents-md` span
+  markers are `<!-- amont:start/end -->`.
+- Installer env vars: `AMONT_BIN_DIR`, `AMONT_VERSION`. The runtime
+  override `GIT_HOOKS_BIN` keeps its name.
+- Installed shims from the githooks era resolve the old binary, not the
+  new one: re-run `amont install` per repo, or `amont-fleet fix --apply`
+  across a tree.
+
+Also in this release:
 
 - The README opens with the argument instead of an essay, states outright
   that the binary makes no network calls, and finally *shows* the fleet

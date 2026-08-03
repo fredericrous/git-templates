@@ -322,6 +322,14 @@ jobs:
             exit 0
           }
 
+          # Same skip for a latest release that predates the rename to amont:
+          # its assets carry the old name, and the script under test fetches
+          # the new one. The first amont release reactivates this on its own.
+          if (-not ($latest.assets | Where-Object { $_.name -like 'amont-*' })) {
+            Write-Host '::notice::latest release predates the amont rename - skipping the installer test'
+            exit 0
+          }
+
           $bin = Join-Path $env:RUNNER_TEMP 'amont-bin'
           & "$PWD\install\install.ps1" -BinDir $bin -Version $latest.tag_name
 
