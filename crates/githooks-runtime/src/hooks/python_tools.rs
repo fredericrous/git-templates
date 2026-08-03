@@ -23,7 +23,7 @@ use std::process::{Command, Stdio};
 /// the drift this prevents.
 pub const EXTS: &[&str] = &[".py", ".pyi"];
 
-fn tool_runs(root: &str, argv: &[&str]) -> bool {
+fn tool_runs(root: &str, argv: &[String]) -> bool {
     let Some((p, rest)) = argv.split_first() else {
         return false;
     };
@@ -46,12 +46,20 @@ fn main_worktree_venv(tool: &str) -> Option<String> {
 }
 
 /// Returns (argv, warned_about_unpinned).
+///
+/// Every branch yields a RESOLVED path, never a bare name. `Command::new` does
+/// no PATHEXT resolution, so a bare `uv`/`uvx`/`ruff` cannot execute
+/// `uv.exe`/`ruff.cmd` on Windows: the spawn fails with "program not found" and
+/// a `Severity::Block` check reports an installed tool as broken. That is the
+/// incident `common::program` was written for, and these were the last places
+/// still handing `Command` a bare name — three of them AFTER `which()` had
+/// already succeeded and thrown the answer away.
 fn resolve_python_tool(root: &str, tool: &str) -> Option<(Vec<String>, bool)> {
-    if which("uv").is_some() && tool_runs(root, &["uv", "run", "--no-sync", tool]) {
-        return Some((
-            vec!["uv".into(), "run".into(), "--no-sync".into(), tool.into()],
-            false,
-        ));
+    if let Some(uv) = which("uv") {
+        let argv = vec![uv, "run".into(), "--no-sync".into(), tool.into()];
+        if tool_runs(root, &argv) {
+            return Some((argv, false));
+        }
     }
     let local = format!("{root}/.venv/bin/{tool}");
     if Path::new(&local).is_file() {
@@ -60,11 +68,12 @@ fn resolve_python_tool(root: &str, tool: &str) -> Option<(Vec<String>, bool)> {
     if let Some(v) = main_worktree_venv(tool) {
         return Some((vec![v], false));
     }
-    if which(tool).is_some() {
-        return Some((vec![tool.into()], false));
+    // The path `which` already resolved, rather than probing and discarding it.
+    if let Some(found) = which(tool) {
+        return Some((vec![found], false));
     }
-    if which("uvx").is_some() {
-        return Some((vec!["uvx".into(), tool.into()], true));
+    if let Some(uvx) = which("uvx") {
+        return Some((vec![uvx, tool.into()], true));
     }
     None
 }

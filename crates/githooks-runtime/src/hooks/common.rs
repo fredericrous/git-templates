@@ -467,6 +467,56 @@ mod tests {
         );
     }
 
+    /// No check may hand `Command` a bare program name.
+    ///
+    /// `Command::new` does NO PATHEXT resolution, so `Command::new("npm")`
+    /// cannot execute `npm.cmd` and `Command::new("uvx")` cannot execute
+    /// `uvx.exe`: the spawn fails with "program not found" and a
+    /// `Severity::Block` check reports an installed tool as broken. That is the
+    /// incident `program()` exists for, and it kept recurring — `yamllint` and
+    /// three sites in `python_tools` were still doing it, THREE OF THEM after
+    /// `which()` had already succeeded and discarded the answer.
+    ///
+    /// A source scan rather than a runtime assertion because the failure only
+    /// reproduces on Windows, and the whole point is to catch the next one on
+    /// every platform. Comment lines are skipped: `program()`'s own doc quotes
+    /// the offending call. The needle is assembled from two pieces so this
+    /// module — which the scan also reads — does not match itself.
+    #[test]
+    fn no_hook_spawns_a_bare_program_name() {
+        let needle = concat!("Command", "::new(");
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/hooks");
+        let mut scanned = 0usize;
+        for entry in std::fs::read_dir(dir).expect("hooks dir").flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            scanned += 1;
+            let src = std::fs::read_to_string(&path).expect("read a hook module");
+            for (n, line) in src.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let Some(after) = line.split_once(needle) else {
+                    continue;
+                };
+                assert!(
+                    !after.1.starts_with('"'),
+                    "{}:{} spawns a bare name — route it through `program()` or \
+                     the path `which()` already resolved: {}",
+                    path.display(),
+                    n + 1,
+                    line.trim()
+                );
+            }
+        }
+        assert!(
+            scanned > 10,
+            "the scan found almost nothing: {scanned} files"
+        );
+    }
+
     #[test]
     fn first_existing_picks_the_earliest_present_name() {
         let dir = std::env::temp_dir().join("githooks-first-existing-test");
