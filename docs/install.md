@@ -31,12 +31,9 @@ staying quiet about it. Verifying what this binary is before putting it in a
 position to read every staged file is the argument the project makes about its
 own dependencies, applied to itself.
 
-`~/.local/bin` is not an arbitrary default: it is candidate 3 in the shim's own
-resolution order, so a binary there is found even by a shim whose baked path is
-wrong. It is not "the XDG location" either — the XDG Base Directory spec
-defines no binary directory at all; `~/.local/bin` is simply the convention
-systemd, pipx and uv all observe. (`$XDG_CONFIG_HOME` **is** honoured, for the
-template directory.)
+`~/.local/bin` is not an arbitrary default: it is a candidate in the shim's
+own resolution order, so a binary there is found even by a shim whose baked
+path is wrong — and it is the same convention systemd, pipx and uv observe.
 
 ### Where the binary ends up
 
@@ -72,13 +69,9 @@ not where the binary went. `githooks install` says so when it sees the
 combination, and offers the two ways out: link the binary where the shims look,
 or set `$GIT_HOOKS_BIN`.
 
-`$GITHOOKS_BIN_DIR` is deliberately **not** consulted by the shim. It is an
-install-time question, answered in the shell where `githooks install` ran; the
-shim runs inside git's environment during a commit, where that variable is
-almost never set — so honouring it there would be a knob that looks like it
-works and silently does not. The runtime override already exists and is
-`$GIT_HOOKS_BIN`; a second variable able to redirect which binary executes on
-every commit would double that surface for nothing.
+`$GITHOOKS_BIN_DIR` is an install-time setting only; the shim never reads it.
+The runtime override is `$GIT_HOOKS_BIN` — one variable able to redirect which
+binary executes on every commit is enough surface.
 
 Pin a version, or install elsewhere:
 

@@ -3,13 +3,6 @@
 Four different things get called "turning it off". They are listed here
 smallest first, because the right answer is usually the smallest one.
 
-> **Migrated from the old GitHub wiki, and corrected.** The wiki page described
-> `hook.skip` as a glob pattern — "`hook.skip=lint` would match
-> `pre-commit-lint-js` and `pre-commit-lint-json-yaml`" — and told you to opt
-> out by editing `exit $EXIT_CODE` out of a shell script, or by `rm`-ing
-> `.git/hooks`. None of that is true of the current implementation, and two
-> parts of it were actively harmful. See below.
-
 ## 1. One command: `--no-verify`
 
 ```sh
@@ -40,10 +33,8 @@ git config --add hook.skip pre-commit          # every pre-commit check
 ```
 
 **These are exact names, not globs.** `hook.skip e` reaches nothing at all, and
-skipping `lint-js` leaves `lint-json-yaml` alone. The old glob behaviour
-coupled checks whose names happened to share a prefix, which meant disabling
-one thing silently disabled another; [skip
-management](hook-skip-management.md) records why it went.
+skipping `lint-js` leaves `lint-json-yaml` alone — a skip can never silently
+couple two checks whose names happen to share a prefix.
 
 To see and undo:
 
@@ -66,10 +57,6 @@ git config githooks.severity.pre-commit warn
 The check still runs and still reports; it just stops failing the commit. You
 keep the signal, which is the thing `hook.skip` throws away. This is the right
 first move when adopting a check into an existing repository with a backlog.
-
-The old wiki's answer to this question was to edit `exit $EXIT_CODE` out of the
-`pre-commit` script. That worked, and it also meant your opt-out lived in a
-file the next update overwrote, invisible to anyone reading the repository.
 
 ## 4. Remove the hooks entirely
 
@@ -95,8 +82,7 @@ git config --global --unset init.templateDir
 
 ### Do not use `rm .git/hooks/*`
 
-The old wiki said "you can disable the hooks any time by removing the files in
-`$(git rev-parse --git-dir)/hooks/`". That glob deletes **every** hook in the
+That glob deletes **every** hook in the
 directory — including ones other tools installed and ones you wrote — in order
 to remove four files that belong to us. `githooks uninstall` exists precisely
 so that removing our hooks never means removing yours.

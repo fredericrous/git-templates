@@ -16,7 +16,7 @@
 # Project
 
 - [Ideas, not a roadmap](ideas.md)
-- [Similar projects](similar-projects.md)
+- [How it compares](similar-projects.md)
 
 # Design records
 

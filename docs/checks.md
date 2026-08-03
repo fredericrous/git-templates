@@ -92,8 +92,7 @@ operation anyway.
 `merge-conflict` and `ban-terms` are deliberately **not** paused. Those are
 exactly the checks you want during a resolution commit — leaving a conflict
 marker in the commit that *resolves* a merge is the bug, and importing a banned
-term from the other branch is the other one. An earlier version skipped the
-whole `pre-commit` stage during a cherry-pick, which silenced both.
+term from the other branch is the other one.
 
 ## `pre-push`
 
@@ -109,10 +108,10 @@ for a test suite.
 | `pre-push-run-tests-js` | `.js` `.jsx` `.ts` `.tsx` `.vue` + `package.json` | Runs each touched JS package's gate. |
 | `pre-push-cargo-test` | `.rs` + `Cargo.toml` | `cargo test`. |
 
-`pull-rebase`'s constraints are scar tissue worth naming. An older shell
-version ran `git pull --rebase origin HEAD`, where the remote ref `HEAD`
-resolves to the remote's *default* branch — so every push silently rebased onto
-main, autostashing uncommitted work along the way.
+`pull-rebase`'s constraints are load-bearing: rebasing onto the *default*
+branch instead of the branch's own upstream, or autostashing a dirty tree to
+do it, are exactly the ways a pre-push hook loses somebody's work — so it
+does neither, ever.
 
 ### What a push actually tests
 

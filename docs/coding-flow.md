@@ -1,9 +1,6 @@
 # Where the hooks fit in your flow
 
-Migrated from the old wiki's "Coding Flow" page. The narrative is the same; the
-screenshots are not, because the ones the wiki carried were of the zsh
-implementation that [the Rust migration](rust-migration.md) replaced, and a
-screenshot of software that no longer exists is worse than none.
+One commit, start to finish, with every place a hook steps in.
 
 ![githooks catching a commit and letting the fixed one through](assets/githooks-demo.gif)
 

@@ -1,14 +1,10 @@
 # Ideas, not a roadmap
 
-Migrated from the old wiki page of the same name. It was explicitly "not a
-roadmap but a bunch of ideas thrown there", and that is still what it is —
-nothing here is planned, promised, or assigned.
+Nothing here is planned, promised, or assigned. Ideas are kept with their
+objections attached, because a rejected-for-now idea with its reason is more
+useful than a list that quietly loses the ones somebody already thought about.
 
-Several of them have since landed, and are marked. The rest are kept because a
-rejected-for-now idea with its reason attached is more useful than a list that
-quietly loses the ones somebody already thought about.
-
-## Landed since the list was written
+## Already landed
 
 - **Lint more languages.** Python (`ruff`, `pyright`), Rust (`cargo fmt`,
   `clippy`, `cargo test`), YAML (`yamllint`) and Kubernetes (`kubeconform`,
