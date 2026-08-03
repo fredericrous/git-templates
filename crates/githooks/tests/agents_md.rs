@@ -112,3 +112,20 @@ fn respects_a_custom_path() {
     );
     assert!(!r.path("AGENTS.md").exists());
 }
+
+/// A `--path` with nothing after it (a typo, or a truncated command) must be
+/// a usage error, not a silent fall-through to the default `AGENTS.md` — that
+/// would mutate the wrong tracked file, mirroring `--stage`'s own handling of
+/// a missing value.
+#[test]
+fn a_path_flag_with_no_value_is_a_usage_error() {
+    let r = Repo::new();
+    r.commit("init");
+    let (code, _, stderr) = run_agents_md(&r, &["--path"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("--path requires a value"), "{stderr}");
+    assert!(
+        !r.path("AGENTS.md").exists(),
+        "must not fall back to writing the default file"
+    );
+}

@@ -83,7 +83,24 @@ fn main() {
             .filter_map(|a| a.to_str())
             .find(|a| !a.starts_with("--") && *a != "run")
             .map(str::to_owned);
-        let push = pushrefs::PushRefs::default();
+        let push = if named.as_deref().is_some_and(needs_synthetic_push_refs) {
+            // A pre-push check invoked standalone has no real push on the
+            // other end of stdin to read refs from. Left as `::default()`,
+            // `.get()` would either block on a TTY that has nothing coming,
+            // or (stdin redirected from `/dev/null`) read an empty ref list
+            // — which every pre-push check treats as "nothing to check" and
+            // passes, silently. Synthesize the one ref a standalone run can
+            // still answer for: what HEAD would push.
+            match pushrefs::synthetic_from_upstream() {
+                Ok(r) => pushrefs::PushRefs::preloaded(vec![r]),
+                Err(e) => {
+                    eprintln!("githooks: {e}");
+                    std::process::exit(2);
+                }
+            }
+        } else {
+            pushrefs::PushRefs::default()
+        };
         let hooks_dir = hooks_dir
             .clone()
             .unwrap_or_else(|| PathBuf::from(".git/hooks"));
@@ -133,9 +150,16 @@ fn main() {
 
     if rest.first().is_some_and(|a| a == "agents-md") || hook.as_deref() == Some("agents-md") {
         let check_only = rest.iter().any(|a| a == "--check");
-        let path = path_flag(&rest).unwrap_or_else(|| {
-            PathBuf::from(githooks_runtime::hooks::common::repo_root()).join("AGENTS.md")
-        });
+        let path = match path_flag(&rest) {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                PathBuf::from(githooks_runtime::hooks::common::repo_root()).join("AGENTS.md")
+            }
+            Err(e) => {
+                eprintln!("githooks: {e}");
+                std::process::exit(2);
+            }
+        };
         let code = if check_only {
             match githooks_runtime::agents_md::check(&path) {
                 Ok(githooks_runtime::agents_md::CheckResult::NotPresent) => {
@@ -250,12 +274,24 @@ fn stage_flag(rest: &[OsString]) -> Result<Option<Stage>, String> {
 }
 
 /// `--path <file>` for `agents-md`.
-fn path_flag(rest: &[OsString]) -> Option<PathBuf> {
+fn path_flag(rest: &[OsString]) -> Result<Option<PathBuf>, String> {
     let mut iter = rest.iter();
     while let Some(a) = iter.next() {
         if a == "--path" {
-            return iter.next().map(PathBuf::from);
+            let v = iter
+                .next()
+                .ok_or_else(|| "--path requires a value".to_string())?;
+            return Ok(Some(PathBuf::from(v)));
         }
     }
-    None
+    Ok(None)
+}
+
+/// Whether `githooks run <name>` needs a synthetic push ref list — `name` is
+/// either the `pre-push` entrypoint itself, or an individual check whose own
+/// declared stage is pre-push. Checked here, rather than left to `.get()` to
+/// discover empty, because empty and "nothing to check" are indistinguishable
+/// once a check has already started running.
+fn needs_synthetic_push_refs(name: &str) -> bool {
+    name == "pre-push" || registry::one_named(name).is_some_and(|c| c.stage() == Stage::PrePush)
 }

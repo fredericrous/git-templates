@@ -387,32 +387,7 @@ fn tracked_paths() -> Vec<String> {
 /// SYNTHESISES the one `PushRef` a standalone invocation has no other way to
 /// obtain.
 fn pushed_paths() -> Result<Vec<String>, String> {
-    // Same precedent as `hooks/pull_rebase.rs`: `None` means "no upstream",
-    // i.e. a branch that has never been pushed, and that is not an error —
-    // just nothing this flag can answer yet.
-    let Some(upstream) =
-        git::stdout(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
-    else {
-        return Err(
-            "no upstream configured for the current branch — nothing has been \
-             pushed yet, so --pushed has nothing to diff against"
-                .to_string(),
-        );
-    };
-    let Some(local_oid) = git::stdout(&["rev-parse", "HEAD"]) else {
-        return Err("could not resolve HEAD".to_string());
-    };
-    let Some(remote_oid) = git::stdout(&["rev-parse", "@{u}"]) else {
-        return Err(format!("could not resolve upstream {upstream}"));
-    };
-    let local_ref =
-        git::stdout(&["symbolic-ref", "-q", "HEAD"]).unwrap_or_else(|| "HEAD".to_string());
-    let synthetic = pushrefs::PushRef {
-        local_ref: local_ref.clone(),
-        local_oid,
-        remote_ref: local_ref,
-        remote_oid,
-    };
+    let synthetic = pushrefs::synthetic_from_upstream()?;
     Ok(pushrefs::changed_files(&[synthetic]))
 }
 

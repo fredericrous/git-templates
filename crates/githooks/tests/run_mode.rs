@@ -97,3 +97,40 @@ fn an_unknown_check_is_an_error_not_a_pass() {
         "should point somewhere:\n{out}"
     );
 }
+
+/// A pre-push check run standalone has no real push to read refs from. With
+/// no upstream configured either, there is nothing to synthesize one from —
+/// that must be a clear error, not a silent pass with an empty ref list
+/// (which is what an unset `PushRefs` looked like to `branch_protect`, since
+/// `githooks/tests/common::Repo::git` always closes the child's stdin).
+#[test]
+fn a_named_pre_push_check_with_no_upstream_errors_instead_of_passing_empty() {
+    let r = Repo::new();
+    r.stage("a.txt", "x\n");
+    r.commit("init");
+    let (code, out) = run(&r, &["pre-push-branch-protect"]);
+    assert_eq!(code, 2, "should refuse, not silently pass:\n{out}");
+    assert!(out.contains("upstream"), "{out}");
+}
+
+/// With an upstream configured, the standalone run synthesizes the same ref
+/// a real push would carry — proven here by a check whose verdict depends on
+/// which branch that ref names.
+#[test]
+fn a_named_pre_push_check_uses_the_upstream_as_its_push_ref() {
+    let r = Repo::new();
+    r.stage("a.txt", "x\n");
+    r.commit("init");
+    let origin = r.path(".git/test-origin.git");
+    r.git(&["init", "-q", "--bare", origin.to_str().unwrap()]);
+    r.git(&["remote", "add", "origin", origin.to_str().unwrap()]);
+    r.git(&["push", "-q", "--no-verify", "-u", "origin", "main"]);
+
+    // `main` is protected, and this push targets `main` — must be refused.
+    let (code, out) = run(&r, &["pre-push-branch-protect"]);
+    assert_ne!(
+        code, 0,
+        "a synthesized push to main must be blocked:\n{out}"
+    );
+    assert!(out.contains("main"), "{out}");
+}
