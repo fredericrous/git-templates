@@ -128,7 +128,12 @@ pub fn kube_linter(_args: &[std::ffi::OsString]) -> Outcome {
     // does not use, and does not report a gap it does not have.
     let configs = kube_linter_configs(&root);
     if configs.is_empty() {
-        warn("Kubernetes manifests staged but no .kube-linter*.yaml found; skipping");
+        // SILENT, like `yamllint::run` in exactly this situation. It used to
+        // print a skip notice, which fires on EVERY commit that touches
+        // `kubernetes/**.yaml` in a repository that has no `.kube-linter*.yaml`
+        // and never will — the same "a repo that never wanted yamllint was told
+        // to install it" noise `docs/hook-architecture.md` records these three
+        // checks being fixed for.
         return Outcome::Passed;
     }
     if which("kube-linter").is_none() {

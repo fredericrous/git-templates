@@ -724,9 +724,23 @@ pub fn install_signal_handler() {
             }
         }
     }
+    // Numeric literals rather than a `libc` import: this module deliberately
+    // ships dependency-free (see the `extern` block below and
+    // `scripts/check-no-deps.sh`), and unlike `sigset_t`-based APIs these four
+    // numbers are fixed by POSIX on every platform this runs on.
+    //
+    // SIGHUP was missing and is at least as likely as Ctrl-C: it is the
+    // terminal-closed and SSH-connection-dropped case, and a pre-commit
+    // interrupted that way orphaned the held store with nothing said. SIGQUIT
+    // is the Ctrl-\ sibling of SIGINT.
+    const SIGHUP: i32 = 1;
+    const SIGINT: i32 = 2;
+    const SIGQUIT: i32 = 3;
+    const SIGTERM: i32 = 15;
     unsafe {
-        libc_signal(2, on_signal as *const () as usize); // SIGINT
-        libc_signal(15, on_signal as *const () as usize); // SIGTERM
+        for sig in [SIGHUP, SIGINT, SIGQUIT, SIGTERM] {
+            libc_signal(sig, on_signal as *const () as usize);
+        }
     }
 }
 

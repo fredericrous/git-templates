@@ -346,11 +346,19 @@ fn restore_with_nothing_parked_is_fine() {
     assert!(out.status.success());
 }
 
-/// SIGINT mid-check must still restore. The handler itself only writes a byte
-/// to a pipe — a plain thread outside signal context does the actual restore
-/// — so this is the one test proving that indirection still ends where the
-/// old, simpler, signal-unsafe handler did: the tree back the way the author
-/// left it, and the process dead by the signal that hit it.
+/// A signal mid-check must still restore, for EVERY signal that is handled.
+///
+/// The handler itself only writes a byte to a pipe — a plain thread outside
+/// signal context does the actual restore — so this is the one test proving
+/// that indirection still ends where the old, simpler, signal-unsafe handler
+/// did: the tree back the way the author left it, and the process dead by the
+/// signal that hit it.
+///
+/// Parameterised over the signals a hook realistically meets. SIGHUP is the
+/// terminal-closed / SSH-dropped case and is at least as likely as Ctrl-C; it
+/// was NOT handled, so it orphaned the held store with nothing said. SIGQUIT
+/// (3) is handled too but deliberately left out of the table: it dumps core on
+/// some runners, which would make a passing suite look like a crash.
 ///
 /// `sleep 5` is the declared check: slow enough that the signal is guaranteed
 /// to land while it is still the thing running, cheap enough not to make a
@@ -358,7 +366,14 @@ fn restore_with_nothing_parked_is_fine() {
 /// waiting on it — `recv_timeout` below bounds that instead.
 #[cfg(unix)]
 #[test]
-fn sigint_mid_check_still_restores() {
+fn a_signal_mid_check_still_restores() {
+    for signal in ["-INT", "-HUP", "-TERM"] {
+        signal_mid_check_restores(signal);
+    }
+}
+
+#[cfg(unix)]
+fn signal_mid_check_restores(signal: &str) {
     let r = Repo::new();
     seed(&r);
     r.stage("x.json", VALID);
@@ -394,7 +409,7 @@ fn sigint_mid_check_still_restores() {
     }
 
     let signalled = Command::new("kill")
-        .arg("-INT")
+        .arg(signal)
         .arg(child.id().to_string())
         .status()
         .expect("run kill");
@@ -406,19 +421,24 @@ fn sigint_mid_check_still_restores() {
     });
     let status = rx
         .recv_timeout(std::time::Duration::from_secs(10))
-        .expect(
-            "githooks did not exit within 10s of SIGINT — \
-             the pipe/thread handoff deadlocked",
-        )
+        .unwrap_or_else(|_| {
+            panic!(
+                "githooks did not exit within 10s of {signal} — \
+                 the pipe/thread handoff deadlocked"
+            )
+        })
         .expect("wait on the child");
-    assert!(!status.success(), "SIGINT must not look like a clean pass");
+    assert!(
+        !status.success(),
+        "{signal} must not look like a clean pass"
+    );
 
     assert_eq!(
         tree(&r, "x.json"),
         BROKEN,
-        "unstaged work was not restored after SIGINT"
+        "unstaged work was not restored after {signal}"
     );
-    assert!(!store.exists(), "held files left behind after SIGINT");
+    assert!(!store.exists(), "held files left behind after {signal}");
 }
 
 /// A symlink is a link, not a file with those bytes in it. `fs::read` follows
