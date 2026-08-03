@@ -4,6 +4,24 @@
 //! lockfile beside it — e.g. the `.git/hooks/package.json` type-marker) never
 //! demands one, and in a monorepo one project's lockfile does not satisfy
 //! another's.
+//!
+//! ## Deliberately non-interactive
+//!
+//! This check runs on one of up to twenty WORKER THREADS in pre-commit's
+//! concurrent fan-out. It used to call `trust::confirm`, which blocks on
+//! `read_line` from `/dev/tty` — so the whole commit stopped dead while the
+//! other nineteen checks went on printing over the prompt, `thread::scope`
+//! refused to return until somebody answered, and the question itself was
+//! usually scrolled off the screen. The commit simply looked hung.
+//!
+//! A pre-scan phase would mean teaching the generic `&[&dyn Check]` fan-out
+//! about "checks that may ask a question", for exactly one check — and
+//! `confirm()` already returns false without a tty, so the interactive path was
+//! the exception rather than the rule. So there is no question: a forgotten
+//! lockfile FAILS, and the message names the two documented ways past it.
+//!
+//! `trust::confirm` itself stays; `install.rs` calls it from the
+//! single-threaded install path, where a prompt is the whole point.
 
 use super::common::{fail, hl, ok, repo_root, staged_files, warn};
 use crate::check::Outcome;
@@ -62,9 +80,7 @@ pub fn classify(staged: &[String], lock_exists: impl Fn(&str) -> bool) -> Verdic
     v
 }
 
-/// Ask on the terminal, when there is one. Never crash without it: the old
-/// `read < /dev/tty` aborted non-interactive commits with "device not
-/// configured". Headless callers bypass with `git -c hook.skip=package-lock`.
+/// Report, and never ask — see the module doc for why.
 pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
     let staged = staged_files(&[]);
     let root = repo_root();
@@ -84,17 +100,14 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
         ));
     }
 
-    // An orphan lock is a hard error; a merely-forgotten one can be confirmed past.
-    //
-    // `Warned`, not `Passed`: the lockfile really is out of sync and the commit
-    // goes through anyway. The human waived it, which is not the same as there
-    // being nothing to waive.
-    if v.orphan_lock.is_empty() && crate::trust::confirm("  Commit anyway? (y/N) ") {
-        return Outcome::Warned;
-    }
+    // Two documented ways past this, and the first is the one-time replacement
+    // for answering "y" on every commit: a severity downgrade keeps the signal
+    // and removes only the block, per-repository and visible in the dashboard.
     fail(&format!(
-        "Run {} and stage the lockfile, or bypass with {}",
+        "Run {} and stage the lockfile. To stop this blocking, {}; \
+         to bypass once, {}",
         hl("npm install"),
+        hl("git config githooks.severity.package-lock warn"),
         hl("git -c hook.skip=package-lock commit")
     ));
     Outcome::Failed
