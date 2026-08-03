@@ -25,14 +25,24 @@ INSTALL_BIN_DIR    ?= $(if $(GITHOOKS_BIN_DIR),$(GITHOOKS_BIN_DIR),$(HOME)/.loca
 DEBUG_BIN           = $(MAKEFILE_DIR)target/debug/githooks$(EXE)
 RELEASE_BIN         = $(MAKEFILE_DIR)target/release/githooks$(EXE)
 
-all: test
+# `check`, not `test`. A bare `make` used to run `test` alone, which is exactly
+# the set CI's `rust` job does NOT gate on — so the local default could be green
+# while CI was red on fmt or clippy without a single line of behaviour being
+# wrong. See `lint` below.
+all: check
 
-# +x only the scripts, never data files like package.json. Keyed on the
-# shebang rather than the extension, so the extensionless git entrypoints
-# (commit-msg, pre-commit, pre-push, prepare-commit-msg) get +x while
-# package.json (no shebang) is left untouched. POSIX sh — no zsh needed.
+# +x only the scripts, never data files. Keyed on the shebang rather than the
+# extension, so the extensionless git entrypoints (commit-msg, pre-commit,
+# pre-push, prepare-commit-msg) get +x. POSIX sh — no zsh needed.
+#
+# The loop used to also walk crates/githooks/tests/*. Those are `.rs` files with
+# no shebang, so every iteration read a first line and did nothing: a leftover
+# from when the suites were executable zsh scripts. The comment likewise still
+# excused "never data files like package.json" — there has been no package.json
+# in templates/hooks since the shims replaced it. Only the four shims are
+# executable artifacts now, so only they are walked.
 chmodx:
-	@for f in $(MAKEFILE_DIR)crates/githooks/tests/* $(SRC_CTRL_HOOKS); do \
+	@for f in $(SRC_CTRL_HOOKS); do \
 		[ -f "$$f" ] || continue; \
 		if head -1 "$$f" | grep -q '^#!'; then chmod +x "$$f"; fi; \
 	done
@@ -48,6 +58,32 @@ build:
 test: chmodx
 	@./scripts/check-no-deps.sh
 	@cargo test $(if $(RUN),--test $(RUN)) -- --show-output
+
+# EXACTLY what CI's `rust` job runs, in the same order, with the same flags.
+# Keep them identical: the point of this target is that a contributor can
+# reproduce a red CI locally, and any drift here silently removes that.
+#
+# It did not exist. `make test` ran check-no-deps + `cargo test`, the README
+# told contributors "`make test` runs the tests", and CI additionally gated on
+# these two — so a commit that was fmt-dirty or tripped a clippy lint passed
+# every local target the repo offered and went red on push.
+#
+# WARNING — there is a THIRD clippy invocation, and it is stricter than this
+# one. `githooks`' own `pre-commit-clippy` (crates/githooks-runtime/src/hooks/
+# rust_tools.rs) runs `cargo clippy --workspace --all-targets --all-features --
+# -D warnings` on every Rust commit in this repo. CI's is `--all-targets` only:
+# no `--workspace`, no `--all-features`. So the hook can reject a commit that
+# this target and CI both accept. Unifying them is a DECISION about which is
+# authoritative — the hook's wider net, or CI's cheaper one — not a quiet edit
+# to whichever line you happened to be looking at. Left divergent on purpose,
+# and stated here so the next person finds it before it surprises them.
+lint:
+	@cargo fmt --check
+	@cargo clippy --all-targets -- -D warnings
+
+# The full local gate: everything CI's `rust` job and `hooks` job assert.
+# `test` stays lint-free so the inner loop is a `cargo test` and nothing else.
+check: lint test
 
 # Installation lives in the BINARY, not here: `githooks install`.
 #
@@ -89,11 +125,11 @@ install-fleet:
 # This was a shell script until a Rust plan was proved to remove exactly the
 # same set on a fixture covering every actionable case. Dry-run by default;
 # APPLY=1 to write.
-propagate: 
+propagate:
 	@cargo run -q -p githooks-fleet -- fix $(if $(APPLY),--apply,)
 
 # The commit path must stay dependency-free; see the script.
 deps:
 	@./scripts/check-no-deps.sh
 
-.PHONY: all chmodx build test install install-fleet propagate deps
+.PHONY: all chmodx build test lint check install install-fleet propagate deps
