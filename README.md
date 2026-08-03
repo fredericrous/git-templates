@@ -16,13 +16,23 @@ name, and uninstall removes exactly what install wrote.
 
 ## Install
 
+**Linux and macOS**
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/fredericrous/githooks/main/install/install.sh | sh
 ```
 
-That downloads a release binary, verifies it against the published
-`SHA256SUMS`, and puts it in `~/.local/bin`. It **enables nothing**: hooks are
-turned on per repository, by you, afterwards.
+**Windows** (PowerShell — the line above is POSIX `sh` and only reaches
+Windows through Git Bash)
+
+```powershell
+irm https://raw.githubusercontent.com/fredericrous/githooks/main/install/install.ps1 | iex
+```
+
+Either one downloads a release binary, verifies it against the published
+`SHA256SUMS`, and puts it where the hooks already look — `~/.local/bin`, or
+`%USERPROFILE%\.local\bin`. Both **enable nothing**: hooks are turned on per
+repository, by you, afterwards.
 
 ```sh
 cd <your-repo> && githooks install   # this repository only
