@@ -1,5 +1,10 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Questions and ideas
+    url: https://github.com/fredericrous/githooks/discussions
+    about: >-
+      "Does this work with X", "why does it behave like Y", or a check you think
+      belongs here — Discussions, so the issue tracker stays a record of defects.
   - name: Security vulnerability
     url: https://github.com/fredericrous/githooks/security/advisories/new
     about: >-

@@ -1,7 +1,13 @@
-# `githooks fleet` — a TUI for the 96-repo hook fleet
+# `githooks-fleet` — a TUI for the 96-repo hook fleet
 
 Status: **built**. PRs #41-#47 implement v1 and v2; `scripts/propagate.sh` is
 gone, replaced by `githooks-fleet fix`.
+
+![the githooks-fleet dashboard over a small fleet: overview, repo detail, and the hook-centric view](assets/fleet-demo.gif)
+
+The recording is real: real repositories, shims written by the release binary,
+scanned by the shipped dashboard — rebuilt any time with
+[`assets/fleet-demo.sh`](assets/fleet-demo.sh).
 
 **The `s` toggle for `hook.skip` is BUILT.** This paragraph called it
 deliberately unbuilt for longer than it was true. `s` toggles the highlighted

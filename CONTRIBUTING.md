@@ -6,6 +6,8 @@ convention this repository enforces on itself.
 
 By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md). To
 report a vulnerability, do **not** open an issue: see [SECURITY.md](SECURITY.md).
+For questions and ideas that are not yet defects, use
+[Discussions](https://github.com/fredericrous/githooks/discussions).
 
 ## Setup
 
@@ -102,7 +104,8 @@ that is right for *one* repository can be declared in that repository's
 
 ## Tests
 
-There are 634 of them and they are the reason changes here can be made at all.
+There are over six hundred of them and they are the reason changes here can be
+made at all.
 Two conventions matter:
 
 **Test the property, not the line.** Name the test after the guarantee it
@@ -173,6 +176,10 @@ To get a message past it, fix the message.
    the PR — a page missing from `docs/SUMMARY.md` fails there.
 4. Say **why** in the description. A diff shows what changed; the review needs
    the alternative you rejected.
+5. If an upgrader would notice the change, say so under `Unreleased` in
+   [CHANGELOG.md](CHANGELOG.md) — in sentences, what they get, not what the
+   diff did. The release guard refuses to tag a version whose section is
+   missing, and the published notes open with it.
 
 Documentation lives in `docs/`, versioned with the code and published as a
 book. It is not a wiki, deliberately: a wiki cannot be reviewed in a pull
