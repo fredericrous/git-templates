@@ -309,8 +309,21 @@ impl Check for External {
         // having its result discarded. Gating only the re-staging let the
         // command edit files with `githooks.fix` off, which is precisely the
         // surprise the gate exists to prevent.
+        //
+        // `Unavailable`, not `Passed`. `check.rs` defines `Unavailable` as
+        // "COULD NOT RUN — a tool is missing, or the opt-in config is absent",
+        // which is exactly this; `Passed` is the one verdict it must not
+        // report, because the dispatcher's roll-up and the fleet dashboard
+        // then show a check that never executed as clean. With a message,
+        // because every other `Unavailable` in this codebase says what was
+        // missing and an unexplained count on every commit is worse than none.
         if fix == Fix::Rewrite && !crate::hooks::common::fixing_enabled() {
-            return Outcome::Passed;
+            crate::hooks::common::warn(&format!(
+                "{}: declares fix, and {} is off — not run",
+                crate::ui::highlight(&self.short_name),
+                crate::ui::highlight("githooks.fix")
+            ));
+            return Outcome::Unavailable;
         }
 
         let in_scope = match self.stage {

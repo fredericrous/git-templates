@@ -87,6 +87,12 @@ fn manifest_with_fixer(r: &Repo) {
 
 /// The default. A hook that edits your files unasked is a larger surprise than
 /// one that complains.
+///
+/// It is also a check that DID NOT RUN, and that used to be reported as
+/// `Outcome::Passed` — the one verdict it must not have, because the
+/// dispatcher's roll-up and the fleet dashboard then show a check that never
+/// executed as clean. `check.rs` defines `Unavailable` as "could not run — a
+/// tool is missing, or the opt-in config is absent", which is exactly this.
 #[test]
 fn fixing_is_off_unless_asked_for() {
     let r = Repo::new();
@@ -102,6 +108,19 @@ fn fixing_is_off_unless_asked_for() {
         "it edited a file without being asked"
     );
     assert!(!run.says("fixed and re-staged"), "{}", run.output());
+    // Said out loud, and counted as a gap rather than a pass…
+    assert!(
+        run.says("could not run"),
+        "a check that never ran was rolled up as clean:\n{}",
+        run.output()
+    );
+    assert!(
+        run.says("githooks.fix"),
+        "the gap must name its reason:\n{}",
+        run.output()
+    );
+    // …while still not blocking the commit.
+    assert!(run.passed(), "{}", run.output());
 }
 
 #[test]
