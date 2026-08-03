@@ -112,17 +112,17 @@ jobs:
           target_upper=$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')
           echo "CARGO_TARGET_${target_upper}_LINKER=${{ matrix.linker }}" >> "$GITHUB_ENV"
 
-      # Both binaries: `githooks` is the hook runtime and the only one anybody
-      # strictly needs; `githooks-fleet` is the opt-in dashboard, and shipping
+      # Both binaries: `amont` is the hook runtime and the only one anybody
+      # strictly needs; `amont-fleet` is the opt-in dashboard, and shipping
       # it here is what stops it being a build-from-source-only feature.
-      - run: cargo build --release --target ${{ matrix.target }} --bin githooks --bin githooks-fleet
+      - run: cargo build --release --target ${{ matrix.target }} --bin amont --bin amont-fleet
 
       - name: Archive
         id: archive
         run: |
           set -euo pipefail
           version="${{ needs.guard.outputs.version }}"
-          name="githooks-${version}-${{ matrix.target }}"
+          name="amont-${version}-${{ matrix.target }}"
           staging="dist/$name"
           mkdir -p "$staging"
           # The shims travel WITH the binary. A release that shipped only the
@@ -131,13 +131,13 @@ jobs:
           cp -r templates "$staging/"
           cp README.md LICENSE "$staging/"
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/githooks.exe" "$staging/"
-            cp "target/${{ matrix.target }}/release/githooks-fleet.exe" "$staging/"
+            cp "target/${{ matrix.target }}/release/amont.exe" "$staging/"
+            cp "target/${{ matrix.target }}/release/amont-fleet.exe" "$staging/"
             (cd dist && 7z a "$name.zip" "$name" > /dev/null)
             echo "asset=dist/$name.zip" >> "$GITHUB_OUTPUT"
           else
-            cp "target/${{ matrix.target }}/release/githooks" "$staging/"
-            cp "target/${{ matrix.target }}/release/githooks-fleet" "$staging/"
+            cp "target/${{ matrix.target }}/release/amont" "$staging/"
+            cp "target/${{ matrix.target }}/release/amont-fleet" "$staging/"
             (cd dist && tar czf "$name.tar.gz" "$name")
             echo "asset=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
           fi
@@ -150,7 +150,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ needs.guard.outputs.version }}"
-          bin="dist/githooks-${version}-${{ matrix.target }}/githooks"
+          bin="dist/amont-${version}-${{ matrix.target }}/amont"
           # An `if`, not `[ … ] && …`: under `set -e` a false test as the last
           # command of a line is a FAILING step, so the short form would abort
           # every non-Windows target here.
@@ -227,7 +227,7 @@ jobs:
           cat dist/SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
-  # crates.io, so `cargo install githooks` works.
+  # crates.io, so `cargo install amont` works.
   #
   # Here rather than from a laptop for the usual reason a release belongs in CI:
   # the bytes published should come from a checkout of the tag, built by
@@ -254,10 +254,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Order is a dependency order, not a preference: `githooks` depends on
-      # `githooks-runtime` and crates.io resolves that by VERSION, so the
+      # Order is a dependency order, not a preference: `amont` depends on
+      # `amont-runtime` and crates.io resolves that by VERSION, so the
       # dependency has to exist in the index before the dependent is accepted.
-      # `githooks-fleet` depends on the runtime too.
+      # `amont-fleet` depends on the runtime too.
       #
       # Each publish is skipped when that exact version is already on crates.io,
       # so re-running a release after a partial failure resumes instead of
@@ -282,13 +282,13 @@ jobs:
           #     "Published X". Polling on top of that was redundant.
           #   * the crates.io API rate-limits datacenter IPs, so the poll saw
           #     non-200 for a crate that had just published successfully and
-          #     failed the job ten minutes later. githooks-runtime 1.0.1 was
+          #     failed the job ten minutes later. amont-runtime 1.0.1 was
           #     live the whole time.
           #
           # Idempotency comes from cargo's own answer instead. Re-running a
           # release must not fail on a crate that is already up, and "already
           # uploaded" is exactly that answer — anything else is a real failure.
-          for crate in githooks-runtime githooks githooks-fleet; do
+          for crate in amont-runtime amont amont-fleet; do
             echo "→ publishing $crate $VERSION"
             if out=$(cargo publish -p "$crate" 2>&1); then
               printf '%s\n' "$out"
@@ -304,4 +304,4 @@ jobs:
           done
 
           echo "### Published to crates.io" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`cargo install githooks\` — v$VERSION" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`cargo install amont\` — v$VERSION" >> "$GITHUB_STEP_SUMMARY"

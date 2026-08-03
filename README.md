@@ -1,10 +1,10 @@
-# githooks
+# amont
 
 **Catch the bad commit before it exists — and take the whole thing back out in one command.**
 
-[![CI](https://github.com/fredericrous/githooks/actions/workflows/ci.yaml/badge.svg)](https://github.com/fredericrous/githooks/actions/workflows/ci.yaml)
-[![Release](https://img.shields.io/github/v/release/fredericrous/githooks?label=release)](https://github.com/fredericrous/githooks/releases/latest)
-[![License](https://img.shields.io/github/license/fredericrous/githooks)](LICENSE)
+[![CI](https://github.com/fredericrous/amont/actions/workflows/ci.yaml/badge.svg)](https://github.com/fredericrous/amont/actions/workflows/ci.yaml)
+[![Release](https://img.shields.io/github/v/release/fredericrous/amont?label=release)](https://github.com/fredericrous/amont/releases/latest)
+[![License](https://img.shields.io/github/license/fredericrous/amont)](LICENSE)
 
 A single Rust binary that checks `git commit` and `git push` — no YAML to
 write, no runtime to install, nothing to configure before it is useful.
@@ -14,15 +14,15 @@ write, no runtime to install, nothing to configure before it is useful.
   languages your repository actually uses, branch rules, your test suite —
   and each one fires only where the repository has opted into its tool.
 - **A cloned repository cannot run code on your machine.** Checks a repository
-  declares for itself are inert until you review them and say `githooks trust`
+  declares for itself are inert until you review them and say `amont trust`
   — a gate pre-commit, lefthook and husky do not have.
 - **Nothing on the commit path but `std`.** The hook binary links no external
   crates, and CI fails any build that changes that.
-- **Leaving is one command.** `githooks uninstall` removes exactly the four
+- **Leaving is one command.** `amont uninstall` removes exactly the four
   shims install wrote; a hook you or another tool put there is named and left
   alone.
 
-![githooks catching a commit and letting the fixed one through](docs/assets/githooks-demo.gif)
+![amont catching a commit and letting the fixed one through](docs/assets/amont-demo.gif)
 
 How that stacks up against pre-commit, lefthook and husky, feature by feature:
 [the full comparison](docs/similar-projects.md).
@@ -32,14 +32,14 @@ How that stacks up against pre-commit, lefthook and husky, feature by feature:
 **Linux and macOS**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fredericrous/githooks/main/install/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/fredericrous/amont/main/install/install.sh | sh
 ```
 
 **Windows** (PowerShell — the line above is POSIX `sh` and only reaches
 Windows through Git Bash)
 
 ```powershell
-irm https://raw.githubusercontent.com/fredericrous/githooks/main/install/install.ps1 | iex
+irm https://raw.githubusercontent.com/fredericrous/amont/main/install/install.ps1 | iex
 ```
 
 Either one downloads a release binary, verifies it against the published
@@ -48,19 +48,19 @@ Either one downloads a release binary, verifies it against the published
 repository, by you, afterwards.
 
 ```sh
-cd <your-repo> && githooks install   # this repository only
-githooks list                        # what would run here, and why not
+cd <your-repo> && amont install   # this repository only
+amont list                        # what would run here, and why not
 ```
 
 Prefer not to pipe a script into a shell? Download a binary and its checksum
-from [Releases](https://github.com/fredericrous/githooks/releases/latest) —
+from [Releases](https://github.com/fredericrous/amont/releases/latest) —
 prebuilt for Linux (gnu/musl, x86_64 and aarch64), macOS (Intel and Apple
 silicon) and Windows. Or build from source: `cargo build --release`.
 
-From [crates.io](https://crates.io/crates/githooks):
+From [crates.io](https://crates.io/crates/amont):
 
 ```sh
-cargo install githooks
+cargo install amont
 ```
 
 Or with Homebrew:
@@ -68,14 +68,14 @@ Or with Homebrew:
 ```sh
 brew tap fredericrous/tap
 brew trust fredericrous/tap    # Homebrew asks this of every third-party tap
-brew install githooks
+brew install amont
 ```
 
 ## Uninstall
 
 ```sh
-githooks uninstall              # this repository
-githooks uninstall --binary     # …and remove ~/.local/bin/githooks too
+amont uninstall              # this repository
+amont uninstall --binary     # …and remove ~/.local/bin/amont too
 ```
 
 Uninstall is listed second on purpose. These hooks can block a commit, so the
@@ -83,7 +83,7 @@ honest question to answer first is how you get out — and the answer is that
 `uninstall` removes our four shims and **nothing else**. A hook you wrote
 yourself is left where it is and named in the output, whatever it is; a hook it
 cannot even read is named too rather than passed over in silence. Your
-`hook.skip` and `githooks.severity` settings are never touched, because those
+`hook.skip` and `amont.severity` settings are never touched, because those
 are your statements about your repository.
 
 This is also why the README does not tell you to run
@@ -96,7 +96,7 @@ To turn off one check permanently, see [Turning a check off, or down](#turning-a
 
 ## What actually runs
 
-`githooks list` answers that for the repository you are standing in, and it is
+`amont list` answers that for the repository you are standing in, and it is
 the honest answer rather than the catalogue: most checks are **inert** in most
 repositories, because a repo with no `ruff.toml` never needs ruff.
 
@@ -126,11 +126,11 @@ itself. The full list, with what each one needs before it fires, is in
 **Per repository** — the default, and nothing runs anywhere you did not ask:
 
 ```sh
-cd <your-repo> && githooks install
-githooks-fleet install --root ~/Developer   # or in bulk, across many repos
+cd <your-repo> && amont install
+amont-fleet install --root ~/Developer   # or in bulk, across many repos
 ```
 
-`githooks install --force` replaces a hook the installer would otherwise
+`amont install --force` replaces a hook the installer would otherwise
 refuse — one carrying no marker of ours, or a symlink. Even `--force` never
 writes a tracked file or a directory. The full semantics:
 [what `--force` will and will not do](docs/install.md#--force-and-what-it-will-not-do).
@@ -146,31 +146,31 @@ clone**, so from then on every repository you clone runs these hooks without
 being asked again. That is the convenience, and it is worth having.
 
 It is also a standing grant, so it is worth stating what you granted. A cloned
-repository can declare its own checks in `.githooks.conf`, and with this key
-set those are one `githooks trust` away from running on your first commit in a
+repository can declare its own checks in `.amont.conf`, and with this key
+set those are one `amont trust` away from running on your first commit in a
 repository you may have cloned only to read. If you set this, **trust
 deliberately** rather than letting installation be the moment you decided.
 
 ## One view across every repo
 
-`githooks-fleet` — installed separately, on purpose — answers the questions a
+`amont-fleet` — installed separately, on purpose — answers the questions a
 directory full of repositories accumulates: which repos are covered, which
 shims went stale after an upgrade, what every check is doing where, and which
 repository is quietly carrying a `hook.skip` somebody forgot.
 
-![the githooks-fleet dashboard scanning a fleet of repositories](docs/assets/fleet-demo.gif)
+![the amont-fleet dashboard scanning a fleet of repositories](docs/assets/fleet-demo.gif)
 
 ```sh
-githooks-fleet install --root ~/Developer   # shims into every repo at once
-githooks-fleet                              # report the fleet
-githooks-fleet tui                          # the dashboard above
+amont-fleet install --root ~/Developer   # shims into every repo at once
+amont-fleet                              # report the fleet
+amont-fleet tui                          # the dashboard above
 ```
 
 Design record: [the fleet dashboard](docs/fleet-dashboard.md).
 
 ## Trust: a repository you clone cannot run its own checks
 
-`.githooks.conf` is committed — that is the point, a team shares a check by
+`.amont.conf` is committed — that is the point, a team shares a check by
 committing it. The consequence is that cloning a repository and committing to
 it would otherwise run commands that repository chose, and neither of those
 acts is one anybody performs *as a decision about trust*.
@@ -178,9 +178,9 @@ acts is one anybody performs *as a decision about trust*.
 So a cloned repository's declared checks are **inert until you say otherwise**:
 
 ```sh
-githooks trust          # show what this repo declares, and accept it
-githooks trust --show   # what is trusted here
-githooks trust --revoke
+amont trust          # show what this repo declares, and accept it
+amont trust --show   # what is trusted here
+amont trust --revoke
 ```
 
 The record is keyed on the file's **content**, not its path, so a `git pull`
@@ -203,12 +203,12 @@ git config --add hook.skip clippy              # that check, on either trigger
 git config --add hook.skip pre-commit          # every pre-commit check
 ```
 
-`githooks.severity.<key>` takes the same three, and keeps the signal — the
+`amont.severity.<key>` takes the same three, and keeps the signal — the
 check still runs and still reports, it just stops failing the commit:
 
 ```sh
-git config githooks.severity.clippy warn
-git config githooks.severity.pre-commit warn
+git config amont.severity.clippy warn
+git config amont.severity.pre-commit warn
 ```
 
 Where several keys reach one check the most specific wins: full id, then short
@@ -225,7 +225,7 @@ writing cannot go on silently disabling things. More in
 opinions are adjustable in themselves:
 
 ```sh
-githooks setup     # four questions, current values as the defaults
+amont setup     # four questions, current values as the defaults
 ```
 
 It asks where the type's gitmoji goes — `none` (the default: your subject,
@@ -235,9 +235,9 @@ description budget and the body wrap column. Then it prints the exact
 them to a teammate.
 
 ```sh
-git config githooks.commit.gitmoji suffix        # feat: add a cart ✨
-git config githooks.commit.descriptionMax 68     # still fits a 72-col subject
-git config githooks.commit.bodyWrap 0            # leave my stack traces alone
+git config amont.commit.gitmoji suffix        # feat: add a cart ✨
+git config amont.commit.descriptionMax 68     # still fits a 72-col subject
+git config amont.commit.bodyWrap 0            # leave my stack traces alone
 ```
 
 The limits measure what you wrote, so a gitmoji never eats your budget, and
@@ -246,7 +246,7 @@ re-running over an amended message changes nothing. Full reference:
 
 ## Custom checks
 
-A repository can declare checks of its own in a committed `.githooks.conf`:
+A repository can declare checks of its own in a committed `.amont.conf`:
 
 ```
 # stage       name        scope   severity  command
@@ -255,16 +255,16 @@ pre-push      smoke       *       warn      make smoke
 ```
 
 They run alongside the built-ins, obey the same `hook.skip` and
-`githooks.severity` controls, and are inert until trusted. Full reference:
+`amont.severity` controls, and are inert until trusted. Full reference:
 [custom checks](docs/custom-checks.md).
 
 ## Running the checks yourself
 
 ```sh
-githooks run                    # would my commit pass? (the staged set)
-githooks run --all-files        # does my working tree pass? (git ls-files)
-githooks run pre-commit-prettier
-githooks list                   # what would run here, and why not
+amont run                    # would my commit pass? (the staged set)
+amont run --all-files        # does my working tree pass? (git ls-files)
+amont run pre-commit-prettier
+amont list                   # what would run here, and why not
 ```
 
 The two questions are different on purpose. `--all-files` on a dirty tree
@@ -279,7 +279,7 @@ so. That is fast and usually what you want, but it is not what you are pushing:
 an uncommitted fix makes a broken commit look green.
 
 ```sh
-git config githooks.testPushedTree true
+git config amont.testPushedTree true
 ```
 
 turns on the accurate answer — the suite runs in a throwaway checkout of the
@@ -288,19 +288,19 @@ and a build that cannot reuse your `target/` cache, which is why it is opt-in.
 
 ## For coding agents
 
-`githooks list --json` is the same answer as `githooks list`, machine-readable:
+`amont list --json` is the same answer as `amont list`, machine-readable:
 every check's declared and effective severity, whether it fires here and why
 not, and its command if it is a declared external. `--stage` filters to one
 trigger; `--pushed` scopes to what your *next push* would carry (`@{u}..HEAD`)
 rather than the whole tracked tree.
 
 ```sh
-githooks list --json --stage pre-push --pushed
-githooks agents-md          # write a self-verifying pointer into AGENTS.md
-githooks agents-md --check  # exit non-zero if it has drifted
+amont list --json --stage pre-push --pushed
+amont agents-md          # write a self-verifying pointer into AGENTS.md
+amont agents-md --check  # exit non-zero if it has drifted
 ```
 
-`agents-md` only ever touches a `<!-- githooks:start -->` / `<!-- githooks:end -->`
+`agents-md` only ever touches a `<!-- amont:start -->` / `<!-- amont:end -->`
 span, so the rest of the file stays yours.
 
 ## Why you can let this near your commits
@@ -309,10 +309,10 @@ A prompt theme is cosmetic. This blocks commits and pushes, reads every staged
 file, and runs with your credentials while nobody is watching — so the claim it
 has to earn is not "delightful", it is "harmless".
 
-- **The commit path links no external crates.** `githooks` and
-  `githooks-runtime` are std-only, and `scripts/check-no-deps.sh` fails a build
+- **The commit path links no external crates.** `amont` and
+  `amont-runtime` are std-only, and `scripts/check-no-deps.sh` fails a build
   that changes that — fails *closed*, so a cargo error or an unreachable
-  registry is a failure rather than a reassuring green tick. `githooks-fleet`
+  registry is a failure rather than a reassuring green tick. `amont-fleet`
   takes dependencies quite happily; it is installed separately and runs when
   asked.
 - **No network, ever.** The binary phones nothing home — no telemetry, no
@@ -345,7 +345,7 @@ from source instead — Git for Windows ships `bash` and coreutils but not
 
 ```sh
 cargo build --release
-./target/release/githooks install
+./target/release/amont install
 ```
 
 On macOS/Linux `~/.config/git/git-templates` is usually a symlink to the
@@ -354,12 +354,12 @@ not create symlinks without Developer Mode or elevation, so point git straight
 at the checkout instead:
 
 ```sh
-git config --global init.templateDir 'C:/path/to/githooks/templates'
+git config --global init.templateDir 'C:/path/to/amont/templates'
 ```
 
 Nothing else changes. The shims never need the symlink: they resolve the binary
-at runtime, trying `$GIT_HOOKS_BIN`, the baked path, `~/.local/bin/githooks`
-and `~/.local/bin/githooks.exe`, then `PATH`.
+at runtime, trying `$GIT_HOOKS_BIN`, the baked path, `~/.local/bin/amont`
+and `~/.local/bin/amont.exe`, then `PATH`.
 
 ## Requirements
 
@@ -395,9 +395,9 @@ published as a book:
 Everything is Rust, in `crates/`:
 
 ```
-crates/githooks-runtime/   the checks, registry and dispatchers. std only.
-crates/githooks/           the hook binary. Runs on every commit. std only.
-crates/githooks-fleet/     the dashboard and the fleet fixer. Opt-in.
+crates/amont-runtime/   the checks, registry and dispatchers. std only.
+crates/amont/           the hook binary. Runs on every commit. std only.
+crates/amont-fleet/     the dashboard and the fleet fixer. Opt-in.
 ```
 
 `make check` is the CI-parity target — run it before you push. Setup, the
@@ -405,8 +405,8 @@ zero-dependency rule and when reopening it is legitimate, the house test style
 and the commit convention are all in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Questions, "does this work with X", ideas for checks:
-[Discussions](https://github.com/fredericrous/githooks/discussions). Bugs:
-[issues](https://github.com/fredericrous/githooks/issues).
+[Discussions](https://github.com/fredericrous/amont/discussions). Bugs:
+[issues](https://github.com/fredericrous/amont/issues).
 
 By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 

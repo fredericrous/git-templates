@@ -1,0 +1,30 @@
+[package]
+name = "amont-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Inherited from [workspace.package]: 1.74, the floor this crate actually sets
+# — `std::io::Error::other` in staged_only.rs is the newest std API in the tree.
+rust-version.workspace = true
+description = "The amont hook logic: registry, dispatchers, checks and the trust model"
+readme = "../../README.md"
+keywords = ["git", "git-hooks", "pre-commit", "hooks"]
+categories = ["development-tools"]
+
+# NO DEPENDENCIES — a default to argue against, not a prohibition.
+#
+# The hook binary depends on this crate, so anything added here reaches the
+# commit path transitively, and that path runs on every commit in 96 repos with
+# the developer's credentials. The reason is SUPPLY CHAIN: every transitive
+# crate is code executing in that position. It is NOT that a dependency would
+# recreate the node/zsh problem — those were runtime requirements on PATH, while
+# a crate is compiled in and installs nothing. See scripts/check-no-deps.sh for
+# the full argument, including when it is reasonable to override this.
+#
+# amont-fleet depends on this crate too and pulls ratatui quite happily,
+# because it is opt-in and does not run on every commit.
+#
+# CI asserts this emptiness — see the `deps` job.
+[dependencies]

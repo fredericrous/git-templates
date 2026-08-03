@@ -1,7 +1,7 @@
 # Changelog
 
 What an upgrader gets, in sentences. Each [GitHub
-release](https://github.com/fredericrous/githooks/releases) carries the
+release](https://github.com/fredericrous/amont/releases) carries the
 mechanical pull-request list too, generated; this file is the part a human
 wrote, and the release workflow refuses to tag a version whose section is
 missing here.
@@ -19,6 +19,9 @@ missing here.
   templates point there.
 
 ## v1.0.2 — 2026-08-03
+
+These releases shipped under the project's original name, githooks; the
+entries keep it, because they describe what was actually released.
 
 - `cargo install githooks` and the Homebrew tap
   (`brew install fredericrous/tap/githooks`) are live and documented.

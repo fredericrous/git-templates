@@ -2,27 +2,27 @@
 
 Four git hooks are installed — `pre-commit`, `commit-msg`,
 `prepare-commit-msg`, `pre-push` — and behind them twenty named checks, plus
-any your repository declares in [`.githooks.conf`](custom-checks.md).
+any your repository declares in [`.amont.conf`](custom-checks.md).
 
 This page is the catalogue. **It is not the answer to "what will run in my
 repository"** — for that, ask:
 
 ```sh
-githooks list                       # here, and why not
-githooks list --stage pre-push      # one trigger
-githooks list --json                # the same, machine-readable
+amont list                       # here, and why not
+amont list --stage pre-push      # one trigger
+amont list --json                # the same, machine-readable
 ```
 
 Most checks are **inert** in most repositories, by design. A check fires only
 when the commit touches files it understands *and* the repository carries the
 configuration that opts into that tool. A JavaScript repository never invokes
-cargo; a repository with no `ruff.toml` never needs ruff. `githooks list`
+cargo; a repository with no `ruff.toml` never needs ruff. `amont list`
 prints the condition each inert check is waiting on.
 
 ## Reading the table
 
 - **id** — `<trigger>-<name>`. Any of the three spellings (full id, short name,
-  trigger) can address it in `hook.skip` and `githooks.severity`; see
+  trigger) can address it in `hook.skip` and `amont.severity`; see
   [configuration](configuration.md).
 - **fires when** — the scope. `always` means it has no file condition.
 - **fixes** — the check can rewrite the file rather than only complain. Those
@@ -44,8 +44,8 @@ prefix; the description is at most 50 characters.
 with one blank line before them, and places the type's gitmoji wherever you
 asked for it — nowhere, by default.
 
-Every number above and the gitmoji placement are `githooks.commit.*` settings;
-`githooks setup` walks them. See
+Every number above and the gitmoji placement are `amont.commit.*` settings;
+`amont setup` walks them. See
 [if the defaults do not fit](commit-convention.md#if-the-defaults-do-not-fit).
 
 ## `prepare-commit-msg`
@@ -122,7 +122,7 @@ so. That is fast and usually what you want, but it is not what you are pushing:
 an uncommitted fix makes a broken commit look green.
 
 ```sh
-git config githooks.testPushedTree true
+git config amont.testPushedTree true
 ```
 
 turns on the accurate answer — the suite runs in a throwaway checkout of the
@@ -132,9 +132,9 @@ and a build that cannot reuse your `target/` cache, which is why it is opt-in.
 ## Adding one
 
 A check is a module plus one registry entry in
-`crates/githooks-runtime/src/registry.rs`; see
+`crates/amont-runtime/src/registry.rs`; see
 [hook architecture](hook-architecture.md) and
-[CONTRIBUTING.md](https://github.com/fredericrous/githooks/blob/main/CONTRIBUTING.md).
+[CONTRIBUTING.md](https://github.com/fredericrous/amont/blob/main/CONTRIBUTING.md).
 
 If the check belongs to your repository rather than to everybody's, declare it
-in [`.githooks.conf`](custom-checks.md) instead — no fork required.
+in [`.amont.conf`](custom-checks.md) instead — no fork required.

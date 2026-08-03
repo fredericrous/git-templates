@@ -23,14 +23,14 @@ Three exact comparisons. No substring. So:
 git config --add hook.skip pre-commit-clippy   # one check
 git config --add hook.skip clippy              # that check, either trigger
 git config --add hook.skip pre-commit          # all fifteen pre-commit checks
-git config githooks.severity.clippy warn       # same vocabulary, other surface
+git config amont.severity.clippy warn       # same vocabulary, other surface
 ```
 
 `hook.skip e` matches **nothing**. Where several severity keys reach one check,
 the most specific wins — full id > short name > trigger — so you can downgrade a
 whole trigger and then exempt one check from it.
 
-Declared checks in `.githooks.conf` have ids too, so `hook.skip pre-commit`
+Declared checks in `.amont.conf` have ids too, so `hook.skip pre-commit`
 covers them. See `docs/custom-checks.md`.
 
 ## History: the problem this was written to solve
@@ -78,8 +78,8 @@ within one commit.
 
 **Then the vocabulary**, which removed the hazard rather than reporting it. It
 was prompted by a different bug: `hook.skip` matched by substring and
-`githooks.severity.<key>` matched exactly, on the same identifiers, so
-`hook.skip clippy` worked and `githooks.severity.clippy warn` silently did
+`amont.severity.<key>` matched exactly, on the same identifiers, so
+`hook.skip clippy` worked and `amont.severity.clippy warn` silently did
 nothing. Fixing the disagreement meant picking one rule, and the only rule that
 serves both is exact naming.
 
@@ -251,7 +251,7 @@ rather than a `Refusal` enum because every refusal is shown to a human and none
 is branched on: "already skipped", "already covered by a broader entry", "that
 entry is global, not local".
 
-`suppresses` is resolved through `githooks_runtime::names_check`, the same
+`suppresses` is resolved through `amont_runtime::names_check`, the same
 function the dispatcher uses. Reimplementing the match differently is how a UI
 comes to claim a check is active while the dispatcher skips it.
 
@@ -270,7 +270,7 @@ The important ones are about honesty, not mechanics:
 
 ## How we would know it worked
 
-- **Zero inert skips.** Measurable from `githooks-fleet --json` at any time. A
+- **Zero inert skips.** Measurable from `amont-fleet --json` at any time. A
   skip that names nothing is a developer who believes a check is off when it is
   not.
 - **Time-to-discover a skip.** The announcement drives this to one commit; before

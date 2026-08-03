@@ -9,6 +9,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "amont"
+version = "1.0.2"
+dependencies = [
+ "amont-runtime",
+ "serde_json",
+]
+
+[[package]]
+name = "amont-fleet"
+version = "1.0.2"
+dependencies = [
+ "amont-runtime",
+ "crossterm",
+ "ratatui",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "amont-runtime"
+version = "1.0.2"
+
+[[package]]
 name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -135,29 +158,6 @@ name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
-
-[[package]]
-name = "githooks"
-version = "1.0.2"
-dependencies = [
- "githooks-runtime",
- "serde_json",
-]
-
-[[package]]
-name = "githooks-fleet"
-version = "1.0.2"
-dependencies = [
- "crossterm",
- "githooks-runtime",
- "ratatui",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "githooks-runtime"
-version = "1.0.2"
 
 [[package]]
 name = "hashbrown"

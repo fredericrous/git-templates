@@ -1,15 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["crates/githooks", "crates/githooks-fleet", "crates/githooks-runtime"]
+members = ["crates/amont", "crates/amont-fleet", "crates/amont-runtime"]
 
-# The floor for the COMMIT PATH — `githooks` and `githooks-runtime`, which
+# The floor for the COMMIT PATH — `amont` and `amont-runtime`, which
 # inherit this. Not a guess: 1.73 was run against those two crates and failed
 # with four errors, all of them `E0658: use of unstable library feature
 # 'io_error_other'`, on `std::io::Error::other` in staged_only.rs; 1.74.0
 # compiles them clean. Everything else the source reaches for is older —
 # `OnceLock` and `is_some_and` are 1.70, let-else is 1.65.
 #
-# `githooks-fleet` deliberately does NOT inherit it and states a much higher
+# `amont-fleet` deliberately does NOT inherit it and states a much higher
 # floor of its own; see its manifest for why. Declaring 1.74 workspace-wide
 # would have been a claim nothing could honour.
 #
@@ -19,24 +19,24 @@ members = ["crates/githooks", "crates/githooks-fleet", "crates/githooks-runtime"
 rust-version = "1.74"
 
 # Published metadata, shared so the three crates cannot disagree about who they
-# are. `version` is here because they are released together: `githooks` depends
-# on `githooks-runtime`, and crates.io resolves that by VERSION, not by path, so
+# are. `version` is here because they are released together: `amont` depends
+# on `amont-runtime`, and crates.io resolves that by VERSION, not by path, so
 # a release where the two disagree is a release nobody can install.
 version = "1.0.2"
 license = "MIT"
-repository = "https://github.com/fredericrous/githooks"
+repository = "https://github.com/fredericrous/amont"
 authors = ["Frederic Rousseau"]
 edition = "2021"
 
 # The one place the inter-crate version is written.
 #
-# `githooks` and `githooks-fleet` both depend on `githooks-runtime`, and
+# `amont` and `amont-fleet` both depend on `amont-runtime`, and
 # crates.io resolves that by VERSION while a checkout resolves it by PATH — so
 # a manifest carrying its own literal is a release where the two can disagree,
 # which is a release nobody can install. Bumping [workspace.package] version
 # above is now the whole edit.
 [workspace.dependencies]
-githooks-runtime = { path = "crates/githooks-runtime", version = "1.0.2" }
+amont-runtime = { path = "crates/amont-runtime", version = "1.0.2" }
 
 # Shared release posture. The hook binary runs on every commit, so size and
 # start-up cost are features.
@@ -54,11 +54,11 @@ lto = true
 #     in any check takes the whole hook down with it.
 #   * `Drop for StagedOnly`, which puts the author's unstaged work back. Drop
 #     does not run on abort, so a panicking check left that work parked in
-#     `$GIT_DIR/githooks-held` — the loss staged_only.rs calls the worst
+#     `$GIT_DIR/amont-held` — the loss staged_only.rs calls the worst
 #     failure in this repository.
 #
 # The sharp part is that no test can catch the regression: cargo IGNORES the
 # `panic` setting for test targets, so both panic tests pass identically with
-# or without this line. `crates/githooks/tests/release_profile.rs` reads this
+# or without this line. `crates/amont/tests/release_profile.rs` reads this
 # file instead, because asserting on the manifest is the only mechanism that
 # can see a setting the test profile discards.

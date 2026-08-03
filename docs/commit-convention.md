@@ -1,7 +1,7 @@
 # Commit and branch conventions
 
 Two vocabularies, kept in one place —
-`crates/githooks-runtime/src/vocabulary.rs` — with a test that fails unless
+`crates/amont-runtime/src/vocabulary.rs` — with a test that fails unless
 every name is either shared between them or declared an exception *with a
 reason*.
 
@@ -30,15 +30,15 @@ Both numbers are defaults, not laws — see
 
 ## If the defaults do not fit
 
-`commit-msg` is the one hook `hook.skip` and `githooks.severity` do not reach,
+`commit-msg` is the one hook `hook.skip` and `amont.severity` do not reach,
 and git exempts it from `--no-verify`. So it is the one hook whose opinions
 have to be adjustable in themselves, and they are — four `git config` keys,
-walked by `githooks setup` and listed in
-[configuration](configuration.md#githookscommit--what-a-commit-message-must-look-like):
+walked by `amont setup` and listed in
+[configuration](configuration.md#amontcommit--what-a-commit-message-must-look-like):
 
 ```sh
-githooks setup                                   # ask me the four questions
-git config githooks.commit.descriptionMax 68     # or set one directly
+amont setup                                   # ask me the four questions
+git config amont.commit.descriptionMax 68     # or set one directly
 ```
 
 **68 is the number worth knowing** if 50 feels tight. It is the longest
@@ -50,7 +50,7 @@ By default **nothing decorates your subject**: you write `feat: add a cart` and
 that is what is stored. If you want the type's gitmoji, choose where it goes:
 
 ```sh
-git config githooks.commit.gitmoji suffix
+git config amont.commit.gitmoji suffix
 ```
 
 | | stored as |
@@ -95,7 +95,7 @@ authority — what you read here is what the hook enforces and prepends.
 `commit-msg` also reformats what you wrote, rather than rejecting it for
 whitespace:
 
-- hard-wraps the body at 72 columns (`githooks.commit.bodyWrap`, or `0` to
+- hard-wraps the body at 72 columns (`amont.commit.bodyWrap`, or `0` to
   leave a pasted stack trace or a fenced code block exactly as it is);
 - ensures one blank line after the subject;
 - groups the trailing footers, with one blank line before them.
@@ -110,7 +110,7 @@ authoring. `-m`, `-t`, a merge, a squash and `--amend` all pass a source in
 `$2` and are left alone.
 
 The footer scaffold lives in
-[`message`](https://github.com/fredericrous/githooks/blob/main/message):
+[`message`](https://github.com/fredericrous/amont/blob/main/message):
 
 ```sh
 git config --global commit.template ~/.config/git/git-templates/message

@@ -1,7 +1,7 @@
 # The toolchain this repository builds with, pinned.
 #
 # WHY A PIN, when "latest stable" is the usual advice: CI runs
-# `cargo clippy --all-targets -- -D warnings`, and `githooks`' own
+# `cargo clippy --all-targets -- -D warnings`, and `amont`' own
 # `pre-commit-clippy` runs a wider one on every Rust commit here. Under
 # `-D warnings`, every clippy release is a potential breaking change — a lint
 # added upstream turns an untouched, already-merged commit red on the next
