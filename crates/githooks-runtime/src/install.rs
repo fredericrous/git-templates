@@ -32,20 +32,15 @@ pub const PLACEHOLDER: &str = "__GITHOOKS_BIN__";
 /// copy honest against `templates/hooks/`.
 pub const SHIM: &str = include_str!("../../../templates/hooks/pre-commit");
 
-/// A line every shim carries and nothing else does.
+/// The ownership question, and every other "may we touch this file?" answer,
+/// now live in [`crate::hookfile`] — one implementation that fails closed,
+/// rather than the three `unwrap_or(false)` one-liners that used to answer it
+/// here, in `fleet::scan` and in `fleet::fix`.
 ///
-/// `uninstall` needs to answer "is this file ours to delete?" and the answer
-/// must not be "it is named pre-commit". A colleague's own `pre-commit` lives at
-/// the same path and deleting it would be the third time this project destroyed
-/// somebody's file. Marker-based on purpose rather than byte-comparing against
-/// `bake(SHIM, path)`: a shim somebody hand-edited is still ours, and uninstall
-/// should still take it.
-pub const SHIM_MARKER: &str = "git-templates hook shim";
-
-/// Whether a file in `.git/hooks` is one of ours.
-pub fn is_our_shim(text: &str) -> bool {
-    text.contains(SHIM_MARKER)
-}
+/// Re-exported rather than moved outright because both fleet call sites and the
+/// dashboard's `shim` module name them through this path, and a rename would be
+/// churn in files this change has no business editing.
+pub use crate::hookfile::{is_our_shim, SHIM_MARKER};
 
 /// The hook names git actually invokes, and so the only files we install.
 pub const DISPATCHERS: [&str; 4] = ["commit-msg", "pre-commit", "pre-push", "prepare-commit-msg"];

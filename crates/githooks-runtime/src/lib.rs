@@ -22,6 +22,7 @@ pub mod agents_md;
 pub mod check;
 pub mod dispatch;
 pub mod git;
+pub mod hookfile;
 pub mod hooks;
 pub mod install;
 pub mod json;
