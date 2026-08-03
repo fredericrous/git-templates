@@ -396,17 +396,29 @@ fn signal_mid_check_restores(signal: &str) {
         .spawn()
         .expect("spawn githooks pre-commit");
 
-    // `enter()` parks before any check starts, so this appears almost
-    // immediately — long before `sleep 5` could finish on its own.
+    // Wait for parking to be COMPLETE, not merely started.
+    //
+    // The store directory appearing is the wrong signal: `enter()` creates it
+    // first and copies into it, and only afterwards runs the `git checkout`
+    // that resets the tree and sets the flag `restore()` reads. A signal
+    // arriving in that window is handled correctly — `restore()` sees nothing
+    // held, puts nothing back, and the tree was never touched, so no work is
+    // lost — but it leaves the store on disk for `githooks restore`, which is
+    // not the behaviour this test is about. Waiting on the store's existence
+    // made that window look like a failure, and it did, once, under load.
+    //
+    // The tree matching the INDEX is the honest proxy: that is what `checkout`
+    // does, immediately before the flag is set.
     let store = r.path(".git/githooks-held");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !store.exists() {
+    while tree(&r, "x.json") != VALID {
         assert!(
             std::time::Instant::now() < deadline,
-            "fixture: nothing was ever parked to restore"
+            "fixture: the unstaged change was never parked"
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    assert!(store.exists(), "fixture: parked without a store");
 
     let signalled = Command::new("kill")
         .arg(signal)
