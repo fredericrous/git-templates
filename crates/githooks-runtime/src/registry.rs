@@ -248,7 +248,7 @@ pub const CHECKS: &[Builtin] = &[
         scope: Scope::ALWAYS,
         severity: Severity::Block,
         fix: Fix::None,
-        run: |ctx| hooks::branch_pattern::run(ctx.args),
+        run: |ctx| hooks::branch_pattern::run(ctx.push.get(), ctx.args),
     },
     Builtin {
         name: "pre-push-pull-rebase",

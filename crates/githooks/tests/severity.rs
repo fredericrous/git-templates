@@ -39,7 +39,15 @@ fn pre_push(r: &Repo) -> (i32, String) {
         .expect("stdin")
         // NOT refs/heads/main: branch-protect runs first and would block on
         // that, so the chain would end before branch-pattern ever spoke.
-        .write_all(b"refs/heads/nonsense-branch-name aaa refs/heads/nonsense-branch-name bbb\n")
+        //
+        // An all-zero REMOTE oid, because `branch-pattern` judges the ref being
+        // pushed rather than the branch checked out, and a non-zero remote oid
+        // means the branch is already on the server — nothing left to validate.
+        // The old line said `bbb`, which under the corrected check is a pass.
+        .write_all(
+            b"refs/heads/nonsense-branch-name aaa refs/heads/nonsense-branch-name \
+              0000000000000000000000000000000000000000\n",
+        )
         .expect("write");
     let out = child.wait_with_output().expect("wait");
     (

@@ -281,6 +281,12 @@ fn a_declared_pre_push_check_runs_after_the_built_ins() {
 
     // With a branch name the built-in rejects, it blocks first and the declared
     // check never gets a turn — which is the ordering guarantee, observed.
+    //
+    // The ref line carries an all-zero REMOTE oid: `branch-pattern` judges the
+    // ref being pushed rather than the branch checked out, and a non-zero
+    // remote oid means the branch already exists on the server and its name was
+    // authorised long ago. The old line said `bbb`, which under the corrected
+    // check is "already there, nothing to validate".
     r.git(&["checkout", "-q", "-b", "nonsense-branch-name"]);
     let mut child = Command::new(env!("CARGO_BIN_EXE_githooks"))
         .arg("--hooks-dir")
@@ -296,7 +302,10 @@ fn a_declared_pre_push_check_runs_after_the_built_ins() {
         .stdin
         .as_mut()
         .expect("stdin")
-        .write_all(b"refs/heads/nonsense aaa refs/heads/nonsense bbb\n")
+        .write_all(
+            b"refs/heads/nonsense aaa refs/heads/nonsense-branch-name \
+              0000000000000000000000000000000000000000\n",
+        )
         .expect("write");
     let out = child.wait_with_output().expect("wait");
     let text = format!(

@@ -9,6 +9,7 @@
 
 use crate::check::Outcome;
 use crate::git;
+use crate::pushrefs::PushRef;
 use crate::ui::{error_sign, highlight, valid_sign};
 
 use crate::vocabulary;
@@ -35,15 +36,64 @@ pub fn conforms(branch: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || (p.dots && c == '.'))
 }
 
-pub fn run(args: &[std::ffi::OsString]) -> Outcome {
-    // Unresolvable HEAD (an unborn branch) — nothing to check, don't block.
-    let Some(branch) = git::stdout(&["rev-parse", "--abbrev-ref", "HEAD"]) else {
-        return Outcome::Passed;
-    };
+/// A delete pushes no name to validate. Same rule as `branch_protect::is_delete`
+/// — the all-zero local oid is how git spells it.
+fn is_delete(r: &PushRef) -> bool {
+    r.local_oid.chars().all(|c| c == '0')
+}
 
-    if git::succeeds(&["show-branch", &format!("remotes/origin/{branch}")]) {
+/// The branch name this ref would CREATE on the server, if it creates one.
+///
+/// `None` for a delete, for anything that is not `refs/heads/` (tags, notes),
+/// and for a ref whose remote oid is non-zero — that last one means the branch
+/// already exists on the server, so its name was authorised the day it was
+/// created.
+fn name_to_validate<'a>(r: &'a PushRef, zero: &str) -> Option<&'a str> {
+    if is_delete(r) {
+        return None;
+    }
+    if r.remote_oid != zero {
+        return None;
+    }
+    r.remote_ref.strip_prefix("refs/heads/")
+}
+
+/// Judged on the REFS BEING PUSHED, not on the branch that happens to be
+/// checked out.
+///
+/// It used to ask `rev-parse --abbrev-ref HEAD`, exactly the mistake
+/// `branch_protect` documents avoiding, and it cost two things:
+///
+///   - `git push origin local:refs/heads/other` validated the wrong name
+///     entirely — the one you are standing on rather than the one being
+///     created;
+///   - on a DETACHED HEAD, `--abbrev-ref HEAD` returns the literal string
+///     `"HEAD"`, which `conforms` rejects. The `show-branch
+///     remotes/origin/HEAD` short-circuit hid that in a normal clone, but in a
+///     repository with no `refs/remotes/origin/HEAD` — a bare `git init` plus
+///     `git remote add`, or after `git remote set-head --delete` — a perfectly
+///     ordinary `git push origin HEAD:refs/heads/feat/x` was BLOCKED.
+///
+/// The `show-branch` probe is gone, replaced by the non-zero remote oid: git
+/// has already told us whether the branch exists on the server, and the probe
+/// depended on a remote-tracking ref that a fresh clone may not have.
+pub fn run(refs: &[PushRef], args: &[std::ffi::OsString]) -> Outcome {
+    // Matches `branch_protect::no_refs_is_a_pass`: nothing pushed, nothing to
+    // judge.
+    if refs.is_empty() {
+        return Outcome::Passed;
+    }
+    let zero = git::stdout(&["hash-object", "--stdin"])
+        .map(|h| "0".repeat(h.len()))
+        .unwrap_or_else(|| "0".repeat(40));
+
+    let candidates: Vec<&str> = refs
+        .iter()
+        .filter_map(|r| name_to_validate(r, &zero))
+        .collect();
+    if candidates.is_empty() {
         println!(
-            "{} Branch already on server. Name is authorized.",
+            "{} No new branch name to validate. Push is authorized.",
             valid_sign()
         );
         return Outcome::Passed;
@@ -51,8 +101,9 @@ pub fn run(args: &[std::ffi::OsString]) -> Outcome {
 
     // Initial push to a brand-new empty remote: there's no feature-branch
     // convention to enforce while initializing a repo, and the default branch
-    // (main/master) doesn't match the pattern anyway. git passes the remote
-    // name as the first argument.
+    // (main/master) doesn't match the pattern anyway. Still needed alongside
+    // the remote-oid rule above, because on a brand-new remote EVERY remote
+    // oid is zero. git passes the remote name as the first argument.
     let remote = args
         .first()
         .and_then(|a| a.to_str())
@@ -68,16 +119,26 @@ pub fn run(args: &[std::ffi::OsString]) -> Outcome {
         return Outcome::Passed;
     }
 
-    if !conforms(&branch) {
-        println!(
-            "{} Branch names in this project must adhere to this contract:
+    // Per offending ref, so a multi-ref push names them all rather than
+    // stopping at the first.
+    let offenders: Vec<&str> = candidates
+        .iter()
+        .copied()
+        .filter(|name| !conforms(name))
+        .collect();
+    if !offenders.is_empty() {
+        for name in &offenders {
+            println!(
+                "{} Branch name {} does not adhere to this project's contract:
     {}.
     Rename your branch with: {} <branch name>
     Or bypass this check with git -c hook.skip=branch-pattern push",
-            error_sign(),
-            highlight(&vocabulary::branch_contract()),
-            highlight("git branch -m")
-        );
+                error_sign(),
+                highlight(name),
+                highlight(&vocabulary::branch_contract()),
+                highlight("git branch -m")
+            );
+        }
         return Outcome::Failed;
     }
 
@@ -90,7 +151,60 @@ pub fn run(args: &[std::ffi::OsString]) -> Outcome {
 
 #[cfg(test)]
 mod tests {
-    use super::conforms;
+    use super::{conforms, name_to_validate, run, Outcome, PushRef};
+
+    const ZERO: &str = "0000000000000000000000000000000000000000";
+
+    fn r(local_oid: &str, remote_ref: &str, remote_oid: &str) -> PushRef {
+        PushRef {
+            local_ref: "refs/heads/whatever-is-checked-out".into(),
+            local_oid: local_oid.into(),
+            remote_ref: remote_ref.into(),
+            remote_oid: remote_oid.into(),
+        }
+    }
+
+    /// The table `branch_protect`'s tests are built from, applied to the
+    /// question this check actually has to answer.
+    ///
+    /// `name_to_validate` rather than `run`, because `run`'s remaining branches
+    /// consult `ls-remote` and a unit test must not reach a network.
+    #[test]
+    fn only_a_new_branch_ref_carries_a_name_to_validate() {
+        // Judged on the REMOTE ref, not on whatever is checked out.
+        // `git push origin local:refs/heads/other` creates `other`.
+        assert_eq!(
+            name_to_validate(&r("a", "refs/heads/feat/x", ZERO), ZERO),
+            Some("feat/x")
+        );
+        // Already on the server: git has told us so with a non-zero remote
+        // oid, and the name was authorised the day it was created.
+        assert_eq!(
+            name_to_validate(&r("a", "refs/heads/off-pattern", "b"), ZERO),
+            None
+        );
+        // A delete pushes no name.
+        assert_eq!(
+            name_to_validate(&r(ZERO, "refs/heads/off", ZERO), ZERO),
+            None
+        );
+        // A tag is not a branch, and neither is anything else outside
+        // `refs/heads/`.
+        assert_eq!(
+            name_to_validate(&r("a", "refs/tags/v1.0", ZERO), ZERO),
+            None
+        );
+        assert_eq!(
+            name_to_validate(&r("a", "refs/notes/commits", ZERO), ZERO),
+            None
+        );
+    }
+
+    /// Matches `branch_protect::no_refs_is_a_pass`, and reaches no git at all.
+    #[test]
+    fn no_refs_is_a_pass() {
+        assert_eq!(run(&[], &[]), Outcome::Passed);
+    }
 
     #[test]
     fn accepts_every_declared_prefix() {
