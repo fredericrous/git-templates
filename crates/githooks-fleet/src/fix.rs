@@ -45,6 +45,10 @@ pub enum Refusal {
     /// this file is SUPPOSED to be tracked, so a malformed block is its own
     /// refusal rather than a false positive on that guard.
     AgentsMdMalformed { path: PathBuf },
+    /// The binary path is not one a shim will accept. The shim resolves a
+    /// relative path against the WORKING TREE, so baking one across a fleet
+    /// would hand every repository the chance to answer for its own hooks.
+    UnbakeableBinary { binary: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -159,6 +163,14 @@ pub fn plan(
         write_agents_md: None,
     };
 
+    // Before anything else: a path the shim will not accept must not be baked
+    // into one repository, let alone a fleet of them.
+    if !githooks_runtime::install::is_bakeable(binary) {
+        p.refuse.push(Refusal::UnbakeableBinary {
+            binary: binary.to_string(),
+        });
+        return p;
+    }
     if !repo.managed && intent == Intent::Repair {
         p.refuse.push(Refusal::Unmanaged);
         return p;

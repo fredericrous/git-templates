@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn the_anchor_alone_does_not_satisfy_it() {
         let faked = render("/opt/a").replace("exec", "# exec");
-        assert!(faked.contains("BIN=\"/opt/a\""));
+        assert!(faked.contains("BAKED=\"/opt/a\""));
         assert_eq!(recover_baked(&faked), None);
     }
 

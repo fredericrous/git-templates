@@ -119,6 +119,44 @@ pub fn bake(shim: &str, bin: &str) -> String {
     shim.replace(PLACEHOLDER, bin)
 }
 
+/// Whether the shim will accept `bin` as its baked path.
+///
+/// The shim rejects anything relative before it ever touches the filesystem,
+/// and this is the same rule stated where the value is produced. Git runs a
+/// hook with the working tree as the current directory, so a relative baked
+/// path is a question asked of the REPOSITORY — and a clone that ships a file
+/// by that name gets to answer it. Baking one would install a hook that either
+/// cannot resolve its binary or resolves it to somebody else's, so refuse here
+/// too, where the message can say which path was wrong.
+///
+/// Absolute means POSIX `/…` or a Windows drive path (`C:\…`, `C:/…`).
+pub fn is_bakeable(bin: &str) -> bool {
+    if bin.is_empty() || bin == PLACEHOLDER {
+        return false;
+    }
+    let b = bin.as_bytes();
+    if b[0] == b'/' {
+        return true;
+    }
+    b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
+}
+
+/// An absolute form of `p`, for baking.
+///
+/// NOT `canonicalize`: that returns an extended-length path (`\\?\C:\…`) on
+/// Windows, which `sh` cannot test, and it fails outright on a path that does
+/// not exist yet. `$GITHOOKS_BIN_DIR` may be relative, which is the route by
+/// which a relative path could reach a shim at all.
+fn absolute(p: &Path) -> PathBuf {
+    if p.is_absolute() {
+        return p.to_path_buf();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(p),
+        Err(_) => p.to_path_buf(),
+    }
+}
+
 /// `~/.local/bin`, or `$GITHOOKS_BIN_DIR`.
 pub fn bin_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("GITHOOKS_BIN_DIR") {
@@ -182,6 +220,13 @@ fn foreign_hooks(dir: &Path) -> Vec<&'static str> {
 }
 
 fn write_shims(dir: &Path, bin: &str) -> std::io::Result<usize> {
+    // Fail closed rather than write four hooks that resolve to nothing — or, if
+    // the repository happens to hold a file by that name, to something.
+    if !is_bakeable(bin) {
+        return Err(std::io::Error::other(format!(
+            "refusing to bake {bin:?}: the shim takes an absolute path only"
+        )));
+    }
     let baked = bake(SHIM, bin);
     let mut n = 0;
     for name in DISPATCHERS {
@@ -320,7 +365,9 @@ fn install_binary() -> Result<String, String> {
     let dir = bin_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
 
-    let target = dir.join(installed_name());
+    // Absolute from here on: this path is what gets baked into every shim, and
+    // `bin_dir()` honours `$GITHOOKS_BIN_DIR`, which may be relative.
+    let target = absolute(&dir.join(installed_name()));
     // Copying a running binary over ITSELF fails on some platforms and is
     // pointless on all of them.
     let already_there = me.canonicalize().ok() == target.canonicalize().ok();
@@ -612,6 +659,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Only an absolute path may be baked.
+    ///
+    /// A relative one is resolved by the shim against the WORKING TREE, so a
+    /// repository shipping an executable by that name would be running it on
+    /// the first commit after clone.
+    #[test]
+    fn only_an_absolute_path_is_bakeable() {
+        for good in [
+            "/opt/githooks",
+            "/home/u/.local/bin/githooks",
+            "C:/Users/u/githooks.exe",
+            "C:\\Users\\u\\githooks.exe",
+        ] {
+            assert!(is_bakeable(good), "{good} should be bakeable");
+        }
+        for bad in [
+            "",
+            PLACEHOLDER,
+            "githooks",
+            "./githooks",
+            "../githooks",
+            "target/debug/githooks",
+            "C:githooks.exe",
+        ] {
+            assert!(!is_bakeable(bad), "{bad:?} must not be bakeable");
+        }
+    }
+
+    /// The shim must never hand the unsubstituted token to `[ -x ]`: that is a
+    /// filesystem question asked in the repository's own directory.
+    #[test]
+    fn the_shim_never_tests_the_placeholder_as_a_path() {
+        assert!(
+            !SHIM.contains(&format!("[ -x \"{PLACEHOLDER}\" ]")),
+            "the shim tests the raw token as a path"
+        );
+        assert!(
+            SHIM.contains("case \"$BAKED\" in"),
+            "the shim lost its absoluteness guard"
+        );
+    }
+
+    /// Refusing beats writing four hooks that cannot resolve their binary.
+    #[test]
+    fn write_shims_refuses_a_relative_binary_path() {
+        let d = tmp("relative");
+        let err = write_shims(&d, "target/debug/githooks").expect_err("must refuse");
+        assert!(err.to_string().contains("absolute"), "{err}");
+        for name in DISPATCHERS {
+            assert!(!d.join(name).exists(), "{name} was written anyway");
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Every hook git invokes gets a file, and each is the baked shim.
