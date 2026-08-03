@@ -20,10 +20,13 @@ use std::process::{Command, Stdio};
 /// nothing new.
 const GATE: [&str; 3] = ["typecheck", "test:unit", "test"];
 
+/// The extensions this check treats as "JS worth testing". Exported so
+/// `registry.rs` declares the scope from the same constant — see
+/// `lint_json_yaml::EXTS` for the drift this prevents.
+pub const JS_EXTS: &[&str] = &[".js", ".jsx", ".ts", ".tsx", ".vue"];
+
 fn is_js(file: &str) -> bool {
-    [".js", ".jsx", ".ts", ".tsx", ".vue"]
-        .iter()
-        .any(|e| file.ends_with(e))
+    JS_EXTS.iter().any(|e| file.ends_with(e))
 }
 
 fn parent_of(path: &str) -> &str {

@@ -23,13 +23,20 @@ use std::process::{Command, Stdio};
 /// Files that mean "this commit touches Rust". `Cargo.toml` and `Cargo.lock`
 /// count: a dependency bump compiles differently without a single `.rs` edit,
 /// and that is exactly when clippy earns its keep.
-const RUST_PATHS: [&str; 5] = [
+///
+/// Exported for the registry's drift guard: clippy and cargo-test consume this
+/// whole set while declaring only `.rs` plus a `Cargo.toml` opt-in.
+pub const RUST_PATHS: &[&str] = &[
     ".rs",
     "Cargo.toml",
     "Cargo.lock",
     "rustfmt.toml",
     "clippy.toml",
 ];
+
+/// What `cargo fmt` is handed. Exported so `registry.rs` declares the scope
+/// from the same constant — see `lint_json_yaml::EXTS`.
+pub const EXTS: &[&str] = &[".rs"];
 
 fn is_rust_path(f: &str) -> bool {
     let name = f.rsplit('/').next().unwrap_or(f);
@@ -136,7 +143,7 @@ fn each_root(
 }
 
 pub fn fmt(_args: &[std::ffi::OsString]) -> Outcome {
-    let files = staged_files(&[".rs"]);
+    let files = staged_files(EXTS);
     if files.is_empty() {
         return Outcome::Passed;
     }

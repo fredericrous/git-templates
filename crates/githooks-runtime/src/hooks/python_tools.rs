@@ -15,6 +15,11 @@ use crate::git;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+/// The extensions both Python checks consume. Exported so `registry.rs`
+/// declares the scope from the same constant — see `lint_json_yaml::EXTS` for
+/// the drift this prevents.
+pub const EXTS: &[&str] = &[".py", ".pyi"];
+
 fn tool_runs(root: &str, argv: &[&str]) -> bool {
     let Some((p, rest)) = argv.split_first() else {
         return false;
@@ -71,7 +76,7 @@ fn opts_in(root: &str, configs: &[&str], table: &str) -> bool {
 }
 
 pub fn ruff(_args: &[std::ffi::OsString]) -> Outcome {
-    let files = staged_files(&[".py", ".pyi"]);
+    let files = staged_files(EXTS);
     if files.is_empty() {
         return Outcome::Passed;
     }
@@ -129,7 +134,7 @@ pub fn ruff(_args: &[std::ffi::OsString]) -> Outcome {
 }
 
 pub fn pyright(_args: &[std::ffi::OsString]) -> Outcome {
-    let files = staged_files(&[".py", ".pyi"]);
+    let files = staged_files(EXTS);
     if files.is_empty() {
         return Outcome::Passed;
     }

@@ -9,7 +9,13 @@ use crate::check::Outcome;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-const EXTS: [&str; 17] = [
+/// Everything prettier is asked to look at.
+///
+/// Exported, even though `registry.rs` deliberately declares
+/// `Scope::files(&[])` for this check (it is opt-in by CONFIG, not by file
+/// type): the drift guard needs to know what the check actually consumes, and
+/// an empty declared set is a subset of this one.
+pub const EXTS: &[&str] = &[
     ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".json", ".jsonc", ".css", ".scss", ".less",
     ".html", ".vue", ".md", ".mdx", ".yaml", ".yml",
 ];
@@ -45,7 +51,7 @@ fn has_config(root: &str) -> bool {
 }
 
 pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
-    let files = staged_files(&EXTS);
+    let files = staged_files(EXTS);
     if files.is_empty() {
         return Outcome::Passed;
     }

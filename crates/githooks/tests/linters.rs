@@ -46,6 +46,44 @@ fn invalid_yaml_is_rejected_and_valid_yaml_passes() {
     assert!(r.hook("pre-commit-lint-json-yaml", &[]).passed());
 }
 
+/// `.yml` is the OTHER spelling, and it was never linted at all.
+///
+/// The registry declared `[".json", ".yaml", ".yml"]` while the check asked
+/// `staged_files` for `[".yaml"]`. `githooks list` and the fleet dashboard both
+/// reported the check as covering `.yml`, and a staged, broken `x.yml` returned
+/// `Outcome::Passed` with no output whatsoever. Both lists now come from
+/// `lint_json_yaml::EXTS`.
+#[test]
+fn a_broken_yml_is_rejected_like_a_broken_yaml() {
+    if missing("yq") {
+        return;
+    }
+    let r = Repo::new();
+    r.stage("bad.yml", "a:\n\tb: 1\n"); // tab indentation
+    assert!(
+        !r.hook("pre-commit-lint-json-yaml", &[]).passed(),
+        ".yml was declared in scope but never actually parsed"
+    );
+
+    let r = Repo::new();
+    r.stage("ok.yml", "a:\n  b: 1\n");
+    assert!(r.hook("pre-commit-lint-json-yaml", &[]).passed());
+}
+
+/// …and the Helm carve-out has to reach the newly-linted extension too, or
+/// fixing the scope would start failing valid chart commits that spell their
+/// templates `.yml`.
+#[test]
+fn a_helm_chart_template_named_yml_is_skipped() {
+    if missing("yq") {
+        return;
+    }
+    let r = Repo::new();
+    r.write("chart/Chart.yaml", "name: c\n");
+    r.stage("chart/templates/deploy.yml", HELM_TMPL);
+    assert!(r.hook("pre-commit-lint-json-yaml", &[]).passed());
+}
+
 /// Helm chart templates carry Go templating and are not valid YAML until Helm
 /// renders them. Without this carve-out every valid chart commit would need
 /// --no-verify.

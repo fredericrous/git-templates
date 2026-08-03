@@ -4,8 +4,13 @@ use super::common::run as run_tool;
 use super::common::{fail, first_existing, hl, ok, repo_root, staged_files, warn, which};
 use crate::check::Outcome;
 
+/// The extensions this check consumes. Exported so `registry.rs` declares the
+/// scope from the same constant — see `lint_json_yaml::EXTS` for the drift this
+/// prevents.
+pub const EXTS: &[&str] = &[".yaml", ".yml"];
+
 pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
-    let files = staged_files(&[".yaml", ".yml"]);
+    let files = staged_files(EXTS);
     if files.is_empty() {
         return Outcome::Passed;
     }

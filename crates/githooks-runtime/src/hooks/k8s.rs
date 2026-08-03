@@ -9,6 +9,11 @@ use crate::check::Outcome;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+/// The extensions all three Kubernetes checks consume. Exported so
+/// `registry.rs` declares their scopes from the same constant — see
+/// `lint_json_yaml::EXTS` for the drift this prevents.
+pub const EXTS: &[&str] = &[".yaml", ".yml"];
+
 /// Staged YAML under a kubernetes-ish prefix. Deliberately conservative and
 /// shared by all three hooks, so they trigger on exactly the same change sets.
 fn k8s_staged() -> Vec<String> {
@@ -21,7 +26,7 @@ fn k8s_staged() -> Vec<String> {
         "helm/",
         "deploy/",
     ];
-    staged_files(&[".yaml", ".yml"])
+    staged_files(EXTS)
         .into_iter()
         .filter(|f| PREFIXES.iter().any(|p| f.starts_with(p)))
         .collect()

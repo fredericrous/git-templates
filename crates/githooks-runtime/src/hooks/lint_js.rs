@@ -5,8 +5,13 @@ use super::common::{
 };
 use crate::check::Outcome;
 
+/// The extensions this check consumes. Exported so `registry.rs` declares the
+/// scope from the same constant — see `lint_json_yaml::EXTS` for the drift this
+/// prevents.
+pub const EXTS: &[&str] = &[".js", ".jsx", ".ts", ".tsx", ".vue"];
+
 pub fn run(args: &[std::ffi::OsString]) -> Outcome {
-    let files = staged_files(&[".js", ".jsx", ".ts", ".tsx", ".vue"]);
+    let files = staged_files(EXTS);
     if files.is_empty() {
         return Outcome::Passed;
     }
