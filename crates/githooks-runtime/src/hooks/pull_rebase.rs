@@ -71,12 +71,24 @@ pub fn behind_count(status: &str) -> Option<u64> {
         .find_map(|line| count_after(line, "behind").map(|(n, _)| n))
 }
 
-/// `^[[:space:]*]+<name>$` over `git branch` output — the indentation git
-/// always prints, plus the `*` marking the current branch.
+/// `^[[:space:]*+]+<name>$` over `git branch` output — the indentation git
+/// always prints, plus the markers it puts in column 0.
+///
+/// `+` is not decoration: since git 2.23, a branch checked out in ANOTHER
+/// WORKTREE is printed `+ main` rather than `  main`. That is a completely
+/// ordinary state in this repository's own workflow, and without `+` in the
+/// trim set the whole default-branch advisory (step 4) silently never fired —
+/// `lists_branch` answered false for both `main` and `master`, and the function
+/// returned before reaching it.
+///
+/// The `body.len() < stripped.len()` guard STAYS, and is why `for-each-ref` is
+/// not the answer here: it is what stops a `## main...origin/main` status line
+/// matching, and `+ main` still strips two characters, so the guard costs
+/// nothing. `for-each-ref` produces undecorated lines the guard would reject.
 pub fn lists_branch(branch_list: &str, name: &str) -> bool {
     branch_list.lines().any(|line| {
         let stripped = line.trim_end_matches(['\r']);
-        let body = stripped.trim_start_matches([' ', '\t', '*']);
+        let body = stripped.trim_start_matches([' ', '\t', '*', '+']);
         !body.is_empty() && body.len() < stripped.len() && body == name
     })
 }
@@ -215,7 +227,15 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
     }
 
     // 4. Informational only — never acts.
-    let branch_list = git::stdout(&["branch"]).unwrap_or_default();
+    // UNTRIMMED, and that is not a detail. `git::stdout` trims the whole
+    // buffer, which strips the two leading spaces off the FIRST line — so when
+    // `git branch` happened to list the default branch first, `lists_branch`'s
+    // decoration guard rejected it and the advisory below never fired. Whether
+    // it fired depended on the alphabetical position of the branch you were on,
+    // which is why it looked intermittent rather than broken.
+    let branch_list = git::stdout_raw(&["branch"])
+        .map(|out| String::from_utf8_lossy(&out).into_owned())
+        .unwrap_or_default();
     let default_branch = if lists_branch(&branch_list, "main") {
         "main"
     } else if lists_branch(&branch_list, "master") {
@@ -224,8 +244,13 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
         return Outcome::Passed;
     };
 
-    let _ = git::succeeds(&["fetch", "origin", default_branch]);
-    let range = format!("origin/{default_branch}...HEAD");
+    // `remote`, not a hardcoded "origin". Step 2 above spends thirteen lines of
+    // comment establishing `remote` as the VERIFIED one for this branch, and
+    // then this step ignored it: in a repository whose remote is `upstream`,
+    // the fetch failed (ignored) and `rev-list origin/<branch>...HEAD` returned
+    // None, so the advisory was silently skipped.
+    let _ = git::succeeds(&["fetch", &remote, default_branch]);
+    let range = format!("{remote}/{default_branch}...HEAD");
     if let Some(n) =
         git::stdout(&["rev-list", "--left-right", "--count", &range]).and_then(|s| ahead_count(&s))
     {
@@ -235,12 +260,12 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
             // non-zero/zero, so the wrong number went unnoticed. Parsed properly
             // here.
             println!(
-                "{} origin/{default_branch} is ahead by {n} commit(s).",
+                "{} {remote}/{default_branch} is ahead by {n} commit(s).",
                 warning_sign()
             );
             println!(
                 "    Consider before merging: {}",
-                highlight(&format!("git merge origin/{default_branch}"))
+                highlight(&format!("git merge {remote}/{default_branch}"))
             );
         }
     }
@@ -291,6 +316,14 @@ mod tests {
         assert!(divergence("## ahead-of/behind...origin/ahead-of/behind").is_none());
     }
 
+    /// `git branch` puts a marker in column 0, and there are TWO of them.
+    ///
+    /// `*` is the current branch; `+` — since git 2.23 — is a branch checked
+    /// out in ANOTHER WORKTREE. That second one is an entirely ordinary state
+    /// in this repository's own workflow, and without it in the trim set the
+    /// whole default-branch advisory silently never fired: `lists_branch`
+    /// answered false for `main` and for `master`, and `run` returned before
+    /// reaching step 4.
     #[test]
     fn recognises_git_branch_lines() {
         let list = "  feat/x\n* main\n  master-ish\n";
@@ -298,6 +331,28 @@ mod tests {
         assert!(!lists_branch(list, "master")); // master-ish is a different branch
         assert!(!lists_branch(list, "feat")); // must match the whole name
         assert!(lists_branch(list, "feat/x"));
+
+        // The worktree marker.
+        let elsewhere = "+ main\n* feat/x\n";
+        assert!(
+            lists_branch(elsewhere, "main"),
+            "a branch checked out in another worktree is still a branch"
+        );
+
+        // The decoration guard is DELIBERATE, not incidental: an undecorated
+        // line is not `git branch` output, and this is what stops a
+        // `## main...origin/main` status line matching. It is also why this
+        // cannot be switched to `for-each-ref`, whose lines carry no marker.
+        assert!(!lists_branch("main\n", "main"));
+        assert!(!lists_branch("## main...origin/main\n", "main"));
+
+        // …which is why `run` must NOT read `git branch` through
+        // `git::stdout`: that trims the whole buffer, eating the FIRST line's
+        // indentation. When git listed the default branch first, this is
+        // exactly the input the guard was handed, and the advisory silently
+        // never fired.
+        assert!(!lists_branch("main\n* feat/x\n", "main"));
+        assert!(lists_branch("  main\n* feat/x\n", "main"));
     }
 
     /// A count of 12 must read as 12, not 1 — the shell's `head -c 1`.
