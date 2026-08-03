@@ -258,7 +258,10 @@ fn main() -> ExitCode {
                 // does not know that. This path deletes independently of
                 // `fix::plan`/`apply::apply`, so it must repeat the check
                 // rather than rely on going through them.
-                if ours && !fix::is_tracked(&path) && std::fs::remove_file(&path).is_ok() {
+                if ours
+                    && fix::tracked_refusal(&path).is_none()
+                    && std::fs::remove_file(&path).is_ok()
+                {
                     here += 1;
                 }
             }

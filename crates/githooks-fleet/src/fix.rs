@@ -11,10 +11,39 @@
 //! anything it cannot positively establish, and a refusal suppresses the whole
 //! repo rather than the individual file — a half-applied fix is how a repo ends
 //! up with both `pre-commit-ruff.zsh` and `pre-commit-ruff`, running ruff twice.
+//!
+//! ## Where "is this ours, and may we touch it?" is answered
+//!
+//! Not here. [`githooks_runtime::hookfile`] owns every one of those questions —
+//! ownership, tracked-ness, symlinks, file type — and this module only turns its
+//! answers into refusals.
+//!
+//! That module exists because this one used to answer them itself, and got both
+//! halves wrong in the same three lines:
+//!
+//! ```text
+//! Command::new("git").args(["ls-files", "--error-unmatch"]).arg(path)   // ABSOLUTE path
+//!     .current_dir(dir).output().map(|o| o.status.success()).unwrap_or(false)
+//! ```
+//!
+//! - git normalises a pathspec LEXICALLY but resolves its working directory
+//!   PHYSICALLY, so handing it the absolute `<repo>/.git/hooks/pre-commit` when
+//!   `.git/hooks` is a symlink into the working tree returns `exit 1, pathspec
+//!   did not match` — "untracked" — for a file git plainly tracks. That is the
+//!   exact shape of both incidents this guard was written for.
+//! - `.map(|o| o.status.success()).unwrap_or(false)` collapsed a spawn failure,
+//!   a `fatal: detected dubious ownership` (every repo owned by another uid,
+//!   which is every repo inside a container bind mount) and a permissions error
+//!   into the same "untracked" — the opposite of the rule this module's own doc
+//!   states two paragraphs up.
+//!
+//! `hookfile::tracked` asks with the BASENAME from `-C <parent>` and answers
+//! tri-state, so "could not tell" is its own refusal ([`Refusal::TrackedUnknown`])
+//! rather than a clean "no".
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
+use githooks_runtime::hookfile::Tracked;
 use serde::Serialize;
 
 use crate::scan::{AgentsMdState, Repo};
@@ -33,6 +62,20 @@ pub enum Refusal {
     /// git tracks this path. An install step must never delete tracked source,
     /// whatever the path resolution says.
     Tracked { path: PathBuf },
+    /// git could not say whether it tracks this path. Suppresses the whole repo
+    /// exactly as [`Refusal::Tracked`] does, and deliberately so: "we could not
+    /// tell whether this file is somebody's tracked source" is precisely the
+    /// ignorance the two overwrite incidents were made of, and the predicate
+    /// that used to live here answered it "no".
+    ///
+    /// The common cause is `fatal: detected dubious ownership in repository`,
+    /// which git emits on EVERY call for a repository owned by another uid — so
+    /// this is not an exotic state, it is the steady state inside a container
+    /// bind mount. `why` carries git's own first line, and the rendered message
+    /// names `git config --global --add safe.directory <path>`, because a
+    /// refusal that does not say what to do next is indistinguishable from a
+    /// bug.
+    TrackedUnknown { path: PathBuf, why: String },
     /// A dispatcher file exists here and is not one of ours — somebody wrote
     /// their own `pre-commit`. Activating would overwrite it.
     ///
@@ -117,23 +160,28 @@ impl FixPlan {
     }
 }
 
-/// Does git track this path? Consulted before any removal.
+/// git's answer about one path, as the refusal it implies — or `None` when git
+/// said a clean "not tracked" and there is nothing to refuse.
 ///
 /// Files under `.git/hooks` are never tracked, so in the normal case this is
 /// pure defence. It exists because the normal case is not the one that broke:
 /// `~/.config/git/git-templates` is a SYMLINK to a checkout, and an install
 /// step that resolved through it deleted tracked templates twice.
-pub fn is_tracked(path: &Path) -> bool {
-    let Some(dir) = path.parent() else {
-        return false;
-    };
-    Command::new("git")
-        .args(["ls-files", "--error-unmatch"])
-        .arg(path)
-        .current_dir(dir)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+///
+/// The question itself is [`githooks_runtime::hookfile::tracked`]'s to answer;
+/// see this module's doc for the two ways the version that used to live here
+/// failed open.
+pub fn tracked_refusal(path: &Path) -> Option<Refusal> {
+    match githooks_runtime::hookfile::tracked(path) {
+        Tracked::No => None,
+        Tracked::Yes => Some(Refusal::Tracked {
+            path: path.to_path_buf(),
+        }),
+        Tracked::Unknown { why } => Some(Refusal::TrackedUnknown {
+            path: path.to_path_buf(),
+            why,
+        }),
+    }
 }
 
 /// Why we are planning: repairing an installation, or making one.
@@ -237,18 +285,18 @@ pub fn plan(
         });
     }
 
-    // Fail closed: one tracked path suppresses the WHOLE repo, because a
-    // partially applied plan is how a repo ends up running a check twice.
-    let tracked: Vec<PathBuf> = p
+    // Fail closed: one tracked path — or one path git would not answer about —
+    // suppresses the WHOLE repo, because a partially applied plan is how a repo
+    // ends up running a check twice.
+    let refusals: Vec<Refusal> = p
         .remove
         .iter()
-        .map(|r| r.path.clone())
-        .chain(p.write.iter().map(|w| w.path.clone()))
-        .filter(|path| is_tracked(path))
+        .map(|r| &r.path)
+        .chain(p.write.iter().map(|w| &w.path))
+        .filter_map(|path| tracked_refusal(path))
         .collect();
-    if !tracked.is_empty() {
-        p.refuse
-            .extend(tracked.into_iter().map(|path| Refusal::Tracked { path }));
+    if !refusals.is_empty() {
+        p.refuse.extend(refusals);
         p.remove.clear();
         p.write.clear();
     }
@@ -440,16 +488,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The predicate that keeps the apply path away from tracked source. Proven
+    /// The guard that keeps the apply path away from tracked source. Proven
     /// against a real repository rather than mocked, because the whole point is
     /// that it agrees with git.
+    ///
+    /// It used to assert a BOOLEAN predicate, `fix::is_tracked`, which this
+    /// replaces. Two things were wrong with that predicate and neither was
+    /// visible from a test shaped like this one, which is why the assertions
+    /// now go through `hookfile::tracked`: it asked with the ABSOLUTE path
+    /// (wrong answer whenever `.git/hooks` is a symlink into the working tree —
+    /// the setup at the centre of both incidents), and it turned every git
+    /// failure into "untracked". See this module's doc.
     #[test]
-    fn is_tracked_agrees_with_git() {
+    fn a_tracked_path_refuses_and_an_untracked_one_does_not() {
         let dir = std::env::temp_dir().join(format!("fixplan-tracked-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
-            Command::new("git")
+            std::process::Command::new("git")
                 .args(args)
                 .current_dir(&dir)
                 .output()
@@ -463,9 +519,14 @@ mod tests {
         git(&["add", "tracked.txt"]);
         git(&["commit", "-q", "--no-verify", "-m", "chore: seed"]);
 
-        assert!(is_tracked(&dir.join("tracked.txt")));
-        assert!(!is_tracked(&dir.join("untracked.txt")));
-        assert!(!is_tracked(&dir.join("does-not-exist.txt")));
+        assert_eq!(
+            tracked_refusal(&dir.join("tracked.txt")),
+            Some(Refusal::Tracked {
+                path: dir.join("tracked.txt")
+            })
+        );
+        assert_eq!(tracked_refusal(&dir.join("untracked.txt")), None);
+        assert_eq!(tracked_refusal(&dir.join("does-not-exist.txt")), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -480,7 +541,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
-            Command::new("git")
+            std::process::Command::new("git")
                 .args(args)
                 .current_dir(&dir)
                 .output()

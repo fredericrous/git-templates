@@ -24,7 +24,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::fix::{is_tracked, FixPlan};
+use crate::fix::{tracked_refusal, FixPlan};
 use crate::shim;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -61,19 +61,21 @@ pub fn apply(plan: &FixPlan) -> Outcome {
     // tracked source (a repo whose `core.hooksPath`, say, points somewhere
     // `is_tracked` did not expect when the plan was built) would overwrite
     // it exactly as destructively, just without `rm` in the name.
-    for r in &plan.remove {
-        if is_tracked(&r.path) {
+    for path in plan
+        .remove
+        .iter()
+        .map(|r| &r.path)
+        .chain(plan.write.iter().map(|w| &w.path))
+    {
+        if let Some(refusal) = tracked_refusal(path) {
             return Outcome::Failed {
-                error: "path is tracked by git".into(),
-                at: r.path.display().to_string(),
-            };
-        }
-    }
-    for w in &plan.write {
-        if is_tracked(&w.path) {
-            return Outcome::Failed {
-                error: "path is tracked by git".into(),
-                at: w.path.display().to_string(),
+                error: match refusal {
+                    crate::fix::Refusal::TrackedUnknown { why, .. } => {
+                        format!("cannot tell whether the path is tracked by git ({why})")
+                    }
+                    _ => "path is tracked by git".to_string(),
+                },
+                at: path.display().to_string(),
             };
         }
     }
