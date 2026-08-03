@@ -18,6 +18,16 @@ members = ["crates/githooks", "crates/githooks-fleet", "crates/githooks-runtime"
 [workspace.package]
 rust-version = "1.74"
 
+# Published metadata, shared so the three crates cannot disagree about who they
+# are. `version` is here because they are released together: `githooks` depends
+# on `githooks-runtime`, and crates.io resolves that by VERSION, not by path, so
+# a release where the two disagree is a release nobody can install.
+version = "1.0.0"
+license = "MIT"
+repository = "https://github.com/fredericrous/git-templates"
+authors = ["Frederic Rousseau"]
+edition = "2021"
+
 # Shared release posture. The hook binary runs on every commit, so size and
 # start-up cost are features.
 [profile.release]
