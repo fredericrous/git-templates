@@ -339,6 +339,13 @@ jobs:
 
           Write-Host 'install.ps1: installed, runs, and enabled nothing'
 
+          # `git config --get` exits 1 when the key is ABSENT, which is the
+          # passing case here — and GitHub's pwsh wrapper ends with
+          # `exit $LASTEXITCODE`, so that 1 became the step's result even
+          # though every assertion had passed. Say what we mean instead of
+          # inheriting the exit code of an incidental probe.
+          exit 0
+
       - name: And a real commit runs end to end through the shims
         shell: bash
         run: |
