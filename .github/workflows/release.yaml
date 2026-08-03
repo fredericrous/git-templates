@@ -250,38 +250,33 @@ jobs:
             exit 1
           fi
 
-          published() {
-            # 200 means the version exists; anything else means it does not, or
-            # that we could not tell — and "could not tell" must not read as
-            # "already done", so only an explicit 200 skips.
-            code=$(curl -s -o /dev/null -w '%{http_code}' \
-              "https://crates.io/api/v1/crates/$1/$2")
-            [ "$code" = "200" ]
-          }
-
-          await_index() {
-            # crates.io accepts an upload before the sparse index serves it, and
-            # the next crate's resolve reads the index. Poll rather than sleep a
-            # guessed interval.
-            for _ in $(seq 1 60); do
-              if published "$1" "$2"; then
-                echo "  $1 $2 is in the index"
-                return 0
-              fi
-              sleep 10
-            done
-            echo "::error::$1 $2 did not appear in the index within 10 minutes"
-            return 1
-          }
-
+          # No index polling of our own, and no pre-flight "is it already
+          # there?" API call. Both were mine and both were wrong:
+          #
+          #   * cargo ALREADY waits for the upload to become available — the
+          #     run log reads "waiting for X to be available at registry" then
+          #     "Published X". Polling on top of that was redundant.
+          #   * the crates.io API rate-limits datacenter IPs, so the poll saw
+          #     non-200 for a crate that had just published successfully and
+          #     failed the job ten minutes later. githooks-runtime 1.0.1 was
+          #     live the whole time.
+          #
+          # Idempotency comes from cargo's own answer instead. Re-running a
+          # release must not fail on a crate that is already up, and "already
+          # uploaded" is exactly that answer — anything else is a real failure.
           for crate in githooks-runtime githooks githooks-fleet; do
-            if published "$crate" "$VERSION"; then
-              echo "→ $crate $VERSION already published, skipping"
-              continue
-            fi
             echo "→ publishing $crate $VERSION"
-            cargo publish -p "$crate"
-            await_index "$crate" "$VERSION"
+            if out=$(cargo publish -p "$crate" 2>&1); then
+              printf '%s\n' "$out"
+            else
+              printf '%s\n' "$out"
+              if printf '%s' "$out" | grep -qiE "already (been )?uploaded|already exists"; then
+                echo "  $crate $VERSION was already published — continuing"
+              else
+                echo "::error::publishing $crate failed"
+                exit 1
+              fi
+            fi
           done
 
           echo "### Published to crates.io" >> "$GITHUB_STEP_SUMMARY"
