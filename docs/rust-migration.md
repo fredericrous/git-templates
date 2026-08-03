@@ -1,7 +1,19 @@
 # Migrating the hooks to a single Rust binary
 
-Status: **Phases 0-3 complete** (PRs #15-#27, 2026-07-29). Phase 4 optional and
-not started. See [Outcome](#outcome) for what the plan got wrong.
+Status: **complete — all four phases**. See [Outcome](#outcome) for what the
+plan got wrong.
+
+Phase 4 is done, not "optional and not started" as this line said for a while.
+There is no `.zsh` file anywhere in the repository; the "19 zsh suites" it
+described porting ARE the cargo integration tests under `crates/*/tests/`, and
+Windows CI runs the same suite every other platform does rather than a smoke.
+The one thing left of the shell era is the four `sh` shims, and they are shims
+on purpose.
+
+**This document is history, kept for its reasoning.** Everything below is in the
+tense it was written in: the argument for a phase order, for a safety rule, for
+a distribution shape, is worth more than a description of the result. Where the
+plan and the code diverged, the divergence is called out where it happens.
 
 ## Why
 
@@ -107,6 +119,19 @@ always present, and MSYS resolves `git-hooks` to `git-hooks.exe`. Keep the shim
 rather than installing a bare `.exe` as the hook file.
 
 ### 2. Distribution
+
+> **A PLAN NOT TAKEN.** None of the release pipeline below was built, and
+> `make install` does not work the way this describes. What ships is:
+> `make install` runs `cargo build --release` and then `githooks install`, which
+> writes the binary and bakes the shims — building from source is the ONLY path,
+> so the "contributor fallback" became the whole story and the
+> `make install-from-source` target this bullet list asks for never existed.
+> `make install-fleet` does the same for the dashboard.
+>
+> The section is kept because the reasoning still applies the day somebody wants
+> binary releases: five targets, musl for the static Linux build, checksums, and
+> a source path for unlisted triples are all still the right list. It is a
+> backlog item nobody has needed, not a description of today.
 
 This is the real new cost, and it is permanent machinery we do not have today.
 
@@ -216,6 +241,14 @@ every repo rather than for the framework.
 `cargo test`. Deliberately last: those tests are the migration harness, and
 rewriting them early would remove the net while walking the wire.
 
+*Done, and it stopped being optional the moment Windows mattered.* The suites
+are `crates/githooks/tests/*.rs` and `crates/githooks-fleet/tests/*.rs`, each
+`Repo` an isolated temp repository so they run in parallel — which the old
+one-repo-per-suite runner could not, and which is why several old cases depended
+on state left by earlier ones. Windows CI runs the full suite rather than a
+smoke, because the tests no longer need an interpreter Git for Windows does not
+ship.
+
 ## Rollout to existing repos
 
 96 local repos hold copies from `git init` time. The established recipe
@@ -243,9 +276,23 @@ updating the binary updates every repo at once.
    using ruff/eslint/prettier, Phase 3 is part of the Windows story, not a
    follow-up, and the honest total cost is ~1,500 lines rather than ~700.
 6. **Do the shims keep their `.zsh` / `.js` suffixes?** RESOLVED: no, they were
-   dropped after Phase 4. The suffix STRIPPING in `main.rs` stays permanently —
-   it is what lets the binary and the 96 repos move independently, since a repo
-   seeded before the rename still passes the old filename through.
+   dropped after Phase 4.
+
+   **The rest of this answer was wrong, and is corrected rather than deleted
+   because somebody will otherwise rely on it.** It said "the suffix STRIPPING
+   in `main.rs` stays permanently — a repo seeded before the rename still passes
+   the old filename through". There is no such stripping, and there never was.
+   `registry::lookup` is an exact match against `ENTRYPOINTS` and the check
+   names; a repo still holding `pre-commit-ruff.zsh` hands the binary a name it
+   does not know, and gets `unknown hook` and exit 2.
+
+   That is deliberate and it is fine, because the repair path is the fleet, not
+   a compatibility shim in the binary. `githooks-fleet fix` / `install` is what
+   moves the 96 repos, and `Repo::stale_ours` — "our files that we no longer
+   ship" — is exactly the field that finds those leftovers and turns them into a
+   removal. The binary and the repos DO move independently; the mechanism is a
+   sweep with a plan you can read first, not silent name rewriting inside the
+   hook that runs on every commit.
 
 ## Honest cost
 
@@ -331,8 +378,8 @@ no shebang support, so every sub-hook the dispatcher spawned failed with
 
 ### Still open
 
-- **Phase 4** — port the 19 zsh suites to `cargo test`. Deliberately last: they
-  are the migration harness.
+- ~~**Phase 4** — port the 19 zsh suites to `cargo test`.~~ Done. They are
+  `crates/*/tests/*.rs`, and Windows runs them all.
 - ~~**The `ban-terms` tokenizer.**~~ Done. The documented defect (escaped slash
   in a regex) turned out to be already fixed by the port's `Regex` state — the
   note was stale. Probing 20 hard constructs found the real survivor: template

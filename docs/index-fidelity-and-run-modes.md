@@ -1,6 +1,30 @@
 # Index fidelity, fixes, and run modes
 
-Status: **specification**. Nothing here is built.
+Status: **mostly shipped**. This began as a specification and said so — "Nothing
+here is built" — and stayed saying it for six sections after five of them landed.
+README links here twice as the authority on trust and on run modes, so a reader
+was being sent to a design document for an answer about behaviour they already
+had.
+
+| § | what | status | where it lives |
+|---|---|---|---|
+| 0 | activation, `uninstall`, bulk install | **shipped** | `install.rs`, `githooks-fleet install/uninstall` |
+| 0b | manifest trust | **shipped** | `trust.rs`, `githooks trust [--show]` |
+| 1 | index fidelity (staged-only) | **shipped** | `staged_only.rs`, `dispatch::pre_commit` |
+| 2 | `stage_fixed` | **shipped** as `Fix::Rewrite` + `Outcome::Fixed` | `check.rs`, `hooks/common.rs::restage` |
+| 3 | `not_during` git-state conditions | **shipped** | `check.rs::GitState`, `registry.rs::MID_OPERATION` |
+| 4 | `githooks run [--all-files]` | **shipped** | `main.rs`, `dispatch::run_named` |
+| 5 | shebang detection | **not built** | — |
+
+§5 is the only one still a proposal. Everything below the numbered sections —
+*What we are not taking* and *What this does not solve* — is unchanged and still
+current: those are refusals and known gaps, not a backlog.
+
+The prose in each section is kept in its original tense, because the argument
+for a thing is worth more than a description of it, and rewriting the reasoning
+into the past tense would lose why each decision went the way it did. Where the
+implementation ended up somewhere other than where the design pointed, that is
+called out in the section itself rather than quietly edited away.
 
 Read against `pre-commit`, `lefthook` and `husky`, then re-read as somebody who
 would have to get this through an adoption review. Four of their ideas are worth
@@ -17,6 +41,13 @@ backlog.
 ---
 
 ## 0. A cloned repository can run its own commands
+
+> **Shipped.** Per-repository activation is the default; `githooks install`
+> / `uninstall` and `githooks-fleet install` / `uninstall` are all real
+> verbs. `install.rs` carries the routine, and `crates/githooks/tests/
+> install.rs` and `crates/githooks-fleet/tests/uninstall.rs` carry the
+> guards. `uninstall` also removes the shims from the template directory
+> and says so loudly if `init.templateDir` is still set.
 
 `.githooks.conf` is committed, which is the point: a team shares a check by
 committing it. The consequence had not been written down.
@@ -122,6 +153,14 @@ grants and only one of them was made.
 
 ### So: one prompt, at the moment of the deliberate act
 
+> **Shipped** — this is §0b. `crates/githooks-runtime/src/trust.rs`, surfaced as
+> `githooks trust` and `githooks trust --show`, with `githooks install` offering
+> it interactively. The record is keyed on the manifest's CONTENT (via
+> `git hash-object`, because the binary links no crates and `std`'s only hash is
+> a fixed-key SipHash a crafted manifest could collide), so a `git pull` that
+> adds a command does not inherit consent given to the file before it.
+> `crates/githooks/tests/trust_display.rs`.
+
 Which is where activation-as-the-boundary improves on the `direnv` design rather
 than replacing it. direnv must prompt lazily, on `cd`, because there is no
 install step to hang the question from. We have one:
@@ -204,6 +243,12 @@ hang from and is much smaller once it exists.
 
 ## 1. We name the staged files and then read the unstaged ones
 
+> **Shipped**, as `crates/githooks-runtime/src/staged_only.rs`, wrapped
+> around the whole `pre-commit` check stage in `dispatch::pre_commit`.
+> The mechanism is NOT the one designed below — see *The design* and *The
+> danger* for what changed and why. `crates/githooks/tests/
+> index_fidelity.rs` is its suite, including the Ctrl-C case.
+
 `staged_files()` asks the index for the path list, which is right:
 
 ```rust
@@ -284,20 +329,69 @@ directions:
 
 ### The design
 
-A guard around the whole pre-commit stage, not per check:
+A guard around the whole pre-commit stage, not per check. Per-check stashing is
+wrong: twenty checks run concurrently and would fight over one working tree. It
+belongs around the whole fan-out.
+
+That much shipped unchanged. **The mechanism did not**, and the difference is the
+most important thing on this page, because the design below said `git stash
+--keep-index` and the implementation refused it — twice.
 
 ```rust
-/// Unstaged changes, set aside for the duration of the stage.
-struct StagedOnly { stash: Option<StashRef> }
+// WHAT WAS SPECIFIED, and is not what runs:
+struct StagedOnly { stash: Option<StashRef> }   // `git stash --keep-index`
+```
 
+```rust
+// WHAT SHIPS — crates/githooks-runtime/src/staged_only.rs
+pub struct StagedOnly { held: bool }
 impl StagedOnly {
-    fn enter() -> Result<StagedOnly, String>;   // stash --keep-index, if there is anything to stash
+    pub fn enter() -> Result<StagedOnly, String>;
 }
 impl Drop for StagedOnly { /* restore, ALWAYS */ }
 ```
 
-Per-check stashing is wrong: twenty checks run concurrently and would fight over
-one working tree. It belongs in `run_stage`, around the whole fan-out.
+Saving is the easy half; restoring is the whole problem, and both stash-shaped
+mechanisms failed it:
+
+- **`git stash --keep-index`** was tried first. `stash pop` MERGES into a tree
+  that already holds the staged content, so it writes conflict markers into the
+  author's file. Measured, not predicted.
+- **`git diff` + `git apply`** was tried second — deterministic on Unix, and what
+  `pre-commit` itself does. But it applies PATCH semantics to text, and Git for
+  Windows converts line endings by default. Every restore test failed on Windows
+  and passed everywhere else, which is the worst possible shape for the one
+  routine here that can lose somebody's work.
+
+So: **byte-exact copies**. Read the file, put it back. No patch to apply, no
+newline policy to agree about, and binary files need no special case. It costs a
+temporary copy of only the files that have unstaged changes.
+
+The store is `$GIT_DIR/githooks-held/`, and its layout is itself the result of an
+incident:
+
+```
+$GIT_DIR/githooks-held/
+  index              NUL-delimited, one record per parked path:
+                     format tag, then kind + path + (mode | symlink target)
+  files/<rel>        the payloads, byte for byte
+```
+
+Metadata used to be encoded in the payload FILENAMES —
+`<name>.githooks-absent`, `<name>.githooks-symlink` beside the copies — and a
+repository is allowed to contain files with those names. A repo tracking both
+`notes` and a modified `notes.githooks-absent` had `notes` DELETED from the
+working tree on restore, because a suffix strip turned one file's payload into a
+statement about another. The symlink form was worse: the repo chose both the
+link name and an arbitrary absolute target, so committing in it planted a
+symlink pointing anywhere on the machine. Escaping cannot fix it, because
+`githooks restore` runs in a later process with only the filenames to go on. So
+the metadata moved out of band into `index`, and everything repo-controlled
+moved under `files/`, where it cannot collide with `index` whatever it is
+called. The `index` carries each entry's KIND (modified / absent / symlink) and,
+for a modified file, its working-tree FILE MODE — without which an unstaged
+`chmod +x deploy.sh` came back non-executable, invisible to every content-based
+assertion.
 
 ### The danger, stated plainly
 
@@ -305,27 +399,40 @@ one working tree. It belongs in `run_stage`, around the whole fan-out.
 worse failure than any this repository has had, including the two that
 overwrote tracked files, because there is nothing on disk to recover from.
 
-Rules, all of which want tests:
+Rules, all of which wanted tests and all of which now have them, in
+`crates/githooks/tests/index_fidelity.rs`:
 
-- **Nothing to stash → do nothing.** The common case must not touch the tree.
-- **Restore in `Drop`**, so a panicking check (which we now catch — #64) and an
+- **Nothing unstaged → do nothing**, and silently. The common case must not
+  touch the tree, and it is not a degraded run — there is no unstaged content
+  for a check to be confused by.
+- **Restore in `Drop`**, so a panicking check (which we catch — #64) and an
   early return both restore. `Drop` runs on unwind.
 - **`Drop` does not run on a signal, and that is the likely case.** Ctrl-C
   during a slow pre-commit — eslint over a large tree, a cold `cargo fmt` — kills
-  the process without unwinding, and the stash is orphaned. There is no signal
-  handling anywhere in this codebase today. Against the paragraph above, an
-  interrupt is the most probable route to losing work, not the least, so
-  `StagedOnly` needs a `SIGINT`/`SIGTERM` handler that restores before exiting.
-- **A recovery path for when even that fails**: `githooks restore` re-applies the
-  stash this tool took. Belt and braces, because the handler can itself be
+  the process without unwinding, and the parked work is orphaned. An interrupt
+  is the most probable route to losing work, not the least, so `StagedOnly`
+  installs a `SIGINT`/`SIGTERM` handler that restores and then dies BY the
+  signal. Restoring from a thread of its own rather than from the interrupted
+  call stack introduced a race with `enter()`, which `ENTER_LOCK` closes; the
+  test that found it is
+  `ctrl_c_mid_run_still_restores_and_dies_by_the_signal`.
+- **A recovery path for when even that fails**: `githooks restore` puts back
+  what this tool parked. Belt and braces, because the handler can itself be
   interrupted.
-- **Restore failure is fatal and loud**: print the stash ref, do not swallow it,
-  block the commit. A silent failure here is unrecoverable; a noisy one leaves
-  `git stash list` holding the work.
-- **Never stash when the tree is already mid-operation** — merge, rebase,
-  cherry-pick. This is why §3 lands first: the state predicate it introduces is
-  the precondition for this feature.
-- **Conflicted paths abort the stage** rather than being stashed around.
+- **Restore failure is fatal and loud**: print the STORE'S PATH, do not swallow
+  it, block the commit. Not `git stash list` — nothing here is a stash ref, so
+  the work is findable as files on disk under `$GIT_DIR/githooks-held/`.
+- **Never park when the tree is already mid-operation** — merge, rebase,
+  cherry-pick. §3's `GitState` predicate is what answers this, which is why it
+  landed first.
+- **Conflicted paths abort the stage** rather than being worked around. **This
+  is now true, and it was not for a while.** `StagedOnly::enter` tests for
+  unmerged paths FIRST and returns an `Err` that `dispatch::pre_commit` turns
+  into a printed message and `Verdict::Block`; the conflict test comes before
+  the mid-operation test deliberately, because the other order made an ordinary
+  conflicted merge take the mid-operation branch and warn instead of aborting.
+  It is safe by construction: git itself refuses a commit with unmerged entries,
+  so nothing that would have succeeded now fails.
 
 ### Reproduced
 
@@ -337,21 +444,32 @@ $ githooks pre-commit
   🚨 Error raised by: pre-commit-lint-json-yaml
 ```
 
-The commit that was about to be made is valid. The hook blocked it anyway.
+The commit that was about to be made is valid. The hook blocked it anyway. This
+is now a test rather than a transcript.
 
 ### Decision
 
 `cargo fmt` joins staged-only mode. Its scope is a crate, not a file list, but
 that is exactly why the stage-level guard is the right fix: once unstaged
-changes are stashed, `cargo fmt --check` sees staged content at the normal crate
+changes are held aside, `cargo fmt --check` sees staged content at the normal crate
 paths and still resolves the manifest, edition and rustfmt config the same way
 it does today. The misleading comment in `rust_tools.rs` should be deleted when
 this lands; the trade-off was an implementation gap, not an inherent cargo
 constraint.
 
+*Done.* `rust_tools.rs` now records the correction in place of the claim.
+
 ---
 
 ## 2. `stage_fixed` — a formatter that fixes should re-stage
+
+> **Shipped**, under different names: the declaration is `Fix::Rewrite` on
+> a check in `registry.rs`, the opt-in is `git config githooks.fix true`,
+> the re-staging is `hooks::common::restage`, and the result is
+> `Outcome::Fixed`. Three checks declare it — prettier, ruff and cargo-fmt
+> — and all three now genuinely repair; two of them declared the fix for a
+> while without having any fixing code, which `githooks list --json`
+> reported to agents as a capability. `crates/githooks/tests/fixing.rs`.
 
 From lefthook's job options: *"automatically add modified files back to git
 staging"*.
@@ -399,6 +517,12 @@ Not eslint `--fix`: its fixes are semantic and occasionally wrong.
 ---
 
 ## 3. Declared skip conditions, replacing one ad-hoc guard
+
+> **Shipped.** `check::GitState` with the five states, `Scope::not_during`,
+> and `registry::MID_OPERATION` as the shared set applied to the checks
+> that need it. `lib.rs::git_states_in_progress` does the detection and
+> `dispatch.rs` consults it for BOTH stages, closing the pre-push gap the
+> section names. `crates/githooks/tests/git_state.rs`.
 
 lefthook:
 
@@ -452,6 +576,10 @@ to copy the other two.
 
 ## 4. `githooks run [--all-files]`
 
+> **Shipped**, exactly as specified, plus `--hooks-dir`.
+> `githooks run`, `githooks run --all-files`, `githooks run <check>`.
+> `crates/githooks/tests/run_mode.rs`.
+
 `pre-commit run --all-files` runs every hook over the whole repository rather
 than the staged set. Two uses, both of which we currently cannot serve:
 
@@ -477,6 +605,11 @@ protect when the answer is "all of it".
 ---
 
 ## 5. Shebang detection
+
+> **The one section still unbuilt.** `Scope::files` is suffix-only today —
+> `matches()` in `check.rs` calls `path.ends_with(ext)` and nothing reads a
+> file head. Nothing is waiting on it; it is here because it is the gap
+> `.githooks.conf` inherits from `Scope`, not because it is next.
 
 pre-commit classifies files with `identify`, which reads shebangs, so an
 extensionless `scripts/deploy` starting `#!/bin/sh` is a shell file.
@@ -564,6 +697,11 @@ pipeline rather than from here.
 
 ## Order
 
+**All of this shipped, in this order.** It is left as written rather than
+converted to a changelog: the argument for each ordering — why trust had to
+precede `stage_fixed`, why `not_during` had to precede index fidelity — is the
+part worth keeping, and it reads as advice only in the future tense.
+
 **PR 0a — activation and `uninstall` (§0).** Add `uninstall` at both levels and
 name bulk activation `githooks-fleet install` rather than hiding it behind
 `fix --apply`. The README presents per-repository activation as the default and
@@ -593,6 +731,14 @@ the change that also introduces the stash.
 **PR 5 — pre-push runs against the pushed commits**, not the working tree. Its
 own decision: a worktree or `git archive` of the tip is more expensive than
 anything else here, and the cost is the whole question.
+
+Shipped as `pushed_tree.rs`, and the cost is what made it OPT-IN:
+`git config githooks.testPushedTree true`. The instrument is
+`git worktree add --detach <tip>`, not the stash — a push is not a staging
+operation, so the difference that matters is tree-versus-the-commit-you-are-
+sending, which includes staged-but-uncommitted work too. Holding all of that
+aside for the length of a test suite would leave the developer looking at a tree
+that is not theirs for minutes at a time.
 
 Shebang detection is unscheduled. So is everything under *What this does not
 solve*, which is a list of known gaps rather than a backlog.

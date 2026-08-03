@@ -182,17 +182,39 @@ Two scopes, and the distinction matters more than it looks.
 - **Global** (`git config --global --add`) — every repo on the machine, including
   ones cloned later.
 
-A fleet-wide skip must use **global**, not a loop over 96 local writes. One entry
-is one thing to find and one thing to undo; 96 entries are a migration in their
-own right, and the tool has already learned what a half-applied sweep costs. The
-UI therefore offers global explicitly rather than synthesising it, and labels it
-as affecting every repository — present and future.
+**What ships: the UI writes LOCAL, only.** `skips::plan` builds
+`git config --add` / `--unset` with no `--global`, so every toggle lands in that
+repository's `.git/config`. And it goes further than not offering global — it
+REFUSES to touch an entry that is not local. Toggling a check whose skip came
+from `~/.gitconfig` produces
+
+```
+that entry is global, not local — edit it where it lives
+```
+
+rather than a write. That refusal is the right default: a keystroke in a
+per-repository detail pane should not silently change every repository on the
+machine, and an `--unset` aimed at the wrong file is exactly the kind of write
+this tool has already been burned by.
+
+**The argument for global is still a good one, and it is a stated gap.** A
+fleet-wide skip *should* be one global entry, not a loop over 96 local writes:
+one entry is one thing to find and one thing to undo, while 96 entries are a
+migration in their own right, and the tool has already learned what a
+half-applied sweep costs. Nothing in the UI offers that today. Whoever builds it
+should treat "affects every repository, present and future" as text the user
+must read, not a mode they can fall into — which is why it was not bolted onto
+the existing local toggle.
 
 `configured_skips` reads via plain `git config --get-all`, so global and local
 entries are already merged with no way to tell them apart at dispatch time. The
 detail view shows which scope each value came from
 (`git config --show-origin --get-all hook.skip`), or a developer deletes a repo's
-`.git/config` line and is baffled that the check is still skipped.
+`.git/config` line and is baffled that the check is still skipped. This part is
+real: `SkipEntry` carries a `scope` field of `Local | Global | Other { origin }`,
+resolved by `skips::scope_of` from `--show-origin`, and `Other` exists precisely
+so a system config, an include or a worktree config is not silently relabelled
+as one of the two the UI can reason about.
 
 ## Where it lives in the UI
 
@@ -209,19 +231,25 @@ column alone could not once two checks could share a short name.
 ```
 SkipEntry {
   value      : String                  // as written in config
-  scope      : Local | Global | Other(path)
+  scope      : Local | Global | Other { origin }
   suppresses : Vec<&'static str>       // resolved against the check registry
 }
 
 SkipPlan {
-  repo       : PathBuf
-  scope      : Scope
+  check      : &'static str            // the check being toggled
   action     : Add | Remove
-  command    : Vec<String>             // exactly what will be run
+  command    : Vec<String>             // exactly the argv that will run
   suppresses : Vec<&'static str>       // what changes as a result
-  refuse     : Option<Refusal>         // already present / not applicable / unreadable
+  refuse     : Option<String>          // why not, in words the user reads
 }
 ```
+
+`SkipPlan` carries no `repo` or `scope`: the repository is the argument to
+`plan()` rather than a field of its result, and there is no scope to choose
+because every plan is local — see *Scope* above. `refuse` is a plain `String`
+rather than a `Refusal` enum because every refusal is shown to a human and none
+is branched on: "already skipped", "already covered by a broader entry", "that
+entry is global, not local".
 
 `suppresses` is resolved through `githooks_runtime::names_check`, the same
 function the dispatcher uses. Reimplementing the match differently is how a UI

@@ -23,11 +23,18 @@ The wiki also lists all the [implemented hooks](https://github.com/fredericrous/
 Clone the repository to a convenient place:
 
 ```sh
-mkdir ~/.config/git
+mkdir -p ~/.config/git
 cd ~/.config/git
 git clone https://github.com/fredericrous/git-templates.git
-chmod +x templates/hooks/*
 ```
+
+The clone creates `~/.config/git/git-templates/`, so there is nothing named
+`templates/hooks/` in the directory you are standing in. This snippet used to
+end with `chmod +x templates/hooks/*`, which matched nothing — and in `fish`, a
+glob with no matches is a hard error rather than a silent no-op, so the line
+either did nothing or aborted the setup depending on your shell. It is gone
+rather than corrected: `githooks install` (below) sets the mode on the shims it
+writes, so nobody needs to.
 
 Setup your gitconfig
 
@@ -43,6 +50,20 @@ git config --global commit.template ~/.config/git/git-templates/message
 cd <your-repo> && githooks install
 githooks-fleet install --root ~/Developer   # or in bulk
 ```
+
+`githooks install --force` replaces a hook the installer would otherwise refuse:
+one that is present but carries no marker of ours, or one that is a symlink
+(where writing normally would rewrite whatever it points at). Without the flag
+install names every such file and writes none of them, because a hook somebody
+else put there is somebody else's; `--force` is how you say it is yours to
+replace, and the output then names what it took rather than just counting what
+it wrote.
+
+Two things `--force` does **not** override, deliberately. A **tracked** file is
+never written — that is source belonging to a checkout, and it is the guard that
+was got wrong twice. And a path that is a directory or a device is refused
+whatever you pass, because that is not "a hook that is there", it is a sign
+something else is going on; refusing costs one `rm`.
 
 Neither of these deletes a hook it did not write. A `pre-commit-*` or
 `pre-push-*` file in `.git/hooks` without our marker is reported and left
@@ -112,9 +133,21 @@ git pull
 Update the target repository
 
 ```sh
-rm $(git rev-parse --git-dir)/hooks/*
-git init
+cd <your-repo> && githooks install        # re-bake the shims here
+githooks-fleet fix --root ~/Developer     # or see what the whole fleet needs
+githooks-fleet fix --apply --root ~/Developer
 ```
+
+Ordinary binary updates need none of this: every shim points at the one binary,
+so `make install` reaches all 96 repositories at once. Re-installing is only
+needed when the shim SET changes — a hook added, removed or renamed.
+
+This used to say `rm $(git rev-parse --git-dir)/hooks/*` followed by `git init`,
+and that is exactly the thing this project argues against two paragraphs
+earlier. The glob deletes every hook in the directory, including ones other
+tools installed and ones you wrote yourself, to update four files that belong to
+us. `githooks uninstall` exists so that removing our hooks never means removing
+yours; a `rm *` in the README undid that promise in one line.
 
 ## Custom checks
 
@@ -219,12 +252,14 @@ state as its own `AGENTS` column, and `fix --apply --agents-md` (or
 once; like every other fleet write, it is opt-in per invocation, never bundled
 into a plain `--apply`.
 
-Design notes live in `docs/`:
-[hook-architecture.md](docs/hook-architecture.md) (the `Check` trait, shipped),
-[index-fidelity-and-run-modes.md](docs/index-fidelity-and-run-modes.md) (what
-`pre-commit`, `lefthook` and `husky` are worth taking from — specification),
-[fleet-dashboard.md](docs/fleet-dashboard.md) and
-[hook-skip-management.md](docs/hook-skip-management.md).
+Design notes live in `docs/`, and each says at the top what of it ships:
+[hook-architecture.md](docs/hook-architecture.md) (the `Check` trait),
+[index-fidelity-and-run-modes.md](docs/index-fidelity-and-run-modes.md) (trust,
+staged-only checking and run modes — what `pre-commit`, `lefthook` and `husky`
+were worth taking from, and what was refused),
+[fleet-dashboard.md](docs/fleet-dashboard.md),
+[hook-skip-management.md](docs/hook-skip-management.md) and
+[rust-migration.md](docs/rust-migration.md) (history, kept for its reasoning).
 
 ## Windows
 
@@ -256,7 +291,14 @@ suffix on its own.
 
 ## Requirements
 
-- Git 2.22+
+- **Git 2.31+**
+
+2.31, not the 2.22 this said. `git rev-parse --path-format=absolute` landed in
+2.31, and three places depend on it: `install.rs` resolving the hooks directory,
+`hooks/common.rs` finding the git common dir, and `hooks/python_tools.rs`
+locating a linked worktree's main `.venv`. On an older git those return nothing
+rather than failing loudly, which is the worst shape for a version floor — the
+tool appears to work and quietly resolves the wrong paths.
 
 The hooks are a single Rust binary with no runtime dependencies; each check
 brings its own tool requirement only where you have opted into that check (a
@@ -274,14 +316,44 @@ requirements of the shell implementation and are no longer needed.
 
 ## Contribute
 
-Basically if a script is simple implement it in shell script. If the logic is complicated, use javascript or any proper language to implement it. Javascript is nice because nowadays a lot of devs have nodejs installed on their machine.
+**Everything is Rust, in `crates/`.** This section used to say "if a script is
+simple implement it in shell script… use javascript… a lot of devs have nodejs
+installed", which is precisely the design the migration undid — and it sat
+twenty lines below the sentence saying ZSH and NodeJS are no longer needed. A
+new check is a module plus one registry entry, not a script.
 
-There's a makefile, open it, see the different tasks, basically:
+```
+crates/githooks-runtime/   the checks, registry and dispatchers. std only.
+crates/githooks/           the hook binary. Runs on every commit.
+crates/githooks-fleet/     the dashboard and the fleet fixer. Opt-in.
+```
 
-- `make test` runs the tests
-- `make` is an alias to `make test`
-- `make install` builds and runs `githooks install`, which puts the binary in
+**The commit path stays dependency-free.** `githooks` and `githooks-runtime`
+link no external crates, and `scripts/check-no-deps.sh` fails a build that
+changes that. It is a strong default, not a prohibition, and the script itself
+explains when reopening it is a legitimate call rather than a violation — read
+it before arguing either way. `githooks-fleet` takes dependencies quite happily
+(ratatui, crossterm, serde); it is installed separately and runs when asked.
+
+The make targets:
+
+- `make lint` — exactly what CI's `rust` job gates on: `cargo fmt --check` and
+  `cargo clippy --all-targets -- -D warnings`. Note that this repo's OWN
+  `pre-commit-clippy` runs a wider one (`--workspace --all-features`), so the
+  hook can reject a commit CI would accept.
+- `make test` — `scripts/check-no-deps.sh` plus `cargo test`. Kept clippy-free
+  so the inner loop is fast. `make test RUN=<suite>` runs one.
+- `make check` — `lint` then `test`. **`make` with no target runs this.**
+- `make install` — builds and runs `githooks install`, which puts the binary in
   `~/.local/bin` and writes the shims into this repo and the template dir. It
-  refuses to touch a template dir that is a checkout — see `crates/githooks-runtime/src/install.rs`
+  refuses to touch a template dir that is a checkout; see
+  `crates/githooks-runtime/src/install.rs`.
+- `make install-fleet` — the dashboard, installed separately and on purpose.
+- `make propagate` — push the shim SET to every repo. Dry run; `APPLY=1` writes.
+  Only needed when a hook is added, removed or renamed.
+- `make deps` — the dependency guard on its own.
 
-To run only one test, use `make test RUN=<part of the name of the test>`
+The toolchain is pinned in `rust-toolchain.toml`, and the floor the commit path
+may require is `rust-version` in `Cargo.toml` (1.74), enforced by CI's `msrv`
+job. Both are deliberate PRs to change: under `-D warnings` a new clippy release
+is a breaking change, which is the whole reason the pin exists.
