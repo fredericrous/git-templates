@@ -31,9 +31,8 @@ prepend the type's gitmoji for you; one you add by hand eats into the
 
 ## The types
 
-Migrated from the old wiki's "Commit Prefix" page and re-derived from
-`COMMIT_TYPES`, which is the authority — the wiki's table had drifted from what
-the hook actually prepends.
+This table is derived from `COMMIT_TYPES` in the source, which is the
+authority — what you read here is what the hook enforces and prepends.
 
 | icon | type | for |
 |---|---|---|

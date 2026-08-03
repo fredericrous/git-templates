@@ -15,13 +15,11 @@ single spaces parse identically.
 
 ## Why the file is committed
 
-`.git/hooks` is not committed, which is why the old `pre-commit-*` filename
-mechanism could never actually share a custom hook: every member of the team had
-to install it by hand, and nothing told them when it changed. That mattered more
-than the lexicographic ordering usually cited against filename prefixes.
-
-A committed manifest is reviewed like any other change, arrives with a `git
-pull`, and is visible in the fleet dashboard.
+`.git/hooks` is not committed, so a hook script dropped in there can never
+actually be shared: every member of the team has to install it by hand, and
+nothing tells them when it changes. A committed manifest is reviewed like any
+other change, arrives with a `git pull`, and is visible in the fleet
+dashboard.
 
 ## The fields
 
@@ -195,16 +193,7 @@ trigger), and the trigger (`pre-commit`, meaning all of them). Three exact
 comparisons, in `runtime::names_check` — `hook.skip = e` reaches nothing at all,
 and skipping `lint-js` leaves `lint-json-yaml` alone.
 
-> This paragraph used to claim the opposite — "`hook.skip` matches by substring
-> — `hook.skip = e` disables every check" — while README and
-> `docs/hook-skip-management.md` both stated the real rule on the same day. A
-> repository contradicting itself about which config lines disable your checks
-> is worse than either version being wrong alone, so the correction is recorded
-> rather than quietly applied. There is a test asserting that `hook.skip = e`
-> reaches nothing.
-
-**Prefer the severity downgrade anyway**, for a reason that survives the
-correction and is in fact the better one. The two do different things:
+**Prefer the severity downgrade anyway.** The two do different things:
 
 | | runs | reports | blocks |
 |---|---|---|---|

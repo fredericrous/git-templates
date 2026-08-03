@@ -22,10 +22,8 @@ short name, then trigger. So you can downgrade a whole trigger and then exempt
 one check from that downgrade.
 
 **Nothing matches by substring.** `hook.skip e` reaches nothing at all, and
-skipping `lint-js` leaves `lint-json-yaml` alone. This is a deliberate break
-from the old shell implementation, which matched by glob and therefore coupled
-checks whose names happened to share a prefix. See
-[skip management](hook-skip-management.md).
+skipping `lint-js` leaves `lint-json-yaml` alone — a skip can never silently
+couple two checks whose names happen to share a prefix.
 
 ## `hook.skip` — do not run it
 

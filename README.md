@@ -14,6 +14,12 @@ name, and uninstall removes exactly what install wrote.
 
 ![githooks catching a commit and letting the fixed one through](docs/assets/githooks-demo.gif)
 
+Against pre-commit, lefthook and husky: no YAML to write before anything
+runs — the twenty checks scope themselves to your repository — and a trust
+gate none of them have, so a cloned repository's committed config cannot run
+code on your machine until you review it.
+[The full comparison](docs/similar-projects.md).
+
 ## Install
 
 **Linux and macOS**
@@ -315,9 +321,7 @@ and `~/.local/bin/githooks.exe`, then `PATH`.
   appears to work and quietly resolves the wrong paths.
 
 The hooks are a single binary with no runtime dependencies. Each check brings
-its own tool requirement only where you have opted into that check. ZSH,
-NodeJS and ripgrep were requirements of the shell implementation and are no
-longer needed.
+its own tool requirement only where you have opted into that check.
 
 ## Documentation
 
@@ -329,7 +333,8 @@ published as a book:
   [Opting out](docs/opting-out.md)
 - [The trust model](docs/trust.md) · [Custom checks](docs/custom-checks.md)
 - [Where the hooks fit in your flow](docs/coding-flow.md) ·
-  [Commit conventions](docs/commit-convention.md)
+  [Commit conventions](docs/commit-convention.md) ·
+  [How it compares](docs/similar-projects.md)
 - Decision records for maintainers: [hook architecture](docs/hook-architecture.md),
   [index fidelity and run modes](docs/index-fidelity-and-run-modes.md),
   [skip management](docs/hook-skip-management.md),
