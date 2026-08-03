@@ -114,6 +114,30 @@ impl Repo {
         self.hook_at(&self.dir, name, args)
     }
 
+    /// Run a SUBCOMMAND — `githooks list`, `githooks setup` — from this repo.
+    ///
+    /// No `--hooks-dir`: that flag is hook mode, and a subcommand takes its own
+    /// arguments verbatim.
+    ///
+    /// `GIT_CONFIG_GLOBAL` is set AFTER `strip_git_env_impl`, which removes
+    /// every `GIT_*` variable including this one. Order matters: a test that
+    /// exercises `--global` config would otherwise write the DEVELOPER's
+    /// `~/.gitconfig`, and these tests are themselves run by
+    /// `pre-push-cargo-test`. The file lives inside the repo's temp directory,
+    /// so it is removed on drop with everything else.
+    pub fn run(&self, args: &[&str]) -> HookRun {
+        let mut cmd = Command::new(bin());
+        cmd.args(args).current_dir(&self.dir).stdin(Stdio::null());
+        Self::strip_git_env_impl(&mut cmd);
+        cmd.env("GIT_CONFIG_GLOBAL", self.dir.join("fake-gitconfig"));
+        let out = cmd.output().expect("run githooks");
+        HookRun {
+            code: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    }
+
     /// Run a hook as the shim would from a LINKED WORKTREE: `--hooks-dir` is
     /// still this (main) repo's `.git/hooks` — real worktrees share the main
     /// checkout's hooks, they do not get their own — but the process runs

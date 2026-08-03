@@ -20,6 +20,8 @@
 
 pub mod agents_md;
 pub mod check;
+pub mod commit_style;
+pub mod config;
 pub mod dispatch;
 pub mod git;
 pub mod hookfile;
@@ -30,6 +32,7 @@ pub mod manifest;
 pub mod pushed_tree;
 pub mod pushrefs;
 pub mod registry;
+pub mod setup;
 pub mod staged_only;
 pub mod trust;
 pub mod ui;
@@ -320,6 +323,79 @@ pub fn print_text(listings: &[CheckListing]) {
     println!("  ● runs here   ○ inert   ⊘ skipped via hook.skip   ✗ declaration unusable");
 }
 
+/// What `commit-msg` will enforce here, and where each answer came from.
+///
+/// Printed **always**, not only when something has been configured. The
+/// defaults are the divisive part — a gitmoji in every subject, a 50-character
+/// description — and somebody who wants them changed has no reason to guess
+/// that four keys exist. `githooks list` is where they are already looking, so
+/// it is where the dial belongs.
+///
+/// The source column appears only for a value somebody set: repeating
+/// "default" on four rows spends a column restating the line underneath.
+pub fn print_commit_style(style: &commit_style::Style, rows: &[commit_style::Setting]) {
+    println!();
+    println!("{}", ui::highlight("commit style"));
+    for r in rows {
+        let origin = if r.set_here {
+            format!("{} ({})", r.key, r.scope.as_str())
+        } else {
+            String::new()
+        };
+        println!("  {:<18} {:<10} {origin}", r.label, r.value);
+    }
+    println!();
+    for w in style.warnings() {
+        println!("  {} {w}", ui::warning_sign().trim());
+    }
+    println!("  `githooks setup` to change any of these");
+}
+
+/// The commit-style block as JSON: the effective value, the shipped default,
+/// whether they differ and where the answer came from — the same
+/// declared-vs-effective shape `CheckListing` uses for severity.
+fn commit_style_json(style: &commit_style::Style, rows: &[commit_style::Setting]) -> String {
+    let setting = |r: &commit_style::Setting, value: String, default: String| {
+        json::object(&[
+            format!("\"value\":{value}"),
+            format!("\"default\":{default}"),
+            json::bool_field("overridden", r.overridden),
+            json::bool_field("set_here", r.set_here),
+            json::string_field("source", r.scope.as_str()),
+            json::string_field("key", r.key),
+        ])
+    };
+    let d = commit_style::Style::default();
+    // `rows` is built in this order by `commit_style::describe`, and the
+    // numbers are emitted as numbers so a reader can compare them.
+    let quoted = |s: &str| format!("\"{}\"", json::escape(s));
+    let fields: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            let (value, default) = match r.key {
+                commit_style::KEY_GITMOJI => {
+                    (quoted(style.gitmoji.as_str()), quoted(d.gitmoji.as_str()))
+                }
+                commit_style::KEY_SUBJECT_MAX => {
+                    (style.subject_max.to_string(), d.subject_max.to_string())
+                }
+                commit_style::KEY_DESCRIPTION_MAX => (
+                    style.description_max.to_string(),
+                    d.description_max.to_string(),
+                ),
+                _ => (style.body_wrap.to_string(), d.body_wrap.to_string()),
+            };
+            let name = r.key.rsplit('.').next().unwrap_or(r.key);
+            format!("\"{}\":{}", json::escape(name), setting(r, value, default))
+        })
+        .collect();
+
+    let warnings: Vec<String> = style.warnings();
+    let mut all = fields;
+    all.push(json::string_array_field("warnings", &warnings));
+    json::object(&all)
+}
+
 /// `{"stage_filter": ..., "pushed": ..., "checks": [...]}` — an object, not a
 /// bare array, so a field can be added later without changing the top-level
 /// shape.
@@ -359,12 +435,14 @@ pub fn print_json(stage_filter: Option<check::Stage>, pushed: bool, listings: &[
         })
         .collect();
 
+    let (style, rows) = commit_style::describe();
     println!(
         "{}",
         json::object(&[
             json::opt_string_field("stage_filter", stage_filter.map(check::Stage::as_str)),
             json::bool_field("pushed", pushed),
             format!("\"checks\":{}", json::array(&checks)),
+            format!("\"commit_style\":{}", commit_style_json(&style, &rows)),
         ])
     );
 }
@@ -418,6 +496,11 @@ pub fn list_checks(opts: ListOptions) -> i32 {
         print_json(opts.stage, opts.pushed, &listings);
     } else {
         print_text(&listings);
+        // Not filtered by `--stage`: commit style belongs to no stage, and
+        // suppressing it for `--stage pre-push` would only hide it from the
+        // reader who narrowed their question.
+        let (style, rows) = commit_style::describe();
+        print_commit_style(&style, &rows);
     }
     0
 }

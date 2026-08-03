@@ -311,10 +311,7 @@ pub fn fixing_enabled() -> bool {
 /// "you asked for fixing and this mode will not do it", and say the second out
 /// loud instead of silently ignoring the key.
 pub fn fixing_requested() -> bool {
-    matches!(
-        git::stdout(&["config", "--get", "githooks.fix"]).as_deref(),
-        Some("true") | Some("1") | Some("yes")
-    )
+    crate::config::boolean_or("githooks.fix", false)
 }
 
 /// What a re-stage actually did. THREE answers, because the old `bool`

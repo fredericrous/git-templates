@@ -35,14 +35,17 @@ If a blocking check fails, the commit is aborted and nothing has happened.
 ## `commit-msg`
 
 Then git hands the message to `commit-msg`, which lints it against the
-[conventions](commit-convention.md), prepends the type's gitmoji, wraps the
-body at 72 columns and groups the footers.
+[conventions](commit-convention.md), wraps the body at 72 columns and groups
+the footers.
 
 This is the hook that rejects `Add to Cart`: no type prefix. `git commit -m
-"feat: a cart the checks agree with"` passes, and the commit is created with
-`✨` in front of it.
+"feat: a cart the checks agree with"` passes.
 
-`--no-verify` does not bypass `commit-msg`. That is git's behaviour, not ours.
+`--no-verify` does not bypass `commit-msg` — that is git's behaviour, not ours
+— and neither `hook.skip` nor a severity override names it. So this is the one
+hook whose rules are adjustable in themselves: `githooks setup` sets the
+subject and description limits, the body wrap, and where the type's gitmoji
+goes (nowhere, by default).
 
 ## `git push`
 

@@ -33,11 +33,12 @@ use std::path::{Path, PathBuf};
 use crate::ui::warning_sign;
 
 /// Whether the user asked for the accurate-but-slower answer.
+///
+/// Read through [`crate::config`], so `on`, `yes` and every capitalisation work
+/// exactly as git-config(1) says they do — and a value git cannot parse takes
+/// the default while SAYING so, rather than reading as a quiet "no".
 pub fn enabled() -> bool {
-    matches!(
-        crate::git::stdout(&["config", "--get", "githooks.testPushedTree"]).as_deref(),
-        Some("true") | Some("1") | Some("yes")
-    )
+    crate::config::boolean_or("githooks.testPushedTree", false)
 }
 
 /// A checkout of the pushed commit, removed when it goes out of scope.

@@ -368,6 +368,14 @@ jobs:
             chmod +x ".git/hooks/$h"
           done
 
+          # Ask for a gitmoji, so there is something visible for the hook to do
+          # to the subject. The default placement is `none` — the message you
+          # wrote is the message you get — which is right for a default and
+          # useless as proof that anything ran. This also exercises the config
+          # read itself on the one platform where its `git config` calls have
+          # never been tried.
+          git config githooks.commit.gitmoji prefix
+
           echo "hello" > a.txt && git add a.txt
           git commit -m "feat: a windows commit through the rust hooks"
 
@@ -386,6 +394,12 @@ jobs:
           esac
           [ "$subject" = "feat: a windows commit through the rust hooks" ] \
             && { echo "::error::gitmoji prefix missing — hook did not rewrite"; exit 1; }
+
+          # And the settings are readable through the CLI here too — `githooks
+          # setup` with no terminal must print the keys rather than hang or
+          # fail, which is the path a Windows provisioning script would take.
+          "$BIN" setup | grep -q "githooks.commit.gitmoji" \
+            || { echo "::error::githooks setup printed no keys"; exit 1; }
           echo "windows end-to-end OK"
 
       # The case the baked run above cannot see. `make install` puts the binary

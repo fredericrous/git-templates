@@ -63,6 +63,74 @@ repository: you get the report immediately and pay down the backlog on your own
 schedule, rather than choosing between a blocked commit and a `hook.skip` you
 will forget to remove.
 
+## `githooks.commit.*` — what a commit message must look like
+
+Four keys, and `githooks setup` walks you through all of them:
+
+| key | default | means |
+|---|---|---|
+| `githooks.commit.gitmoji` | `none` | where the type's emoji goes |
+| `githooks.commit.subjectMax` | `72` | longest the whole subject may be |
+| `githooks.commit.descriptionMax` | `50` | longest the part after `type: ` may be |
+| `githooks.commit.bodyWrap` | `72` | column the body is hard-wrapped at; `0` never wraps |
+
+These matter more than they look, because `commit-msg` is the one hook
+`hook.skip` and `githooks.severity` do **not** reach, and git exempts it from
+`--no-verify`. Without these keys the only answers to "I do not want a gitmoji
+in every subject" were to comply or to uninstall.
+
+### The four placements
+
+```sh
+git config githooks.commit.gitmoji prefix
+```
+
+| | stored as | |
+|---|---|---|
+| `none` | `feat: add a cart` | the default — your subject, untouched |
+| `prefix` | `✨  feat: add a cart` | |
+| `suffix` | `feat: add a cart ✨` | commitlint and changelog tools still see the type |
+| `replace` | `✨  add a cart` | the emoji stands in for the type word |
+
+You always *write* `feat: add a cart`, and it is always validated as that —
+the placement only decides what gets stored. `replace` costs you interop, and
+that is the trade it is: an emoji is not a type any conventional-commit tool
+knows how to read.
+
+Two things hold whatever you choose. The limits measure **what you wrote**, so
+the emoji never eats your description budget. And running the hook again over
+its own output — an amend, a rebase reword — changes nothing.
+
+### The limits
+
+```sh
+git config githooks.commit.descriptionMax 68
+git config githooks.commit.bodyWrap 0
+```
+
+`68` is the useful number if 50 feels tight: it still fits a 72-column subject
+with a short type and no scope. `bodyWrap 0` leaves the body exactly as
+written, which is what keeps a pasted stack trace or a fenced code block
+intact.
+
+A value git cannot parse, or one outside `1..=1000`, takes the shipped default
+**and says so on the commit it happened on** — because a limit you believe you
+raised and did not is the whole failure mode this project refuses to be quiet
+about. A pairing that cannot do anything (a description budget the subject
+limit can never accommodate) is reported by `githooks list`, not by the hook:
+the commit path says what is in effect, and the config-reading commands say
+what makes no sense.
+
+## `githooks.fix` — let a check repair what it finds
+
+```sh
+git config githooks.fix true
+```
+
+Off unless you ask. A hook that edits your files without being asked is a
+larger surprise than one that complains. See
+[custom checks](custom-checks.md#letting-a-check-fix-what-it-finds).
+
 ## `githooks.testPushedTree` — test what you are pushing
 
 ```sh
@@ -116,7 +184,21 @@ Full reference: [custom checks](custom-checks.md) ·
 ```sh
 githooks list              # what would run here, and why not
 githooks list --json       # the same, machine-readable
+githooks setup             # walk the commit-style keys, with the current values
 githooks-fleet             # the same, across every repository
+```
+
+`githooks list` ends with the commit style in effect, and names the key and the
+scope of anything you set:
+
+```
+commit style
+  gitmoji            suffix     githooks.commit.gitmoji (global)
+  subject max        72
+  description max    68         githooks.commit.descriptionMax (global)
+  body wrap          off        githooks.commit.bodyWrap (local)
+
+  `githooks setup` to change any of these
 ```
 
 `githooks list` reports the **effective** severity, after overrides — so a

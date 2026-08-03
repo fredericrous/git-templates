@@ -31,6 +31,12 @@ pub fn bool_field(key: &str, value: bool) -> String {
     format!("\"{}\":{value}", escape(key))
 }
 
+/// A number, unquoted — a limit a reader will compare against is worth
+/// emitting as one rather than as a string they have to parse back.
+pub fn int_field(key: &str, value: i64) -> String {
+    format!("\"{}\":{value}", escape(key))
+}
+
 /// `null` when `value` is `None` — used for `stage_filter` and `command`.
 pub fn opt_string_field(key: &str, value: Option<&str>) -> String {
     match value {
