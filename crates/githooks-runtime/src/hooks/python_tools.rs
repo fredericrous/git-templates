@@ -90,8 +90,10 @@ pub fn ruff(_args: &[std::ffi::OsString]) -> Outcome {
         ));
     }
 
+    // `--` before the file list at each of these: a staged file named e.g.
+    // `-x.py` would otherwise be read as a flag by ruff's own parser.
     let mut failed = false;
-    let mut check: Vec<String> = vec!["check".into(), "--force-exclude".into()];
+    let mut check: Vec<String> = vec!["check".into(), "--force-exclude".into(), "--".into()];
     check.extend(files.iter().cloned());
     if !run_tool(&root, &argv, &check) {
         fail(&format!(
@@ -101,7 +103,12 @@ pub fn ruff(_args: &[std::ffi::OsString]) -> Outcome {
         failed = true;
     }
 
-    let mut fmt: Vec<String> = vec!["format".into(), "--check".into(), "--force-exclude".into()];
+    let mut fmt: Vec<String> = vec![
+        "format".into(),
+        "--check".into(),
+        "--force-exclude".into(),
+        "--".into(),
+    ];
     fmt.extend(files.iter().cloned());
     if !run_tool(&root, &argv, &fmt) {
         fail(&format!(
@@ -143,7 +150,11 @@ pub fn pyright(_args: &[std::ffi::OsString]) -> Outcome {
     // local-vs-CI gap. Pyright still resolves the whole workspace for imports,
     // so inference is unchanged; only the reported set is scoped. CI's
     // whole-tree run stays the authority for cross-file-only errors.
-    if !run_tool(&root, &argv, &files) {
+    // `--` before the file list: a staged file named e.g. `-p.py` would
+    // otherwise be read as a flag by pyright's own parser.
+    let mut with_files = vec!["--".to_string()];
+    with_files.extend(files.iter().cloned());
+    if !run_tool(&root, &argv, &with_files) {
         fail("Pyright type errors. Please fix");
         return Outcome::Failed;
     }

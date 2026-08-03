@@ -278,3 +278,368 @@ fn restore_with_nothing_parked_is_fine() {
         .expect("githooks restore");
     assert!(out.status.success());
 }
+
+/// SIGINT mid-check must still restore. The handler itself only writes a byte
+/// to a pipe — a plain thread outside signal context does the actual restore
+/// — so this is the one test proving that indirection still ends where the
+/// old, simpler, signal-unsafe handler did: the tree back the way the author
+/// left it, and the process dead by the signal that hit it.
+///
+/// `sleep 5` is the declared check: slow enough that the signal is guaranteed
+/// to land while it is still the thing running, cheap enough not to make a
+/// hung path (a regression back to restoring inline) drag the suite out
+/// waiting on it — `recv_timeout` below bounds that instead.
+#[cfg(unix)]
+#[test]
+fn sigint_mid_check_still_restores() {
+    let r = Repo::new();
+    seed(&r);
+    r.stage("x.json", VALID);
+    r.write("x.json", BROKEN);
+    r.stage(".githooks.conf", "pre-commit  slow  *  block  sleep  5\n");
+    let trusted = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("trust")
+        .current_dir(&r.dir)
+        .output()
+        .expect("githooks trust");
+    assert!(trusted.status.success(), "could not trust the manifest");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("--hooks-dir")
+        .arg(r.path(".git/hooks"))
+        .arg("pre-commit")
+        .current_dir(&r.dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn githooks pre-commit");
+
+    // `enter()` parks before any check starts, so this appears almost
+    // immediately — long before `sleep 5` could finish on its own.
+    let store = r.path(".git/githooks-held");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !store.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture: nothing was ever parked to restore"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let signalled = Command::new("kill")
+        .arg("-INT")
+        .arg(child.id().to_string())
+        .status()
+        .expect("run kill");
+    assert!(signalled.success(), "fixture: could not signal the child");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait());
+    });
+    let status = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect(
+            "githooks did not exit within 10s of SIGINT — \
+             the pipe/thread handoff deadlocked",
+        )
+        .expect("wait on the child");
+    assert!(!status.success(), "SIGINT must not look like a clean pass");
+
+    assert_eq!(
+        tree(&r, "x.json"),
+        BROKEN,
+        "unstaged work was not restored after SIGINT"
+    );
+    assert!(!store.exists(), "held files left behind after SIGINT");
+}
+
+/// A symlink is a link, not a file with those bytes in it. `fs::read` follows
+/// it — copying the TARGET's content as the "backup" — so a naive park-and-
+/// restore quietly turns the link into a plain file. `link` must still be a
+/// link afterward, pointing where the author unstaged-left it.
+#[test]
+fn an_unstaged_symlink_retarget_survives_the_hook() {
+    let r = Repo::new();
+    seed(&r);
+    if !try_symlink("x.json", &r.path("link")) {
+        println!("  ! symlinks unavailable — skipping");
+        return;
+    }
+    r.git(&["add", "link"]);
+    r.commit("chore: add a symlink");
+
+    // Unstaged: repoint the tracked link elsewhere.
+    std::fs::remove_file(r.path("link")).expect("remove the old link");
+    assert!(
+        try_symlink("unstaged-target", &r.path("link")),
+        "fixture: retarget failed after the capability check passed"
+    );
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "{}", run.output());
+
+    let meta = std::fs::symlink_metadata(r.path("link")).expect("link must still exist");
+    assert!(
+        meta.file_type().is_symlink(),
+        "the symlink was replaced with a regular file"
+    );
+    assert_eq!(
+        std::fs::read_link(r.path("link")).expect("read link"),
+        std::path::Path::new("unstaged-target"),
+        "the unstaged retarget was not restored"
+    );
+}
+
+/// A symlink mid-retarget commonly points at nothing for a moment. `fs::read`
+/// on a dangling link fails exactly like it does on a deleted file, so this
+/// must not be mistaken for one — that reads the working tree, decides the
+/// link was deleted, and deletes it again on restore.
+#[test]
+fn a_dangling_unstaged_symlink_is_not_deleted() {
+    let r = Repo::new();
+    seed(&r);
+    if !try_symlink("x.json", &r.path("link")) {
+        println!("  ! symlinks unavailable — skipping");
+        return;
+    }
+    r.git(&["add", "link"]);
+    r.commit("chore: add a symlink");
+
+    std::fs::remove_file(r.path("link")).expect("remove the old link");
+    assert!(
+        try_symlink("does-not-exist", &r.path("link")),
+        "fixture: retarget failed after the capability check passed"
+    );
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "{}", run.output());
+
+    let meta = std::fs::symlink_metadata(r.path("link"))
+        .expect("a dangling symlink was deleted instead of restored");
+    assert!(meta.file_type().is_symlink());
+    assert_eq!(
+        std::fs::read_link(r.path("link")).expect("read link"),
+        std::path::Path::new("does-not-exist"),
+    );
+}
+
+/// A regression the first two symlink tests could not catch: they both use
+/// `link`, which has no extension, so `Path::with_extension` (the original,
+/// wrong implementation) happened to behave like appending a suffix for it.
+/// A tracked symlink that HAS one, `link.txt`, is where `with_extension`
+/// actually replaces `.txt` with the marker — parking it as
+/// `link.githooks-symlink` and, on restore, recreating bare `link` while the
+/// real `link.txt` (whatever `checkout` left there) is never touched again.
+#[test]
+fn a_retargeted_symlink_with_an_extension_keeps_its_name() {
+    let r = Repo::new();
+    seed(&r);
+    if !try_symlink("x.json", &r.path("link.txt")) {
+        println!("  ! symlinks unavailable — skipping");
+        return;
+    }
+    r.git(&["add", "link.txt"]);
+    r.commit("chore: add a symlink");
+
+    std::fs::remove_file(r.path("link.txt")).expect("remove the old link");
+    assert!(
+        try_symlink("unstaged-target", &r.path("link.txt")),
+        "fixture: retarget failed after the capability check passed"
+    );
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "{}", run.output());
+
+    let meta = std::fs::symlink_metadata(r.path("link.txt"))
+        .expect("link.txt must still exist, under its full name");
+    assert!(
+        meta.file_type().is_symlink(),
+        "the symlink was replaced with a regular file"
+    );
+    assert_eq!(
+        std::fs::read_link(r.path("link.txt")).expect("read link"),
+        std::path::Path::new("unstaged-target"),
+        "the unstaged retarget was not restored"
+    );
+    assert!(
+        !r.path("link").exists(),
+        "restore invented a bare `link` — with_extension truncated the marker's name"
+    );
+}
+
+/// The same `with_extension` mistake, on the OTHER marker: a tracked file
+/// deleted in the working tree but not staged. `x.json` already has an
+/// extension, so this is the case `nothing_unstaged_means_nothing_is_moved`
+/// and friends never exercised — they all pass `x.json` through the
+/// MODIFIED branch, which never went through `with_extension` at all.
+#[test]
+fn an_unstaged_delete_of_an_extensioned_file_restores_under_its_full_name() {
+    let r = Repo::new();
+    seed(&r);
+    r.stage("x.json", VALID);
+    std::fs::remove_file(r.path("x.json")).expect("delete unstaged");
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(run.passed(), "{}", run.output());
+
+    // The wrong marker name ("x.githooks-absent") does not match "x.json",
+    // so `remove_file` on it silently no-ops and `checkout`'s resurrected
+    // x.json is left behind — the delete the author made is never restored.
+    assert!(
+        !r.path("x.json").exists(),
+        "the unstaged delete was not restored — with_extension named the \
+         marker for `x`, not `x.json`, so restore's remove_file missed it"
+    );
+}
+
+/// A stash an earlier, interrupted run failed to restore still holds work
+/// nobody has recovered. `enter()` used to `remove_dir_all` it unconditionally
+/// before parking a new one — the next commit with any unstaged change would
+/// silently destroy that unrecovered backup. It must refuse instead.
+#[test]
+fn a_previous_unrecovered_stash_is_not_clobbered() {
+    let r = Repo::new();
+    seed(&r);
+    r.stage("x.json", VALID);
+    r.write("x.json", BROKEN);
+
+    // Simulate a run that parked something and never got to restore it.
+    std::fs::create_dir_all(r.path(".git/githooks-held")).expect("mkdir");
+    std::fs::write(
+        r.path(".git/githooks-held/precious.txt"),
+        "not recovered yet\n",
+    )
+    .expect("write");
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(
+        !run.passed(),
+        "must refuse rather than silently clobber an unrecovered stash:\n{}",
+        run.output()
+    );
+    assert_eq!(
+        std::fs::read_to_string(r.path(".git/githooks-held/precious.txt")).expect("read"),
+        "not recovered yet\n",
+        "the unrecovered stash must survive the refusal"
+    );
+    assert_eq!(
+        tree(&r, "x.json"),
+        BROKEN,
+        "the tree must be untouched when the guard refuses"
+    );
+}
+
+/// A linked worktree's `.git` is a FILE pointing at a private admin
+/// directory (`<main>/.git/worktrees/<name>`) — not the common `.git` the
+/// hooks share and the stash lives in. `enter()` gets this right because it
+/// is handed `--hooks-dir` directly; `restore()` used to re-derive the
+/// location via `git rev-parse --git-dir`, which names the PRIVATE directory
+/// from inside a worktree and so never finds what `enter()` parked. That
+/// looked exactly like "nothing was held" and silently lost the author's
+/// unstaged work.
+#[test]
+fn a_commit_in_a_linked_worktree_still_gets_its_unstaged_work_back() {
+    let r = Repo::new();
+    seed(&r);
+    let wt = r.worktree("wt");
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(&wt)
+            .args(args)
+            .output()
+            .expect("git")
+    };
+
+    std::fs::write(wt.join("x.json"), VALID).expect("write");
+    git(&["add", "x.json"]);
+    std::fs::write(wt.join("x.json"), BROKEN).expect("write");
+
+    let run = r.hook_at(&wt, "pre-commit", &[]);
+    assert!(
+        run.passed(),
+        "judged the working tree, not the commit:\n{}",
+        run.output()
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt.join("x.json")).expect("read"),
+        BROKEN,
+        "unstaged work in a linked worktree was not restored — \
+         restore() looked in the wrong .git"
+    );
+    // `enter()` and `restore()` share ONE `store_dir()` — wherever that
+    // resolves to, nothing is left behind once restore() has succeeded.
+    let git_dir = String::from_utf8_lossy(&git(&["rev-parse", "--git-dir"]).stdout)
+        .trim()
+        .to_string();
+    assert!(
+        !std::path::Path::new(&git_dir)
+            .join("githooks-held")
+            .exists(),
+        "held files left behind after a successful restore"
+    );
+}
+
+/// Same worktree distinction, through the manual recovery path: `githooks
+/// restore` run from inside a linked worktree must find the stash the guard
+/// left — wherever `store_dir()` actually parks it — not report "nothing of
+/// ours to restore".
+#[test]
+fn restore_command_finds_the_stash_from_a_linked_worktree() {
+    let r = Repo::new();
+    seed(&r);
+    let wt = r.worktree("wt");
+    let git_in = |dir: &std::path::Path, args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git")
+    };
+
+    // Park a file the way the guard does. `enter()` and `restore()` share ONE
+    // `store_dir()`, so wherever `git rev-parse --git-dir` resolves FROM THE
+    // WORKTREE is where a real stash would have landed — then abandon it, as
+    // if the process died before its own restore ran.
+    let git_dir = String::from_utf8_lossy(&git_in(&wt, &["rev-parse", "--git-dir"]).stdout)
+        .trim()
+        .to_string();
+    let store = std::path::Path::new(&git_dir).join("githooks-held");
+    std::fs::create_dir_all(&store).expect("mkdir");
+    std::fs::write(store.join("x.json"), BROKEN).expect("write");
+    git_in(&wt, &["checkout", "--", "."]);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("restore")
+        .current_dir(&wt)
+        .output()
+        .expect("githooks restore");
+    assert!(out.status.success(), "{:?}", out);
+    assert_eq!(
+        std::fs::read_to_string(wt.join("x.json")).expect("read"),
+        BROKEN,
+        "restore did not find the stash from the worktree"
+    );
+    assert!(!store.exists());
+}
+
+/// `None` on a platform/runner that cannot create the link at all (Windows
+/// without `SeCreateSymbolicLinkPrivilege`), so the two tests above skip
+/// instead of failing on a capability the environment never had.
+fn try_symlink(target: &str, link: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(target, link).is_ok()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, link);
+        false
+    }
+}

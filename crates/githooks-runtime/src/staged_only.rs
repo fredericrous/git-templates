@@ -32,12 +32,28 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::Mutex;
 
 use crate::ui::{error_sign, warning_sign};
 
 /// Whether this process is holding a patch. Global because a signal handler
 /// cannot be handed a reference, and because there is at most one per process.
 static HELD: AtomicBool = AtomicBool::new(false);
+
+/// Guards `checkout` through `HELD.store(true, ..)` in `enter()` against a
+/// `restore()` racing in concurrently from the signal-watcher thread.
+///
+/// Without this, a signal landing mid-`checkout` lets `restore()` read `HELD`
+/// as still `false`, no-op, and kill the process — while `checkout`'s child
+/// keeps running, ORPHANED, and eventually finishes writing the tree anyway.
+/// The parked files are never put back and nothing said so. This is not
+/// hypothetical: it is what running the checkout-then-signal race a dozen
+/// times over actually produced, once `restore()` moved off the interrupted
+/// call stack and onto a thread of its own — see `install_signal_handler`.
+/// `restore()` blocking here until `enter()` finishes is exactly the fix: by
+/// the time it can read `HELD`, `checkout` has definitely either succeeded
+/// (and it restores) or never called (and it no-ops), never "maybe".
+static ENTER_LOCK: Mutex<()> = Mutex::new(());
 
 /// Where the unstaged changes are parked. Inside `$GIT_DIR` so they are never
 /// committed, never seen by a check, and findable by hand.
@@ -87,7 +103,18 @@ impl StagedOnly {
         let Some(store) = store_dir() else {
             return Ok(StagedOnly { held: false });
         };
-        let _ = std::fs::remove_dir_all(&store);
+        // A stash left behind by an interrupted restore still holds work
+        // nobody has recovered — point 5 in the module doc. Clearing it to
+        // make room for a new one would be exactly the loss this module
+        // exists to prevent, so refuse instead of silently deleting it.
+        if has_contents(&store) {
+            return Err(format!(
+                "{} a previous stash was left behind at {} — recover it with \
+                 `githooks restore`, then retry",
+                error_sign(),
+                store.display()
+            ));
+        }
         let root = crate::hooks::common::repo_root();
         let root = Path::new(&root);
 
@@ -99,44 +126,73 @@ impl StagedOnly {
                     return Err(held_nothing(&store));
                 }
             }
-            match std::fs::read(&from) {
-                // Modified: keep the bytes.
-                Ok(bytes) => {
-                    if std::fs::write(&to, bytes).is_err() {
-                        return Err(held_nothing(&store));
+            // A symlink must be read as a link, not opened: `fs::read` follows
+            // it, which copies the TARGET's bytes instead of the link, and
+            // silently mistakes a dangling link (a normal mid-edit state) for
+            // a deleted file — the absent-marker branch below would then
+            // delete the link on restore rather than put it back.
+            match std::fs::symlink_metadata(&from) {
+                Ok(meta) if meta.file_type().is_symlink() => match std::fs::read_link(&from) {
+                    Ok(link_target) => {
+                        if std::fs::write(
+                            marker(&to, "githooks-symlink"),
+                            link_target.to_string_lossy().as_bytes(),
+                        )
+                        .is_err()
+                        {
+                            return Err(held_nothing(&store));
+                        }
                     }
-                }
-                // Deleted in the tree but not staged: record the absence, so
-                // the restore deletes it again rather than resurrecting it.
-                Err(_) => {
-                    if std::fs::write(to.with_extension("githooks-absent"), b"").is_err() {
-                        return Err(held_nothing(&store));
+                    Err(_) => return Err(held_nothing(&store)),
+                },
+                _ => match std::fs::read(&from) {
+                    // Modified: keep the bytes.
+                    Ok(bytes) => {
+                        if std::fs::write(&to, bytes).is_err() {
+                            return Err(held_nothing(&store));
+                        }
                     }
-                }
+                    // Deleted in the tree but not staged: record the absence,
+                    // so the restore deletes it again rather than
+                    // resurrecting it.
+                    Err(_) => {
+                        if std::fs::write(marker(&to, "githooks-absent"), b"").is_err() {
+                            return Err(held_nothing(&store));
+                        }
+                    }
+                },
             }
         }
 
-        // Tree := index. Everything staged stays; everything else is in `store`.
-        if !crate::git::succeeds(&["checkout", "--", "."]) {
-            let _ = std::fs::remove_dir_all(&store);
-            return Err(format!(
-                "{} could not set the unstaged changes aside; nothing was changed",
-                error_sign()
-            ));
+        // Tree := index. Everything staged stays; everything else is in
+        // `store`. Locked against a concurrent `restore()` — see `ENTER_LOCK`.
+        {
+            let _guard = ENTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            if !crate::git::succeeds(&["checkout", "--", "."]) {
+                let _ = std::fs::remove_dir_all(&store);
+                return Err(format!(
+                    "{} could not set the unstaged changes aside; nothing was changed",
+                    error_sign()
+                ));
+            }
+            HELD.store(true, Ordering::SeqCst);
         }
-        HELD.store(true, Ordering::SeqCst);
         Ok(StagedOnly { held: true })
     }
 
-    /// Put them back. Idempotent, and safe to call from a signal handler.
+    /// Put them back. Idempotent, and safe to call from the watcher thread
+    /// `install_signal_handler` starts — never from the signal handler itself.
     pub fn restore() {
+        // Blocks until `enter()` has definitely finished its own checkout —
+        // see `ENTER_LOCK`. The common case (no `enter()` active) is
+        // uncontended.
+        let _guard = ENTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         if !HELD.swap(false, Ordering::SeqCst) {
             return;
         }
-        let Some(dir) = crate::git::stdout(&["rev-parse", "--git-dir"]) else {
+        let Some(store) = store_dir() else {
             return;
         };
-        let store = Path::new(&dir).join(STORE);
         if !store.is_dir() {
             return;
         }
@@ -158,6 +214,27 @@ impl StagedOnly {
     }
 }
 
+/// `to`, with `.<suffix>` APPENDED to the whole file name — never
+/// `Path::with_extension`, which REPLACES the last extension: for `link.txt`
+/// it would produce `link.githooks-absent`, silently dropping `.txt`, so
+/// `put_back` would recreate `link` instead of `link.txt` and the original
+/// `link.txt` — whatever `checkout` put there — would never be touched again.
+/// `put_back`'s `strip_suffix(".githooks-…")` already expects this shape; it
+/// was the write side that disagreed with it.
+fn marker(to: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = to.file_name().unwrap_or_default().to_os_string();
+    name.push(".");
+    name.push(suffix);
+    to.with_file_name(name)
+}
+
+/// Whether `dir` exists and holds at least one entry.
+fn has_contents(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
+}
+
 fn held_nothing(store: &Path) -> String {
     let _ = std::fs::remove_dir_all(store);
     format!(
@@ -176,6 +253,15 @@ fn put_back(store: &Path, root: &Path) -> std::io::Result<()> {
             let _ = std::fs::remove_file(root.join(original));
             continue;
         }
+        if let Some(original) = rel_str.strip_suffix(".githooks-symlink") {
+            let link_target = std::fs::read_to_string(&entry)?;
+            let link_path = root.join(original);
+            // `checkout` put the staged symlink there; replace it, don't
+            // merge with it.
+            let _ = std::fs::remove_file(&link_path);
+            create_symlink(&link_target, &link_path)?;
+            continue;
+        }
         let target = root.join(&rel);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
@@ -183,6 +269,36 @@ fn put_back(store: &Path, root: &Path) -> std::io::Result<()> {
         std::fs::write(&target, std::fs::read(&entry)?)?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &str, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// Windows distinguishes file and directory symlinks at creation time. The
+/// target usually still exists (it was the staged content `checkout` left
+/// behind, untouched by this whole dance), so ask it; a dangling link falls
+/// back to `symlink_file`, the more common case.
+#[cfg(windows)]
+fn create_symlink(target: &str, link: &Path) -> std::io::Result<()> {
+    let resolved = link
+        .parent()
+        .map(|parent| parent.join(target))
+        .unwrap_or_else(|| Path::new(target).to_path_buf());
+    if resolved.is_dir() {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_symlink(target: &str, link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::other(format!(
+        "no symlink support on this platform: {} -> {target}",
+        link.display()
+    )))
 }
 
 fn walk(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
@@ -198,16 +314,18 @@ fn walk(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
     Ok(out)
 }
 
-/// Where the store lives, agreeing with [`StagedOnly::restore`] by construction
-/// — both ask git the same question, rather than one of them deriving a path
-/// from `hooks_dir`. That used to be `hooks_dir.parent()`: correct for the
-/// main worktree, where `.git/hooks`'s parent IS `$GIT_DIR`, but wrong for a
-/// LINKED worktree, where hooks dispatch from the COMMON directory's shared
-/// `hooks/` while `$GIT_DIR` is the worktree's own PRIVATE gitdir. The
-/// mismatch parked files in one directory and looked for them in the other —
-/// silently, since `restore` treats "no store" as "nothing to do" — which is
-/// how a real commit in a real worktree lost real unstaged content while this
-/// very fix was being written.
+/// Where the store lives, agreeing with [`StagedOnly::restore`] and
+/// [`restore_command`] BY CONSTRUCTION — all three call this one function
+/// rather than each asking git their own way. That used to be
+/// `hooks_dir.parent()` in `enter()` against `git rev-parse --git-dir`
+/// everywhere else: correct for the main worktree, where `.git/hooks`'s
+/// parent IS `$GIT_DIR`, but wrong for a LINKED worktree, where hooks
+/// dispatch from the COMMON directory's shared `hooks/` while `--git-dir`
+/// names the worktree's own PRIVATE gitdir. The mismatch parked files in one
+/// directory and looked for them in the other — silently, since a missing
+/// store reads as "nothing to do" — which is how a real commit in a real
+/// worktree lost real unstaged content. Sharing one function instead of one
+/// convention makes that class of drift impossible rather than merely fixed.
 fn store_dir() -> Option<std::path::PathBuf> {
     let dir = crate::git::stdout(&["rev-parse", "--git-dir"])?;
     Some(Path::new(&dir).join(STORE))
@@ -225,9 +343,7 @@ impl Drop for StagedOnly {
 ///
 /// For when even the signal handler was interrupted.
 pub fn restore_command() -> Result<(), String> {
-    let dir = crate::git::stdout(&["rev-parse", "--git-dir"])
-        .ok_or_else(|| "not inside a git repository".to_string())?;
-    let store = Path::new(&dir).join(STORE);
+    let store = store_dir().ok_or_else(|| "not inside a git repository".to_string())?;
     if !store.is_dir() {
         println!("{} nothing of ours to restore", warning_sign());
         return Ok(());
@@ -239,15 +355,6 @@ pub fn restore_command() -> Result<(), String> {
     println!("restored your unstaged changes");
     Ok(())
 }
-
-/// The write end of the self-pipe a signal handler wakes the watcher thread
-/// through. `-1` until `install_signal_handler` has run.
-#[cfg(unix)]
-static SIGNAL_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
-
-/// Which signal woke the watcher, so it can re-raise the right one.
-#[cfg(unix)]
-static PENDING_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
 /// Restore before dying on a signal.
 ///
@@ -315,6 +422,15 @@ pub fn install_signal_handler() {
 
 #[cfg(not(unix))]
 pub fn install_signal_handler() {}
+
+/// The write end of the self-pipe a signal handler wakes the watcher thread
+/// through. `-1` until `install_signal_handler` has run.
+#[cfg(unix)]
+static SIGNAL_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
+
+/// Which signal woke the watcher, so it can re-raise the right one.
+#[cfg(unix)]
+static PENDING_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
 // Externs rather than a dependency: `scripts/check-no-deps.sh` keeps this
 // binary crate-free, and these are five libc calls with stable signatures —

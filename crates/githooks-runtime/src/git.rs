@@ -35,6 +35,25 @@ pub fn stdout_in(dir: &std::path::Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// stdout of a git command that itself reads a list from stdin — `diff-tree
+/// --stdin`, fed a list of commits, is the only caller today. Lossy but
+/// untrimmed: every line is a path, and the caller trims those itself.
+pub fn stdout_piped(args: &[&str], stdin: &str) -> Option<String> {
+    use std::io::Write;
+    let mut child = Command::new("git")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(stdin.as_bytes()).ok()?;
+    let out = child.wait_with_output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Raw stdout, untrimmed and not lossy — for a patch, where a trailing newline
 /// and any byte in a binary hunk are load-bearing.
 pub fn stdout_raw(args: &[&str]) -> Option<Vec<u8>> {

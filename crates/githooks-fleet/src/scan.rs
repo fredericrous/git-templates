@@ -184,14 +184,48 @@ impl FleetScan {
 /// A file is ours only if it dispatches to the binary. Anything else in
 /// `.git/hooks` is somebody's own hook and is never counted as ours.
 ///
-/// This was deliberately identical to the test `propagate.sh` used, so the two
-/// could not drift on what "managed" means while both existed. The script is
-/// gone; the definition stays because it is the right one, not because
-/// something else depends on it.
+/// Asked once, via `install::is_our_shim` — the SHIM_MARKER check — rather
+/// than re-tested here with a bespoke substring match. This answer feeds
+/// `stale_ours`, which `fix::plan` turns straight into a removal list: the
+/// old body was `s.contains("--hooks-dir")`, matched by a hand-written hook
+/// that merely mentions the flag in a comment or forwards it to another
+/// tool, which `install::is_our_shim` would have refused to touch.
 fn is_ours(path: &Path) -> bool {
     std::fs::read_to_string(path)
-        .map(|s| s.contains("--hooks-dir"))
+        .map(|s| githooks_runtime::install::is_our_shim(&s))
         .unwrap_or(false)
+}
+
+/// Where `repo`'s hooks actually live — honouring `core.hooksPath` rather
+/// than assuming `.git/hooks`. A repo that redirects hooks elsewhere would
+/// otherwise be scanned (and `fix --apply` would WRITE) at a path git never
+/// reads.
+///
+/// `git rev-parse --git-path hooks` is the authority: relative
+/// `core.hooksPath` resolution, `~` expansion and worktree indirection are
+/// git's rules to get right, not ours to reimplement. This used to skip that
+/// call unless `.git/config`'s own bytes mentioned `hooksPath`, on the theory
+/// that a config file which does not even mention it cannot have set it —
+/// true of THAT FILE, but `core.hooksPath` can just as well come from global
+/// or system config, or from a file `.git/config` merely `include`s, none of
+/// which the local bytes say anything about. A fleet scan walking every repo
+/// on disk is exactly the setting where someone points `core.hooksPath` at a
+/// shared directory globally, so the case the shortcut got wrong was not a
+/// rare one. One `git` call per repo, always — asking git is the one thing
+/// this function exists to do right.
+pub fn hooks_dir_for(repo: &Path) -> PathBuf {
+    let default = repo.join(".git").join("hooks");
+    let Some(resolved) =
+        githooks_runtime::git::stdout_in(repo, &["rev-parse", "--git-path", "hooks"])
+    else {
+        return default;
+    };
+    let resolved = PathBuf::from(resolved);
+    if resolved.is_absolute() {
+        resolved
+    } else {
+        repo.join(resolved)
+    }
 }
 
 fn is_managed(hooks: &Path) -> bool {
@@ -240,6 +274,21 @@ pub fn scan_with(
     s
 }
 
+/// Walks `dir`, following symlinks — DELIBERATELY, not merely because
+/// `Path::is_dir` happens to. `~/.config/git/git-templates` is commonly a
+/// symlink to a checkout (see `install::TemplateDir`), and a linked worktree
+/// reaches its repository the same way; either can sit inside `--root`, and a
+/// scan that refused to follow them would silently under-report the fleet —
+/// exactly the "0 copies / 0 distinct" failure this module's own doc warns
+/// about.
+///
+/// The `depth` budget bounds the cost, but a symlink can still walk the scan
+/// to a directory outside `--root` that a filesystem path comparison would
+/// not expect. That is not this function's problem to solve: `fix`/`apply`
+/// never trust a path scan reported — every removal and write is re-verified
+/// against `git ls-files` at the moment of action (`fix::is_tracked`), so a
+/// symlink reaching tracked source changes what gets REPORTED here, never
+/// what a later `--apply` is willing to touch.
 fn walk(
     root: &Path,
     dir: &Path,
@@ -268,7 +317,8 @@ fn walk(
 
         if name == ".git" {
             s.git_dirs_found += 1;
-            let hooks = path.join("hooks");
+            let repo = path.parent().unwrap_or(&path);
+            let hooks = hooks_dir_for(repo);
             if hooks.is_dir() {
                 s.hook_dirs_seen += 1;
             }
@@ -278,7 +328,6 @@ fn walk(
             } else {
                 s.unmanaged_seen += 1;
             }
-            let repo = path.parent().unwrap_or(&path);
             let found = inspect(root, repo, &hooks, managed, installed_binary);
             on(Progress::Found(&found));
             s.repos.push(found);

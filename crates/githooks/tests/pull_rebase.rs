@@ -143,3 +143,43 @@ fn skips_when_the_upstream_was_deleted_on_the_remote() {
     assert!(run.passed());
     assert!(run.says("no longer exists"));
 }
+
+/// The incident this guard exists for: `git worktree add -b <new> <path>
+/// main` sets the new branch's upstream to the LOCAL branch `main` — no `/`
+/// in `@{u}` at all. The old code split on `/` and fell back to `("origin",
+/// upstream)`, so it silently treated "main" as "origin/main" and ran a bare
+/// `pull --rebase`, which actually synced from LOCAL main per
+/// `branch.*.remote`/`.merge` — not origin, whatever the messages said. If
+/// local main is later moved (a `reset --hard` in another worktree, say),
+/// the next push rebases onto wherever it ended up, unannounced. The fix
+/// does not merely hope a same-history rebase is harmless here — it never
+/// attempts one at all when the upstream is not a real remote.
+#[test]
+fn a_branch_tracking_a_local_branch_is_not_silently_synced_as_origin() {
+    let r = with_origin();
+    r.git(&["checkout", "-q", "-b", "feat/from-local"]);
+    r.stage("b.txt", "extra work\n");
+    r.commit("extra work");
+    // No `-u origin`: track LOCAL main instead, exactly what
+    // `git worktree add -b <new> <path> main` does by default.
+    r.git(&["branch", "--set-upstream-to=main", "feat/from-local"]);
+    let before = String::from_utf8_lossy(&r.git(&["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+
+    let run = r.hook("pre-push-pull-rebase", &[]);
+    assert!(run.passed(), "{}", run.output());
+    assert!(
+        run.says("not a remote-tracking branch"),
+        "a local-branch upstream must be named and skipped, not guessed at as origin: {}",
+        run.output()
+    );
+
+    let after = String::from_utf8_lossy(&r.git(&["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+    assert_eq!(
+        before, after,
+        "the branch must not be touched at all when its upstream is not a real remote"
+    );
+}

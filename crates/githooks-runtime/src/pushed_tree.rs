@@ -53,9 +53,24 @@ impl PushedTree {
     /// directory: `set_current_dir` is process-global, so a test that changed
     /// it would race every other test in the binary.
     pub fn create(repo: &Path, tip: &str) -> Option<PushedTree> {
-        let base = std::env::temp_dir().join(format!("githooks-push-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let path = base.clone();
+        let base = std::env::temp_dir().join(unique_name("githooks-push"));
+        Self::create_at(base, repo, tip)
+    }
+
+    /// The actual work, over an explicit path — split out so a test can hand
+    /// it a path it controls, since `create`'s own path is unpredictable BY
+    /// DESIGN and cannot be aimed at a fixture.
+    ///
+    /// `create_dir`, not a `remove_dir_all` before creating: that deleted
+    /// whatever was already at this path BEFORE this process had established
+    /// it owned it — an unpredictable name makes landing on an existing path
+    /// unlikely, not impossible, and "unlikely" is not the bar for a delete.
+    /// `create_dir` is exclusive: it fails loudly on anything already there
+    /// instead of removing it, and git's own `worktree add` is content to
+    /// receive a directory that already exists as long as it is empty —
+    /// which this one, having just been created, provably is.
+    fn create_at(base: PathBuf, repo: &Path, tip: &str) -> Option<PushedTree> {
+        std::fs::create_dir(&base).ok()?;
         let ok = crate::git::succeeds(&[
             "-C",
             repo.to_str()?,
@@ -63,11 +78,17 @@ impl PushedTree {
             "add",
             "--detach",
             "--quiet",
-            path.to_str()?,
+            base.to_str()?,
             tip,
         ]);
-        ok.then_some(PushedTree {
-            path,
+        if !ok {
+            // Ours to clean up: we created it moments ago, so nothing else
+            // could have raced in ahead of us to make this delete unsafe.
+            let _ = std::fs::remove_dir_all(&base);
+            return None;
+        }
+        Some(PushedTree {
+            path: base,
             repo: repo.to_path_buf(),
         })
     }
@@ -75,6 +96,30 @@ impl PushedTree {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// `<prefix>-<pid>-<hash>`: the pid stays for a human correlating a leftover
+/// directory with a hung process, but the pid ALONE is what made the old name
+/// guessable — `ps` hands it to anyone on the box — which matters because
+/// this path is `remove_dir_all`'d before it is used. A pre-planted symlink
+/// at a predictable name turns that into a race with whatever the symlink
+/// points at. No dependency for real randomness here (this crate ships
+/// dependency-free), so the tail is a hash of the wall clock and the pid
+/// through `RandomState`'s own OS-seeded key — enough that guessing it in
+/// advance is impractical, not a cryptographic promise.
+fn unique_name(prefix: &str) -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hash, Hasher};
+
+    let pid = std::process::id();
+    let mut hasher = RandomState::new().build_hasher();
+    pid.hash(&mut hasher);
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .hash(&mut hasher);
+    format!("{prefix}-{pid}-{:016x}", hasher.finish())
 }
 
 impl Drop for PushedTree {
@@ -93,24 +138,17 @@ impl Drop for PushedTree {
     }
 }
 
-/// The commit at the tip of what is being pushed.
-pub fn tip(refs: &[crate::pushrefs::PushRef]) -> Option<String> {
-    let zero = crate::git::stdout(&["hash-object", "--stdin"])
-        .map(|h| "0".repeat(h.len()))
-        .unwrap_or_else(|| "0".repeat(40));
-    refs.iter()
-        .find(|r| r.local_oid != zero)
-        .map(|r| r.local_oid.clone())
-}
-
 /// Where a pre-push suite should run, and whether that is the honest answer.
+///
+/// Takes ONE commit, not the whole ref list: a push can carry several refs
+/// (`git push origin a b`), each with its own tip, and a caller that checked
+/// out only the first one and ran every ref's tests against it would test
+/// the second ref's code against the first ref's tree. Callers loop over
+/// their own refs and pass each one's tip in turn.
 ///
 /// Returns the directory plus the guard that owns it — dropping the guard
 /// removes the worktree, so the caller must hold it for the length of the run.
-pub fn where_to_run(
-    refs: &[crate::pushrefs::PushRef],
-    fallback: &str,
-) -> (PathBuf, Option<PushedTree>) {
+pub fn where_to_run(tip: &str, fallback: &str) -> (PathBuf, Option<PushedTree>) {
     if !enabled() {
         // Today's behaviour, but no longer silent about it.
         println!(
@@ -120,10 +158,7 @@ pub fn where_to_run(
         );
         return (PathBuf::from(fallback), None);
     }
-    let Some(tip) = tip(refs) else {
-        return (PathBuf::from(fallback), None);
-    };
-    match PushedTree::create(Path::new(fallback), &tip) {
+    match PushedTree::create(Path::new(fallback), tip) {
         Some(tree) => {
             let path = tree.path().to_path_buf();
             (path, Some(tree))
@@ -141,6 +176,41 @@ pub fn where_to_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point: two calls must not name the same path, or a
+    /// predictable name is right back to being predictable.
+    #[test]
+    fn unique_name_does_not_repeat() {
+        let a = unique_name("githooks-push");
+        let b = unique_name("githooks-push");
+        assert_ne!(a, b);
+        assert!(a.starts_with("githooks-push-"));
+    }
+
+    /// The point of the whole fix: something already at the target path is
+    /// left ALONE, not deleted to make way. `create_at` fails closed
+    /// (`None`) instead of the old `remove_dir_all`-first shape, which would
+    /// have destroyed `sentinel.txt` here to clear the path for a worktree
+    /// that was never going to use it anyway (the repo below is fake).
+    #[test]
+    fn an_existing_path_is_left_alone_not_cleared() {
+        let base = std::env::temp_dir().join(format!("pushed-collision-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("sentinel.txt"), "do not delete me").unwrap();
+
+        let got = PushedTree::create_at(base.clone(), Path::new("/does/not/matter"), "HEAD");
+        assert!(
+            got.is_none(),
+            "must refuse rather than reuse a path it did not create"
+        );
+        assert_eq!(
+            std::fs::read_to_string(base.join("sentinel.txt")).unwrap(),
+            "do not delete me",
+            "an existing path must never be cleared to make room"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     fn repo(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("pushed-{name}-{}", std::process::id()));

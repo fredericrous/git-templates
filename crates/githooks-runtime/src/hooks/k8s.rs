@@ -71,7 +71,13 @@ pub fn argo_lint(_args: &[std::ffi::OsString]) -> Outcome {
     // --offline: no cluster needed, inline templates only. Flux ${VAR}
     // postBuild placeholders are inert strings to the linter; Argo {{…}}
     // templating is what it actually checks.
-    let mut argv = vec!["lint".to_string(), "--offline".to_string()];
+    // `--` before the paths: a workflow file named e.g. `-canary.yaml` would
+    // otherwise be read as a flag by argo's own parser.
+    let mut argv = vec![
+        "lint".to_string(),
+        "--offline".to_string(),
+        "--".to_string(),
+    ];
     argv.extend(workflows.iter().cloned());
     let okd = Command::new(program("argo"))
         .args(&argv)
@@ -244,8 +250,11 @@ pub fn kubeconform(_args: &[std::ffi::OsString]) -> Outcome {
 /// semantics: a kustomize failure fails the check even when kubeconform would
 /// happily consume the empty input.
 fn validate_root(root: &str, sub: &str, skip: Option<&str>) -> bool {
+    // `--` before `sub`: it is a directory name walked up from staged paths,
+    // so a kustomization root named e.g. `-overlay` would otherwise be read
+    // as a flag by kustomize's own (cobra) parser.
     let Ok(mut build) = Command::new(program("kustomize"))
-        .args(["build", sub])
+        .args(["build", "--", sub])
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

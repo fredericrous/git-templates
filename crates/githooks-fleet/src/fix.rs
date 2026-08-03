@@ -150,7 +150,7 @@ pub fn plan(
     intent: Intent,
     agents_md: bool,
 ) -> FixPlan {
-    let hooks = repo_abs.join(".git/hooks");
+    let hooks = crate::scan::hooks_dir_for(repo_abs);
     let mut p = FixPlan {
         repo: repo.path.clone(),
         refuse: Vec::new(),
@@ -454,6 +454,57 @@ mod tests {
         assert!(is_tracked(&dir.join("tracked.txt")));
         assert!(!is_tracked(&dir.join("untracked.txt")));
         assert!(!is_tracked(&dir.join("does-not-exist.txt")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `plan()` must find and repair shims at a redirected `core.hooksPath`,
+    /// not at `.git/hooks` — the write-side counterpart to the scanner's own
+    /// `core_hooks_path_is_honoured_not_assumed`. A REAL repository, unlike
+    /// `repo()`'s fixtures: `core.hooksPath` only means anything to git
+    /// itself, which is exactly the predicate this is proving.
+    #[test]
+    fn plan_finds_shims_at_a_redirected_hooks_path() {
+        let dir = std::env::temp_dir().join(format!("fixplan-hookspath-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .expect("git");
+        };
+        git(&["init", "-q", "--template=", "."]);
+        git(&["config", "core.hooksPath", "tooling/hooks"]);
+        let hooks = dir.join("tooling/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(
+            hooks.join("pre-commit-ruff"),
+            "#!/bin/sh\nexec x --hooks-dir y pre-commit-ruff\n",
+        )
+        .unwrap();
+
+        let mut r = repo(true);
+        r.stale_ours = vec!["pre-commit-ruff".into()];
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false);
+
+        assert!(!p.refused(), "{:?}", p.refuse);
+        assert_eq!(
+            p.remove,
+            vec![Removal {
+                path: hooks.join("pre-commit-ruff"),
+                reason: RemovalReason::StaleOurs,
+            }]
+        );
+        assert!(
+            p.write.iter().all(|w| w.path.starts_with(&hooks)),
+            "shims must be planned at the redirected path, not .git/hooks: {:?}",
+            p.write
+        );
+        assert!(
+            !dir.join(".git/hooks").exists(),
+            "fixture: the default location was never created"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

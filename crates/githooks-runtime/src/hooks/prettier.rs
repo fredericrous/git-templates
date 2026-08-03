@@ -79,14 +79,20 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
         flags.push("--no-editorconfig".into());
     }
 
+    // `--` before the file list at each of these: a staged file named e.g.
+    // `-x.js` would otherwise be read as a flag by prettier's own parser —
+    // and prettier does not even error on that, it exits 0 having checked
+    // nothing, so the file would silently never be linted at all.
     let mut check = flags.clone();
     check.push("--check".into());
+    check.push("--".into());
     check.extend(files.iter().cloned());
     if !run_quiet(&root, &argv, &check) && fixing_enabled() {
         // Asked to repair, so repair rather than reporting an instruction the
         // author would carry out identically by hand.
         let mut write = flags.clone();
         write.push("--write".into());
+        write.push("--".into());
         write.extend(files.iter().cloned());
         if run_quiet(&root, &argv, &write) && restage(&files) {
             ok("Prettier reformatted and re-staged");
@@ -100,6 +106,7 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
         ));
         let mut list = flags;
         list.push("--list-different".into());
+        list.push("--".into());
         list.extend(files);
         let _ = run_tool(&root, &argv, &list);
         return Outcome::Failed;

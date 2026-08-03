@@ -91,12 +91,46 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
         return Outcome::Passed;
     };
 
+    // 2a. The upstream has to be a REAL remote, not merely something with a
+    //     `/` in its name. `branch.<name>.remote` is what `git pull`/`fetch`
+    //     itself reads to resolve `@{u}` — asking IT, rather than guessing
+    //     the remote by splitting `upstream` on '/' and falling back to
+    //     "origin", is the fix for a real incident: `git worktree add -b x
+    //     <path> main` sets the new branch's upstream to the LOCAL branch
+    //     `main` (no slash at all — `@{u}` prints bare `main`), the old
+    //     fallback silently read that as `origin/main`, and the bare
+    //     `git pull --rebase` two steps down synced from LOCAL main — not
+    //     origin — while every check and message around it talked about
+    //     origin. Move `main` in the meantime (a `git reset --hard` on it in
+    //     another worktree, say) and the next push silently rebases onto
+    //     wherever it ended up, no divergence check catching it because the
+    //     hand-rolled remote guess was never asking the real question.
+    let Some(current) = git::stdout(&["symbolic-ref", "--short", "HEAD"]) else {
+        return Outcome::Passed; // detached HEAD: nothing to sync
+    };
+    let remote =
+        git::stdout(&["config", "--get", &format!("branch.{current}.remote")]).unwrap_or_default();
+    let is_a_real_remote = !remote.is_empty()
+        && git::stdout(&["remote"])
+            .unwrap_or_default()
+            .lines()
+            .any(|r| r == remote);
+    if !is_a_real_remote {
+        println!(
+            "{} {upstream} is not a remote-tracking branch — skipping sync.",
+            warning_sign()
+        );
+        return Outcome::Passed;
+    }
+    let branch = upstream
+        .strip_prefix(&format!("{remote}/"))
+        .unwrap_or(&upstream);
+
     // 2b. The upstream can be configured locally but GONE on the remote — the
     //     normal state right after a PR squash-merges with delete-on-merge.
     //     `git pull --rebase` would fail on the missing ref and read as a
     //     conflict, wrongly blocking the push.
-    let (remote, branch) = upstream.split_once('/').unwrap_or(("origin", &upstream));
-    if !git::succeeds(&["ls-remote", "--exit-code", "--heads", remote, branch]) {
+    if !git::succeeds(&["ls-remote", "--exit-code", "--heads", &remote, branch]) {
         println!(
             "{} Upstream {upstream} no longer exists on the remote (merged + auto-deleted?) — skipping sync.", warning_sign()
         );
@@ -129,7 +163,12 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
             highlight("git pull --rebase"),
             highlight("git merge")
         );
-    } else if !git::succeeds(&["pull", "--rebase"]) {
+    } else if !git::succeeds(&["pull", "--rebase", &remote, branch]) {
+        // Explicit remote and branch, not a bare `pull --rebase` trusting
+        // ambient `branch.*.remote`/`.merge` — `remote`/`branch` are already
+        // the verified pair from 2a/2b, and repeating them here means this
+        // sync can never again silently use something other than what was
+        // just checked.
         // Abort so the tree is never left half-rebased.
         let _ = git::succeeds(&["rebase", "--abort"]);
         println!(

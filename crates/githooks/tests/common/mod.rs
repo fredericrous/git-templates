@@ -77,7 +77,10 @@ impl Repo {
             std::fs::create_dir_all(p).expect("create parent");
         }
         std::fs::write(&full, content).expect("write file");
-        self.git(&["add", path]);
+        // `--`: a fixture staging a file named e.g. `-weird.json` (to prove a
+        // hook itself handles one) would otherwise fail to stage at all —
+        // `git add -weird.json` is `unknown switch 'w'` to git's OWN parser.
+        self.git(&["add", "--", path]);
     }
 
     pub fn write(&self, path: &str, content: &str) {
@@ -108,12 +111,20 @@ impl Repo {
 
     /// Run a hook through the binary, as the shim would.
     pub fn hook(&self, name: &str, args: &[&str]) -> HookRun {
+        self.hook_at(&self.dir, name, args)
+    }
+
+    /// Run a hook as the shim would from a LINKED WORKTREE: `--hooks-dir` is
+    /// still this (main) repo's `.git/hooks` — real worktrees share the main
+    /// checkout's hooks, they do not get their own — but the process runs
+    /// with `cwd` set to wherever the commit is actually happening.
+    pub fn hook_at(&self, cwd: &Path, name: &str, args: &[&str]) -> HookRun {
         let mut cmd = Command::new(bin());
         cmd.arg("--hooks-dir")
             .arg(self.dir.join(".git/hooks"))
             .arg(name)
             .args(args)
-            .current_dir(&self.dir)
+            .current_dir(cwd)
             .stdin(Stdio::null());
         Self::strip_git_env_impl(&mut cmd);
         let out = cmd.output().expect("run githooks");
@@ -122,6 +133,24 @@ impl Repo {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         }
+    }
+
+    /// A linked worktree of this repo, on its own branch. Its `.git` is a
+    /// FILE pointing at a private admin directory under this repo's
+    /// `.git/worktrees` — distinct from the common `.git` the hooks and
+    /// their stash live in, which is exactly the distinction
+    /// `githooks-held` must get right.
+    pub fn worktree(&self, name: &str) -> PathBuf {
+        let path = self.dir.join(name);
+        self.git(&[
+            "worktree",
+            "add",
+            "-q",
+            path.to_str().expect("utf8 path"),
+            "-b",
+            name,
+        ]);
+        path
     }
 
     pub fn path(&self, rel: &str) -> PathBuf {

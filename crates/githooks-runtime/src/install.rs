@@ -246,9 +246,24 @@ fn offer_trust() {
         crate::manifest::MANIFEST
     );
     print!("{}", crate::trust::describe(root));
+    // Fingerprint what was just shown BEFORE asking, not after: `confirm()`
+    // blocks on a keypress, sometimes for several seconds, and a file
+    // rewritten in that window must not be trusted under the guise of the
+    // content that was actually displayed. `record_verified` re-checks this
+    // fingerprint still matches once the answer is in, rather than trusting
+    // whatever happens to be on disk by then.
+    let manifest = root.join(crate::manifest::MANIFEST);
+    let Some(fp) = crate::trust::fingerprint(root, &manifest) else {
+        println!(
+            "{} could not hash {}",
+            warning_sign(),
+            crate::manifest::MANIFEST
+        );
+        return;
+    };
     if crate::trust::confirm("    Trust them? (y/N) ") {
-        match crate::trust::record(root) {
-            Ok(fp) => println!("{} trusted ({fp})", valid_sign()),
+        match crate::trust::record_verified(root, &fp) {
+            Ok(()) => println!("{} trusted ({fp})", valid_sign()),
             Err(e) => println!("{} {e}", warning_sign()),
         }
     } else {

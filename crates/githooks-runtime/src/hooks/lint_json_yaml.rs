@@ -49,7 +49,9 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
         if which("node").is_some() {
             for f in &json {
                 let script = r#"JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))"#;
-                if !parses(&root, "node", &["-e", script, f]) {
+                // `--` before `f`: a staged file named e.g. `-e.json` would
+                // otherwise be read as another `-e` by node's own parser.
+                if !parses(&root, "node", &["-e", script, "--", f]) {
                     fail(&format!("Invalid JSON: {}", hl(f)));
                     failed = true;
                 }
@@ -69,7 +71,9 @@ pub fn run(_args: &[std::ffi::OsString]) -> Outcome {
                 if is_helm_template(&root, f) {
                     continue;
                 }
-                if !parses(&root, "yq", &["e", "true", f]) {
+                // `--` before `f`: a staged file starting with `-` would
+                // otherwise be read as a flag by yq's own parser.
+                if !parses(&root, "yq", &["e", "true", "--", f]) {
                     fail(&format!("Invalid YAML: {}", hl(f)));
                     failed = true;
                 }

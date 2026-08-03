@@ -173,9 +173,6 @@ pub fn run(refs: &[crate::pushrefs::PushRef]) -> Outcome {
     let Some(root) = git::stdout(&["rev-parse", "--show-toplevel"]) else {
         return Outcome::Passed;
     };
-    // Same question as cargo-test: the suite should be answering about the
-    // commits being pushed, not about whatever is open in the editor.
-    let (run_in, _guard) = crate::pushed_tree::where_to_run(refs, &root);
     let pkg_dirs = git::stdout_paths(&["ls-files"])
         .map(|f| package_dirs(&f))
         .unwrap_or_default();
@@ -206,8 +203,14 @@ pub fn run(refs: &[crate::pushrefs::PushRef]) -> Outcome {
             continue;
         }
 
+        // Same question as cargo-test: the suite should be answering about
+        // the commits being pushed, not about whatever is open in the
+        // editor — and about THIS ref's commits, not some other ref in the
+        // same push. A single worktree shared across every ref would run a
+        // second ref's tests against a first ref's tree.
+        let (run_in, _guard) = crate::pushed_tree::where_to_run(local_oid, &root);
+        let where_ = run_in.to_string_lossy().into_owned();
         for folder in packages_to_test(&pkg_dirs, &changed_dirs) {
-            let where_ = run_in.to_string_lossy().into_owned();
             if !run_gate(&where_, &folder) {
                 return Outcome::Failed;
             }

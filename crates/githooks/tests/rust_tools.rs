@@ -220,3 +220,112 @@ fn the_test_gate_does_not_leak_git_env_to_the_suite() {
     let code = child.wait().expect("wait").code().unwrap_or(-1);
     assert_eq!(code, 0, "the suite saw git's environment");
 }
+
+/// A brand-new branch's changed-file set must cover EVERY new commit, not
+/// just the tip. For a new ref (`remote_oid` all-zero), the range logic used
+/// to diff only the tip commit against its parent — a branch that added
+/// `Cargo.toml`/`src/main.rs` two commits back and then a docs-only commit on
+/// top would report only the docs file as changed, so `cargo_roots` found no
+/// Rust and `pre-push-cargo-test` silently passed without ever running the
+/// (here, deliberately failing) suite.
+#[test]
+fn a_new_branch_with_rust_several_commits_back_still_runs_the_suite() {
+    if missing("cargo") {
+        return;
+    }
+    let r = Repo::new();
+    r.stage("README.md", "start\n");
+    r.commit("chore: base");
+
+    // The Rust project, added on the SECOND commit — not the tip.
+    crate_files(
+        &r,
+        "fn main() {}\n\n#[test]\nfn t() {\n    assert!(false);\n}\n",
+    );
+    r.commit("feat: add a failing crate");
+
+    // The tip: a docs-only commit that touches no Rust file at all.
+    r.stage("README.md", "start\nand more\n");
+    r.commit("docs: expand readme");
+
+    let zero = "0".repeat(40);
+    let code = pre_push(&r, &zero, &head(&r));
+    assert_ne!(
+        code, 0,
+        "a new branch's failing Rust suite, added before the tip commit, was silently skipped"
+    );
+}
+
+/// Two refs pushed at once (`git push origin a b`) must each be tested
+/// against their OWN tip. A single worktree shared across the whole push used
+/// to be checked out at only the first ref's commit, so the second ref's
+/// suite ran against the first ref's tree — a real failure unique to the
+/// second branch was invisible because its own content was never checked out
+/// anywhere.
+#[test]
+fn each_ref_in_a_multi_ref_push_is_tested_against_its_own_tip() {
+    if missing("cargo") {
+        return;
+    }
+    let r = Repo::new();
+    r.git(&["config", "githooks.testPushedTree", "true"]);
+    r.stage("README.md", "start\n");
+    r.commit("chore: base");
+    let base = head(&r);
+
+    // Branch "a": a crate at `crate/` whose test PASSES.
+    r.git(&["checkout", "-q", "-b", "a"]);
+    r.stage(
+        "crate/Cargo.toml",
+        "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+    );
+    r.stage(
+        "crate/src/main.rs",
+        "fn main() {}\n\n#[test]\nfn t() {\n    assert!(true);\n}\n",
+    );
+    r.commit("feat(a): passing crate");
+    let tip_a = head(&r);
+
+    // Branch "b": the SAME crate path, from the SAME base, but its test
+    // FAILS. If the worktree used for "b" is actually "a"'s, this never
+    // shows up.
+    r.git(&["checkout", "-q", &base]);
+    r.git(&["checkout", "-q", "-b", "b"]);
+    r.stage(
+        "crate/Cargo.toml",
+        "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+    );
+    r.stage(
+        "crate/src/main.rs",
+        "fn main() {}\n\n#[test]\nfn t() {\n    assert!(false);\n}\n",
+    );
+    r.commit("feat(b): failing crate");
+    let tip_b = head(&r);
+
+    let zero = "0".repeat(40);
+    let lines = format!(
+        "refs/heads/a {tip_a} refs/heads/a {zero}\n\
+         refs/heads/b {tip_b} refs/heads/b {zero}\n"
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_githooks"))
+        .arg("--hooks-dir")
+        .arg(r.path(".git/hooks"))
+        .arg("pre-push-cargo-test")
+        .current_dir(&r.dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(lines.as_bytes())
+        .expect("write");
+    let code = child.wait().expect("wait").code().unwrap_or(-1);
+    assert_ne!(
+        code, 0,
+        "branch b's failing crate was tested against branch a's tree instead of its own"
+    );
+}

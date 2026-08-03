@@ -50,8 +50,17 @@ pub fn run(args: &[std::ffi::OsString]) -> Outcome {
         return Outcome::Unavailable;
     };
 
-    let mut extra = files;
-    extra.extend(args.iter().filter_map(|a| a.to_str()).map(str::to_owned));
+    // Forwarded flags first, THEN `--`, THEN the files: a staged file named
+    // e.g. `-x.js` would otherwise be read as a flag by eslint's own parser,
+    // and putting `--` before the forwarded args instead would not separate
+    // the files from anything — it would only separate ITSELF from `args`.
+    let mut extra: Vec<String> = args
+        .iter()
+        .filter_map(|a| a.to_str())
+        .map(str::to_owned)
+        .collect();
+    extra.push("--".to_string());
+    extra.extend(files);
     if !run_tool(&root, &argv, &extra) {
         fail("ESLint issues found. Please fix");
         return Outcome::Failed;

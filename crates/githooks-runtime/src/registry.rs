@@ -315,7 +315,14 @@ impl Overrides {
         ]))
     }
 
-    fn from_config(out: Option<String>) -> Overrides {
+    /// Built from `--get-regexp`-shaped text (`githooks.severity.<check>
+    /// <value>` per line, in git's own precedence order — system, then
+    /// global, then local, then includes). `pub` so a reader that has
+    /// already fetched those lines for its own reasons (the fleet dashboard
+    /// needs the origin of each, which `Overrides` does not track) can still
+    /// ask this — the one place that must not get precedence wrong — rather
+    /// than re-deriving it from the lines by hand.
+    pub fn from_config(out: Option<String>) -> Overrides {
         let mut map = std::collections::BTreeMap::new();
         for line in out.as_deref().unwrap_or_default().lines() {
             let Some((key, value)) = line.split_once(' ') else {

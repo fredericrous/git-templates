@@ -140,10 +140,14 @@ pub fn is_footer(line: &str) -> bool {
                 .trim_start()
                 .starts_with(|c: char| c.is_alphanumeric() || c == '_');
     }
-    if let Some(rest) = line
-        .strip_prefix("Refs:")
-        .or_else(|| line.strip_prefix("Refs"))
-    {
+    // The bare (no-colon) form still needs a SEPARATOR after "Refs" — a
+    // space or a '#' — or it also matches prose that merely starts with
+    // those five letters glued to a digit, like "Refs42 was the original
+    // ticket.", sweeping a body line into the footer group.
+    if let Some(rest) = line.strip_prefix("Refs:").or_else(|| {
+        line.strip_prefix("Refs")
+            .filter(|rest| rest.starts_with(' ') || rest.starts_with('#'))
+    }) {
         let r = rest.trim_start_matches(' ');
         let r = r.strip_prefix('#').unwrap_or(r);
         if r.starts_with(|c: char| c.is_ascii_digit()) {
@@ -359,6 +363,20 @@ mod tests {
         assert!(is_footer(""));
         assert!(!is_footer("just prose"));
         assert!(!is_footer("a sentence with - a dash"));
+    }
+
+    /// The bare (no-colon) form, `Refs #123` / `Refs 123`, is intentionally
+    /// also accepted — but "Refs" glued straight to a digit with no
+    /// separator is prose, not a reference, and must not be swept into the
+    /// footer group.
+    #[test]
+    fn a_bare_refs_needs_a_separator_not_just_a_leading_digit() {
+        assert!(is_footer("Refs #123"));
+        assert!(is_footer("Refs 123"));
+        assert!(
+            !is_footer("Refs42 was the original ticket."),
+            "prose starting with Refs+digit must not read as a footer"
+        );
     }
 
     #[test]
