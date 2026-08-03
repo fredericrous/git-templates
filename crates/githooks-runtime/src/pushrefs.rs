@@ -179,6 +179,14 @@ fn range_changed_files(remote_oid: &str, local_oid: &str) -> Vec<String> {
 
 /// Feed a newline-separated list of commit ids through `diff-tree --stdin`,
 /// diffing each against its own parent(s), and return the union of paths.
+///
+/// `-z`, not bare `--name-only`. Without it git QUOTES any path holding an
+/// "unusual" byte, non-ASCII included: `é.ts` prints as the nine-byte literal
+/// `"\303\251.ts"`. That string ends with neither `.ts` nor anything else the
+/// callers look for, so `is_js`, `is_rust_path` and `Scope::matches` all miss
+/// it and a scope-gated pre-push check silently never runs on the very commit
+/// that changed the file. `git::split_nul_paths` is the same parser
+/// `stdout_paths` uses, kept in one tested place rather than copied here.
 fn diff_tree_stdin(commits: &str) -> Vec<String> {
     // `git::stdout` trims the trailing newline `rev-list` itself always
     // writes — and `diff-tree --stdin` treats "no newline after this hash"
@@ -192,18 +200,19 @@ fn diff_tree_stdin(commits: &str) -> Vec<String> {
     // parent and unions the results, which is exactly "did this commit,
     // merge or not, touch this path" — the caller already de-duplicates the
     // combined list, so the extra per-parent repeats cost nothing.
-    crate::git::stdout_piped(
+    crate::git::stdout_piped_raw(
         &[
             "diff-tree",
             "--no-commit-id",
             "--name-only",
             "-r",
             "-m",
+            "-z",
             "--stdin",
         ],
         &format!("{}\n", commits.trim_end()),
     )
-    .map(|out| out.lines().map(str::trim).map(str::to_owned).collect())
+    .map(|raw| crate::git::split_nul_paths(&raw))
     .unwrap_or_default()
 }
 
@@ -230,5 +239,34 @@ mod tests {
     #[test]
     fn empty_stdin_is_no_refs_not_an_error() {
         assert!(parse(&b""[..]).is_empty());
+    }
+
+    /// Mirrors `git::a_non_ascii_path_is_not_reinterpreted_as_its_quoted_form`,
+    /// because this module used to parse `diff-tree` output ITSELF, by lines,
+    /// with no `-z`.
+    ///
+    /// Under bare `--name-only`, git prints `é.ts` as the nine-byte literal
+    /// `"\303\251.ts"` — backslashes, digits and quotes standing in for two
+    /// UTF-8 bytes. That string ends with neither `.ts` nor `.rs`, so `is_js`,
+    /// `is_rust_path` and `Scope::matches` all said "not mine" and the
+    /// scope-gated pre-push check silently never ran on the one commit that
+    /// changed the file. Feeding the same real bytes through `-z` output must
+    /// hand the path back untouched.
+    #[test]
+    fn a_non_ascii_path_survives_the_diff_tree_parse() {
+        let mut raw = "src/é.ts".as_bytes().to_vec();
+        raw.push(0);
+        raw.extend_from_slice(b"src/plain.ts\0");
+        let got = crate::git::split_nul_paths(&raw);
+        assert_eq!(
+            got,
+            vec!["src/é.ts".to_string(), "src/plain.ts".to_string()]
+        );
+        assert!(
+            got[0].ends_with(".ts"),
+            "the quoted form ends with a quote, not an extension, and is why \
+             a scope-gated check never fired: {:?}",
+            got[0]
+        );
     }
 }

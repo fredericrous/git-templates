@@ -54,6 +54,26 @@ pub fn stdout_piped(args: &[&str], stdin: &str) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// As `stdout_piped`, but returning the RAW bytes.
+///
+/// Needed by the one caller that must both feed git a list on stdin and read a
+/// `-z` path list back — `diff-tree --stdin -z`. `stdout_paths` cannot serve it
+/// (no stdin) and `stdout_piped` cannot either (lossy `String`, and the NUL
+/// separators are the whole point).
+pub fn stdout_piped_raw(args: &[&str], stdin: &str) -> Option<Vec<u8>> {
+    use std::io::Write;
+    let mut child = Command::new("git")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(stdin.as_bytes()).ok()?;
+    let out = child.wait_with_output().ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
 /// As `stdout_piped`, but inside `dir` and taking raw bytes.
 ///
 /// `-C dir` matters for `hash-object`: a repository configured for SHA-256
@@ -126,7 +146,7 @@ pub fn stdout_paths(args: &[&str]) -> Option<Vec<String>> {
 /// literal bytes rather than a real git process — including the byte
 /// sequence a QUOTED path would have produced under the old line-splitting
 /// approach, to prove `-z` output is never reinterpreted that way.
-fn split_nul_paths(raw: &[u8]) -> Vec<String> {
+pub(crate) fn split_nul_paths(raw: &[u8]) -> Vec<String> {
     raw.split(|&b| b == 0)
         .filter(|s| !s.is_empty())
         .map(|s| String::from_utf8_lossy(s).into_owned())
