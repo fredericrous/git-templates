@@ -143,8 +143,14 @@ fn untracked_files_are_left_alone() {
     );
 }
 
-/// Mid-merge the tree already holds somebody else's work, so taking a patch of
+/// Mid-merge the tree already holds somebody else's work, so taking a copy of
 /// it would be the wrong instrument entirely.
+///
+/// CHANGE OF MIND, recorded: this case used only to assert that the tree was
+/// untouched. That is still required and still asserted — but skipping the hold
+/// means every check judges the WORKING TREE rather than the index, and doing
+/// that in silence is the exact failure this module exists to prevent, dressed
+/// up as an ordinary clean run. So it must also SAY SO.
 #[test]
 fn nothing_is_stashed_mid_merge() {
     let r = Repo::new();
@@ -154,8 +160,69 @@ fn nothing_is_stashed_mid_merge() {
     std::fs::write(r.path(".git/MERGE_HEAD"), "deadbeef\n").expect("write");
 
     let run = r.hook("pre-commit", &[]);
-    assert!(run.passed(), "{}", run.output());
     assert_eq!(tree(&r, "x.json"), BROKEN, "the tree was touched mid-merge");
+    assert!(!r.path(".git/githooks-held").exists());
+    assert!(
+        run.says("in progress"),
+        "index fidelity was off and nothing said so:\n{}",
+        run.output()
+    );
+}
+
+/// …but ONLY when there is unstaged content. With a clean tree, fidelity is
+/// not actually off — the tree IS the index — so the notice would be noise on
+/// every commit of a merge resolution, which `registry.rs` deliberately keeps
+/// running its checks.
+#[test]
+fn mid_merge_with_a_clean_tree_says_nothing() {
+    let r = Repo::new();
+    seed(&r);
+    r.stage("x.json", VALID);
+    std::fs::write(r.path(".git/MERGE_HEAD"), "deadbeef\n").expect("write");
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(
+        !run.says("in progress"),
+        "nothing is degraded here, so nothing should be announced:\n{}",
+        run.output()
+    );
+}
+
+/// A conflicted path has no staged and unstaged halves to separate, so there
+/// is nothing this can honestly do — and it used to return "nothing held" with
+/// NO OUTPUT, leaving every check silently judging the working tree.
+/// `docs/index-fidelity-and-run-modes.md` §1 says conflicts ABORT the stage.
+///
+/// Safe by construction: git itself refuses a commit with unmerged entries, so
+/// nothing that would have succeeded is now blocked.
+#[test]
+fn a_conflicted_path_aborts_the_stage() {
+    let r = Repo::new();
+    r.stage("x.json", "{\n  \"a\": 1\n}\n");
+    r.commit("chore: seed");
+    r.git(&["checkout", "-q", "-b", "other"]);
+    r.stage("x.json", "{\n  \"a\": 2\n}\n");
+    r.commit("feat: theirs");
+    r.git(&["checkout", "-q", "main"]);
+    r.stage("x.json", "{\n  \"a\": 3\n}\n");
+    r.commit("feat: ours");
+    let merged = r.git(&["merge", "--no-commit", "other"]);
+    assert!(
+        !merged.status.success(),
+        "fixture: the merge was supposed to conflict"
+    );
+
+    let run = r.hook("pre-commit", &[]);
+    assert!(
+        !run.passed(),
+        "a conflicted tree cannot be split, and this proceeded anyway:\n{}",
+        run.output()
+    );
+    assert!(
+        run.says("unmerged"),
+        "the refusal must name what it found:\n{}",
+        run.output()
+    );
     assert!(!r.path(".git/githooks-held").exists());
 }
 

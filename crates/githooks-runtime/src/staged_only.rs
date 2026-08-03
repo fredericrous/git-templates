@@ -271,22 +271,63 @@ pub struct StagedOnly {
 /// newline policy to agree about, and binary files need no special case. It
 /// costs a temporary copy of only the files that have unstaged changes.
 impl StagedOnly {
+    /// The three early exits, and THE ORDER IS THE DESIGN.
+    ///
+    /// Both of the first two used to return "nothing held" with NO OUTPUT,
+    /// which meant the checks silently judged the working tree — the exact
+    /// failure this module exists to prevent, announced as a clean run.
+    /// `docs/index-fidelity-and-run-modes.md` §1 says conflicted paths ABORT
+    /// the stage; they did not.
+    ///
+    /// 1. **Conflicts first**, and they are an `Err`: a conflicted path has no
+    ///    staged and unstaged halves to separate, so there is nothing this can
+    ///    honestly do. `pre_commit` turns the `Err` into a printed message and
+    ///    `Verdict::Block`. Safe by construction: git itself refuses a commit
+    ///    with unmerged entries, so nothing that would have succeeded now
+    ///    fails.
+    /// 2. **Nothing unstaged** ⇒ nothing held, SILENTLY. The common case must
+    ///    stay free, and it is not a degraded run: there is no unstaged content
+    ///    for a check to be confused by.
+    /// 3. **Mid-operation LAST**, and only when there IS unstaged content, with
+    ///    one printed line. Checked after the conflict test rather than before
+    ///    it, deliberately: the other order made the ordinary conflicted-merge
+    ///    case take the mid-operation branch and warn instead of aborting.
+    ///    Checked after the emptiness test because with a clean tree fidelity
+    ///    is not actually off, and `registry.rs:64-67` calls out on purpose
+    ///    that a resolution commit still runs its checks.
     pub fn enter() -> Result<StagedOnly, String> {
-        // A tree mid-merge is already holding work that is not the author's.
-        if !crate::git_states_in_progress().is_empty() {
-            return Ok(StagedOnly { held: false });
-        }
         // Conflicted paths cannot be split into staged and unstaged halves.
-        if crate::git::stdout(&["diff", "--name-only", "--diff-filter=U"])
-            .is_some_and(|out| !out.is_empty())
-        {
-            return Ok(StagedOnly { held: false });
+        let conflicted: Vec<String> =
+            crate::git::stdout_paths(&["diff", "--name-only", "--diff-filter=U"])
+                .unwrap_or_default();
+        if !conflicted.is_empty() {
+            return Err(format!(
+                "{} unmerged paths — resolve and stage them first:\n    {}",
+                error_sign(),
+                conflicted.join("\n    ")
+            ));
         }
         // Tracked files only: an untracked file is not part of this commit and
         // moving it would surprise everyone.
         let changed: Vec<String> =
             crate::git::stdout_paths(&["diff", "--name-only"]).unwrap_or_default();
         if changed.is_empty() {
+            return Ok(StagedOnly { held: false });
+        }
+        // A tree mid-merge is already holding work that is not the author's,
+        // so taking a copy of it would be the wrong instrument entirely — but
+        // the checks are then reading the tree, and that has to be said.
+        let in_progress = crate::git_states_in_progress();
+        if !in_progress.is_empty() {
+            println!(
+                "{} {} in progress — checks see the working tree, not just the index",
+                warning_sign(),
+                in_progress
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            );
             return Ok(StagedOnly { held: false });
         }
 
