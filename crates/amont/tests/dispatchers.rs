@@ -494,7 +494,7 @@ fn list_json_rejects_an_unknown_stage() {
 fn list_json_declared_check_shows_its_command() {
     let r = Repo::new();
     r.stage(
-        ".amont.conf",
+        "amont.conf",
         "pre-commit  shellcheck  *.sh  block  scripts/lint.sh\n",
     );
     r.commit("chore: declare a check");

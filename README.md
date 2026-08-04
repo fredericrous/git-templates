@@ -146,7 +146,7 @@ clone**, so from then on every repository you clone runs these hooks without
 being asked again. That is the convenience, and it is worth having.
 
 It is also a standing grant, so it is worth stating what you granted. A cloned
-repository can declare its own checks in `.amont.conf`, and with this key
+repository can declare its own checks in `amont.conf`, and with this key
 set those are one `amont trust` away from running on your first commit in a
 repository you may have cloned only to read. If you set this, **trust
 deliberately** rather than letting installation be the moment you decided.
@@ -170,7 +170,7 @@ Design record: [the fleet dashboard](docs/fleet-dashboard.md).
 
 ## Trust: a repository you clone cannot run its own checks
 
-`.amont.conf` is committed — that is the point, a team shares a check by
+`amont.conf` is committed — that is the point, a team shares a check by
 committing it. The consequence is that cloning a repository and committing to
 it would otherwise run commands that repository chose, and neither of those
 acts is one anybody performs *as a decision about trust*.
@@ -246,7 +246,7 @@ re-running over an amended message changes nothing. Full reference:
 
 ## Custom checks
 
-A repository can declare checks of its own in a committed `.amont.conf`:
+A repository can declare checks of its own in a committed `amont.conf`:
 
 ```
 # stage       name        scope   severity  command
@@ -302,6 +302,12 @@ amont agents-md --check  # exit non-zero if it has drifted
 
 `agents-md` only ever touches a `<!-- amont:start -->` / `<!-- amont:end -->`
 span, so the rest of the file stays yours.
+
+The block it writes also warns the agent that `git commit` and `git push`
+run their checks first — pre-commit can mean clippy building a workspace,
+pre-push a whole test suite — and an agent whose shell tool defaults to a
+two-minute timeout will kill the command mid-check and read its own
+impatience as a failure. Ten minutes is the safe floor, for both.
 
 ## Why you can let this near your commits
 

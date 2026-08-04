@@ -220,7 +220,7 @@ pub fn gather_checks(stage_filter: Option<check::Stage>, paths: &[String]) -> Ve
     for stage in stages {
         // Externals are listed here too, and marked, because the question
         // this command answers — "would this run here?" — is asked most
-        // often about the check somebody just added to `.amont.conf`.
+        // often about the check somebody just added to `amont.conf`.
         for check in registry::all_stage_checks(stage) {
             let name = check.name();
             let external = externals_by_id.get(name).copied();

@@ -144,7 +144,7 @@ Repo {
   applicable        : Vec<String>    // checks that would ever fire here, from each Scope
   skips             : Vec<SkipEntry> // hook.skip, resolved: what it hits and where it came from
   severities        : Vec<SeverityOverride>  // amont.severity.*, and which one git applies
-  declared          : Vec<DeclaredCheck>     // this repo's own .amont.conf checks
+  declared          : Vec<DeclaredCheck>     // this repo's own amont.conf checks
   trusted           : Option<bool>   // None when there is no manifest at all
   agents_md         : AgentsMdState  // UpToDate | Missing | Drifted | Malformed
   hooks_dir         : HooksDir       // where the hooks are, and whether we may touch them
@@ -307,7 +307,7 @@ drifted merely because `__AMONT_BIN__` was replaced.
 - A repository whose dispatchers are SYMLINKS no longer counts as `managed`,
   even when the link points at one of our own shims. That is the intended
   trade: `fix` reports it instead of writing through the link.
-- `DECL` counts the checks a repository declares in `.amont.conf`, and reads
+- `DECL` counts the checks a repository declares in `amont.conf`, and reads
   `2!1` when one of those lines cannot be parsed — a check somebody committed
   that has never once run. `2` and `2!1` describing the same repository is the
   distinction the column exists for.

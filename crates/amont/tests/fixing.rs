@@ -74,7 +74,7 @@ const ONE_FILE_REWRITER: &str = "rewrite-one.cmd";
 fn manifest_with_fixer(r: &Repo) {
     rewriter(r, REWRITER);
     r.stage(
-        ".amont.conf",
+        "amont.conf",
         &format!("pre-commit  fmt  *.js  block  fix ./{REWRITER}\n"),
     );
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_amont"))
@@ -216,7 +216,7 @@ fn concurrent_restages_do_not_collide() {
     // race in `git add`.
     one_file_rewriter(&r, ONE_FILE_REWRITER);
     r.stage(
-        ".amont.conf",
+        "amont.conf",
         &format!(
             "pre-commit  fmt-a  *.js  block  fix ./{ONE_FILE_REWRITER} a.js\n\
              pre-commit  fmt-b  *.js  block  fix ./{ONE_FILE_REWRITER} b.js\n\

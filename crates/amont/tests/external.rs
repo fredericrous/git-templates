@@ -1,4 +1,4 @@
-//! Checks a repository declares for itself, in `.amont.conf`.
+//! Checks a repository declares for itself, in `amont.conf`.
 //!
 //! Unit tests cover the parser. These cover the part a parser cannot: that a
 //! line in a committed file actually causes a command to run, actually blocks a
@@ -47,7 +47,7 @@ const PROBE: &str = "probe.cmd";
 /// every test about what a declared check does has to make it first — otherwise
 /// they would all be testing the trust gate instead.
 fn manifest(r: &Repo, body: &str) {
-    r.stage(".amont.conf", body);
+    r.stage("amont.conf", body);
     trust(r);
 }
 
@@ -442,7 +442,7 @@ fn an_untrusted_manifest_does_not_run() {
     probe(&r, PROBE, 1);
     // NOT `manifest()` — that trusts it. This is the cloned-repo case.
     r.stage(
-        ".amont.conf",
+        "amont.conf",
         &format!("pre-commit  audit  *  block  ./{PROBE}\n"),
     );
 
@@ -487,7 +487,7 @@ fn editing_a_trusted_manifest_stops_it_running() {
 
     // As if a pull had added a line.
     r.stage(
-        ".amont.conf",
+        "amont.conf",
         &format!(
             "pre-commit  audit  *  block  ./{PROBE}\npre-commit  extra  *  block  ./{PROBE}\n"
         ),

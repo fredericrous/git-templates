@@ -111,7 +111,7 @@ so that removing our hooks never means removing yours.
 If `amont list` shows a check with:
 
 ```
-declared in an untrusted .amont.conf — review it, then `amont trust`
+declared in an untrusted amont.conf — review it, then `amont trust`
 ```
 
 then that repository has declared checks and they are **already not running**.

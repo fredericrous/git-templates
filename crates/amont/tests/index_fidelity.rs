@@ -255,7 +255,7 @@ fn ctrl_c_mid_run_still_restores_and_dies_by_the_signal() {
     use std::os::unix::process::ExitStatusExt;
 
     let r = Repo::new();
-    r.stage(".amont.conf", "pre-commit  slowpoke  *  warn  sleep 2\n");
+    r.stage("amont.conf", "pre-commit  slowpoke  *  warn  sleep 2\n");
     trust(&r);
     r.stage("x.json", VALID);
     r.commit("chore: seed");
@@ -378,7 +378,7 @@ fn signal_mid_check_restores(signal: &str) {
     seed(&r);
     r.stage("x.json", VALID);
     r.write("x.json", BROKEN);
-    r.stage(".amont.conf", "pre-commit  slow  *  block  sleep  5\n");
+    r.stage("amont.conf", "pre-commit  slow  *  block  sleep  5\n");
     let trusted = Command::new(env!("CARGO_BIN_EXE_amont"))
         .arg("trust")
         .current_dir(&r.dir)

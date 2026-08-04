@@ -135,7 +135,7 @@ fn run_still_catches_a_broken_staged_change() {
 fn all_files_takes_no_hold() {
     let r = Repo::new();
     r.stage("x.json", "{ \"a\": 1 }\n");
-    r.stage(".amont.conf", "pre-commit  slow  *  block  sleep  5\n");
+    r.stage("amont.conf", "pre-commit  slow  *  block  sleep  5\n");
     r.commit("chore: seed");
     // Something unstaged, so a hold would have work to do.
     r.write("x.json", "{ \"a\": 999 }\n");
@@ -220,7 +220,7 @@ fn all_files_never_stages_anything() {
     }
     r.git(&["add", "rewrite.sh"]);
     r.stage(
-        ".amont.conf",
+        "amont.conf",
         "pre-commit  fmt  *.js  block  fix ./rewrite.sh\n",
     );
     r.commit("chore: seed");

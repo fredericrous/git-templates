@@ -241,7 +241,7 @@ worse flaw than the lexicographic ordering usually cited against the old
 filename-prefix mechanism.
 
 ```
-# .amont.conf — stage  name        scope     severity  command
+# amont.conf — stage  name        scope     severity  command
 pre-commit        shellcheck  *.sh      block     scripts/lint-shell.sh
 pre-push          smoke       *         warn      make smoke
 ```

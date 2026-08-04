@@ -197,7 +197,7 @@ being asked again. That is the convenience, and it is worth having: you never
 forget to install, and `amont-fleet` never shows you an uncovered repo.
 
 It is also a standing grant, and worth stating in full. A cloned repository can
-declare its own checks in `.amont.conf`. With this key set, those
+declare its own checks in `amont.conf`. With this key set, those
 declarations are present in every repository you clone — including one you
 cloned only to read — and are one `amont trust` away from running. They do
 **not** run before that; see [the trust model](trust.md). But if you set this
