@@ -6,6 +6,14 @@ mechanical pull-request list too, generated; this file is the part a human
 wrote, and the release workflow refuses to tag a version whose section is
 missing here.
 
+## v1.2.1 — 2026-08-04
+
+- `amont-fleet` says what it is doing while it does it. The scan announces
+  itself the moment it starts (on stderr, only when a person is watching),
+  and `install`/`fix --apply` print each repository's line as it is
+  applied instead of holding every line until the end - a fleet-sized run
+  used to be silent for its whole duration, which read as a hang.
+
 ## v1.2.0 — 2026-08-04
 
 - The committed manifest is now **`amont.conf`**, undotted. A file whose

@@ -275,6 +275,23 @@ fn main() -> ExitCode {
         };
     }
 
+    // Say the walk has started before starting it. The scan spawns git in
+    // every repository it finds and, until this line existed, printed nothing
+    // at all until it was done — which on a fleet-sized tree read as a hang,
+    // and "is it doing anything" is the one question a fleet tool must never
+    // raise. Stderr, so `--json` consumers reading stdout still get exactly
+    // one document; gated on a terminal, so scripts capturing stderr are not
+    // handed decoration.
+    {
+        use std::io::IsTerminal;
+        if std::io::stderr().is_terminal() {
+            eprintln!(
+                "  scanning {} · depth {} …",
+                args.root.display(),
+                args.depth
+            );
+        }
+    }
     let scan = scan::scan(&args.root, args.depth, &installed);
     let elapsed = started.elapsed();
 
@@ -356,20 +373,29 @@ fn main() -> ExitCode {
             })
             .collect();
         if args.apply {
-            let reports: Vec<apply::ApplyReport> = plans
-                .iter()
-                .map(|p| apply::ApplyReport {
+            // One repository at a time, each line printed the moment its
+            // outcome exists. Collecting every report and printing at the end
+            // meant a run over dozens of repositories was silent for its
+            // whole duration — same hang-shaped silence the scan line above
+            // fixes, at the step where files are actually being written.
+            let mut reports: Vec<apply::ApplyReport> = Vec::with_capacity(plans.len());
+            for p in &plans {
+                let r = apply::ApplyReport {
                     repo: p.repo.clone(),
                     outcome: apply::apply(p),
-                })
-                .collect();
+                };
+                if !args.json {
+                    print_apply_line(&r);
+                }
+                reports.push(r);
+            }
             if args.json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&reports).unwrap_or_default()
                 );
             } else {
-                report_apply(&reports, &plans);
+                report_apply_summary(&reports, &plans);
             }
             let failed = reports
                 .iter()
@@ -634,7 +660,29 @@ fn report_warnings(plans: &[fix::FixPlan]) {
 /// What actually happened. A failure is never folded into the same count as a
 /// success, and "refused" is reported separately from "unchanged" — they look
 /// identical in a total and mean opposite things.
-fn report_apply(reports: &[apply::ApplyReport], plans: &[fix::FixPlan]) {
+/// One repository's outcome, printed the moment it happened — streaming is
+/// the point, see the apply loop. Refused and Unchanged stay silent here
+/// exactly as they always have; the summary counts them. The explicit flush
+/// is for a piped stdout, which buffers whole blocks and would otherwise
+/// hold the stream back until exit — the same silence this exists to end.
+fn print_apply_line(r: &apply::ApplyReport) {
+    use std::io::Write;
+    match &r.outcome {
+        apply::Outcome::Applied {
+            removed: rm,
+            written: wr,
+        } => println!("{}  -{rm} +{wr}", shown(&r.repo)),
+        apply::Outcome::Failed { error, at } => println!(
+            "{}  FAILED at {at}: {}",
+            shown(&r.repo),
+            amont_runtime::ui::sanitize(error)
+        ),
+        apply::Outcome::Refused | apply::Outcome::Unchanged => return,
+    }
+    let _ = std::io::stdout().flush();
+}
+
+fn report_apply_summary(reports: &[apply::ApplyReport], plans: &[fix::FixPlan]) {
     let mut applied = 0usize;
     let (mut removed, mut written, mut refused, mut unchanged) = (0usize, 0usize, 0usize, 0usize);
     for r in reports {
@@ -646,17 +694,10 @@ fn report_apply(reports: &[apply::ApplyReport], plans: &[fix::FixPlan]) {
                 applied += 1;
                 removed += rm;
                 written += wr;
-                println!("{}  -{rm} +{wr}", shown(&r.repo));
             }
             apply::Outcome::Refused => refused += 1,
             apply::Outcome::Unchanged => unchanged += 1,
-            apply::Outcome::Failed { error, at } => {
-                println!(
-                    "{}  FAILED at {at}: {}",
-                    shown(&r.repo),
-                    amont_runtime::ui::sanitize(error)
-                );
-            }
+            apply::Outcome::Failed { .. } => {}
         }
     }
     let failed = reports
