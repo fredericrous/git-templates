@@ -473,7 +473,7 @@ fn point_at_setup() {
 /// says nothing, and a non-interactive install simply reports the state.
 fn offer_trust() {
     // No repository, no manifest to ask about. `repo_root()` answered "." and
-    // this went looking for `./.amont.conf` in whatever directory the
+    // this went looking for `./amont.conf` in whatever directory the
     // install was run from — a file it would then have offered to trust ON
     // BEHALF of a repository that does not exist.
     let Ok(root) = crate::hooks::common::repo_root_checked() else {

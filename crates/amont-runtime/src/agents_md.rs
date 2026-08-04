@@ -9,7 +9,7 @@
 //!
 //! Never touches anything outside its own markers. An `AGENTS.md` a
 //! repository already wrote is the repository's, not this tool's, to
-//! rewrite — matching `.amont.conf`'s "declared, never assumed" posture.
+//! rewrite — matching `amont.conf`'s "declared, never assumed" posture.
 
 use std::ops::Range;
 use std::path::Path;

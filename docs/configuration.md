@@ -173,7 +173,7 @@ git config --global commit.template ~/.config/git/git-templates/message
 ## Repository-declared checks
 
 A repository can add checks of its own without anybody forking anything, in a
-committed `.amont.conf`. They obey every control on this page, addressed the
+committed `amont.conf`. They obey every control on this page, addressed the
 same three ways, and they are inert until trusted.
 
 Full reference: [custom checks](custom-checks.md) ·

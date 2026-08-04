@@ -49,7 +49,7 @@ backlog.
 > guards. `uninstall` also removes the shims from the template directory
 > and says so loudly if `init.templateDir` is still set.
 
-`.amont.conf` is committed, which is the point: a team shares a check by
+`amont.conf` is committed, which is the point: a team shares a check by
 committing it. The consequence had not been written down.
 
 `git clone` seeds `.git/hooks` from `init.templateDir`, so a fresh clone arrives
@@ -145,7 +145,7 @@ Explicit installation removes the case where you clone something to read it.
 It does not remove the case that matters most in open source: you clone a
 stranger's repository **because you intend to contribute**, you run
 `amont install` because you want your own checks while you work, and their
-`.amont.conf` runs on your first commit.
+`amont.conf` runs on your first commit.
 
 `amont install` means *I want my hooks here*. It does not mean *I have read
 this repository's committed commands and accept them*. Those are two different
@@ -170,7 +170,7 @@ $ amont install
   ✓ installed /Users/me/.local/bin/amont
   ✓ baked 4 shims into .git/hooks
 
-  ⚠ .amont.conf declares 2 checks that would run on your commits:
+  ⚠ amont.conf declares 2 checks that would run on your commits:
       shellcheck  pre-commit  *.sh  block  scripts/lint-shell.sh
       smoke       pre-push    *     warn   make smoke
     Trust them? [y/N]
@@ -182,7 +182,7 @@ untrusted, and reports as `Unavailable` with a reason rather than being silently
 skipped:
 
 ```
-⚠ .amont.conf declares 2 checks and is not trusted here — `amont trust`
+⚠ amont.conf declares 2 checks and is not trusted here — `amont trust`
 ⚠ 2 check(s) could not run: shellcheck, smoke
 ```
 
@@ -569,7 +569,7 @@ comment about `parent()` being lexical while `join("..")` is not moves with it.
 **Only `not_during`, not lefthook's full set.** `ref:` conditions duplicate
 `hook.skip`, which is already per-repo and already visible in the dashboard;
 `run:` conditions are a shell escape hatch in a design that has deliberately
-refused shells (see `.amont.conf`). Taking the useful third is not a failure
+refused shells (see `amont.conf`). Taking the useful third is not a failure
 to copy the other two.
 
 ---
@@ -609,12 +609,12 @@ protect when the answer is "all of it".
 > **The one section still unbuilt.** `Scope::files` is suffix-only today —
 > `matches()` in `check.rs` calls `path.ends_with(ext)` and nothing reads a
 > file head. Nothing is waiting on it; it is here because it is the gap
-> `.amont.conf` inherits from `Scope`, not because it is next.
+> `amont.conf` inherits from `Scope`, not because it is next.
 
 pre-commit classifies files with `identify`, which reads shebangs, so an
 extensionless `scripts/deploy` starting `#!/bin/sh` is a shell file.
 
-Our `Scope.files` is suffix-only, and `.amont.conf`'s `*.sh` inherits that —
+Our `Scope.files` is suffix-only, and `amont.conf`'s `*.sh` inherits that —
 a repository whose scripts have no extension cannot scope an external check onto
 them at all.
 

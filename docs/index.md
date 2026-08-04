@@ -22,7 +22,7 @@ language-aware checks that already know when to stay out of the way.
   with your credentials, has the smallest supply chain this project could
   arrange: none.
 - **A cloned repository cannot run code on your machine.** Repositories declare
-  their own checks in a committed `.amont.conf` — and those declarations are
+  their own checks in a committed `amont.conf` — and those declarations are
   inert until you review them and say `amont trust`. No other hook manager
   puts a review gate between `git clone` and running the repository's commands.
   [The trust model](trust.md).

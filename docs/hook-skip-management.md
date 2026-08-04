@@ -30,7 +30,7 @@ git config amont.severity.clippy warn       # same vocabulary, other surface
 the most specific wins — full id > short name > trigger — so you can downgrade a
 whole trigger and then exempt one check from it.
 
-Declared checks in `.amont.conf` have ids too, so `hook.skip pre-commit`
+Declared checks in `amont.conf` have ids too, so `hook.skip pre-commit`
 covers them. See `docs/custom-checks.md`.
 
 ## History: the problem this was written to solve

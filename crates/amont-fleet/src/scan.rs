@@ -21,7 +21,7 @@ use crate::severities::{self, SeverityOverride};
 use crate::shim::{self, BakeState, ShimState, DISPATCHERS};
 use crate::skips::{self, SkipEntry};
 
-/// One `.amont.conf` line, for display and for `--json`.
+/// One `amont.conf` line, for display and for `--json`.
 ///
 /// A SUM, like the `Line` it projects. Flattening it into `severity` +
 /// `command` + `Option<broken>` would rebuild here exactly the shape the
@@ -116,12 +116,12 @@ pub struct Repo {
     /// repo that enforces nothing reads exactly like one that enforces
     /// everything unless this column says otherwise.
     pub severities: Vec<SeverityOverride>,
-    /// Checks this repo declares in `.amont.conf`. Invisible to the fleet
+    /// Checks this repo declares in `amont.conf`. Invisible to the fleet
     /// view until now: a repo could be running a command on every commit that
     /// no dashboard column mentioned, and a manifest line nobody can parse is a
     /// check that silently is not running.
     pub declared: Vec<DeclaredCheck>,
-    /// Whether this repo's `.amont.conf` is trusted here. `None` when there
+    /// Whether this repo's `amont.conf` is trusted here. `None` when there
     /// is no manifest — which is almost every repo, and must read differently
     /// from "declared something and it is not running".
     pub trusted: Option<bool>,

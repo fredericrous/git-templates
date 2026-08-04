@@ -1,6 +1,6 @@
-//! Whether this repository's `.amont.conf` may run.
+//! Whether this repository's `amont.conf` may run.
 //!
-//! `.amont.conf` is committed, which is the point — a team shares a check by
+//! `amont.conf` is committed, which is the point — a team shares a check by
 //! committing it. The consequence is that cloning a repository and committing to
 //! it would otherwise run commands that repository chose, and neither of those
 //! acts is one anybody performs as a decision about trust. Reviewing a diff
@@ -26,7 +26,7 @@
 //! reproduce it by hand to check what they trusted:
 //!
 //! ```text
-//! $ git hash-object --no-filters .amont.conf
+//! $ git hash-object --no-filters amont.conf
 //! ```
 //!
 //! `--no-filters` is not decoration. Without it git applies the clean filter
@@ -48,7 +48,7 @@ pub const KEY: &str = "amont.trusted";
 /// `--no-filters`, because consent is bound to CONTENT and the content that
 /// matters is the bytes we PARSE. Plain `git hash-object` applies the clean
 /// filter and eol conversion configured by the repository's own committed
-/// `.gitattributes` — so a repo that declares `.amont.conf ident` (or
+/// `.gitattributes` — so a repo that declares `amont.conf ident` (or
 /// `text eol=crlf`) chooses the transform its fingerprint is taken through,
 /// and two manifests we would parse differently can hash identically. The
 /// binding was to content-after-a-repo-controlled-transform.
@@ -166,10 +166,10 @@ pub fn why(state: State) -> Option<&'static str> {
     match state {
         State::NoManifest | State::Trusted => None,
         State::Untrusted => {
-            Some("declared in an untrusted .amont.conf — review it, then `amont trust`")
+            Some("declared in an untrusted amont.conf — review it, then `amont trust`")
         }
         State::Changed => {
-            Some(".amont.conf changed since it was trusted — review it, then `amont trust`")
+            Some("amont.conf changed since it was trusted — review it, then `amont trust`")
         }
     }
 }
@@ -255,7 +255,7 @@ pub fn confirm(_prompt: &str) -> bool {
 pub fn command(args: &[std::ffi::OsString]) -> Result<(), String> {
     // Refuse rather than fall back to ".". Trust is RECORDED per repository,
     // keyed by the root this resolves to, so a "." root outside a repository
-    // meant `amont trust` in `~` would read `~/.amont.conf`, show its
+    // meant `amont trust` in `~` would read `~/amont.conf`, show its
     // declarations, and record trust for them — against a repository that does
     // not exist, in a state no later `amont trust --revoke` would find.
     let root = crate::hooks::common::repo_root_checked()?;
@@ -264,7 +264,7 @@ pub fn command(args: &[std::ffi::OsString]) -> Result<(), String> {
 
     if flag("--revoke") {
         revoke(root)?;
-        println!("{} .amont.conf is no longer trusted here", valid_sign());
+        println!("{} amont.conf is no longer trusted here", valid_sign());
         return Ok(());
     }
 
@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn a_clean_filter_cannot_make_two_manifests_share_a_fingerprint() {
         let d = repo("filter");
-        std::fs::write(d.join(".gitattributes"), ".amont.conf filter=flatten\n")
+        std::fs::write(d.join(".gitattributes"), "amont.conf filter=flatten\n")
             .expect("write attributes");
         let ok = std::process::Command::new("git")
             .args(["config", "--local", "filter.flatten.clean", "echo same"])
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn an_eol_conversion_cannot_make_two_manifests_share_a_fingerprint() {
         let d = repo("eol");
-        std::fs::write(d.join(".gitattributes"), ".amont.conf text eol=lf\n")
+        std::fs::write(d.join(".gitattributes"), "amont.conf text eol=lf\n")
             .expect("write attributes");
         let manifest = d.join(crate::manifest::MANIFEST);
 

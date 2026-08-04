@@ -7,7 +7,7 @@ That is the whole claim. This page is how it is enforced and where it stops.
 ## The problem it solves
 
 A repository can declare checks of its own in a committed
-[`.amont.conf`](custom-checks.md), and those declarations are shell
+[`amont.conf`](custom-checks.md), and those declarations are shell
 commands. Committing the file is the point — it is how a team shares a check.
 
 The consequence is that cloning a repository and committing to it would
@@ -25,7 +25,7 @@ A manifest is **inert until trusted**. Its declared checks are listed by
 `amont list` with the reason they will not fire:
 
 ```
-declared in an untrusted .amont.conf — review it, then `amont trust`
+declared in an untrusted amont.conf — review it, then `amont trust`
 ```
 
 ```sh
@@ -40,7 +40,7 @@ prompt that does not show the file is a prompt that trains people to press `y`.
 
 `amont trust` outside a repository is refused rather than falling back to
 `.`. Trust is recorded per repository, keyed by the root that resolves — so a
-`.` fallback would let `amont trust` in `~` read `~/.amont.conf`, show
+`.` fallback would let `amont trust` in `~` read `~/amont.conf`, show
 its declarations, and record trust against a repository that does not exist, in
 a state no later `--revoke` would find.
 
@@ -56,7 +56,7 @@ distinctly from "never trusted", because *somebody changed it* is a different
 thing to tell a reader than *you have not looked at this yet*:
 
 ```
-.amont.conf changed since it was trusted — review it, then `amont trust`
+amont.conf changed since it was trusted — review it, then `amont trust`
 ```
 
 ## Why `git hash-object --no-filters`
@@ -76,7 +76,7 @@ SipHash, it costs no dependency, and **you can reproduce it by hand** to check
 what you trusted:
 
 ```sh
-git hash-object --no-filters .amont.conf
+git hash-object --no-filters amont.conf
 git config --local --get amont.trusted
 ```
 
@@ -120,7 +120,7 @@ a marketing claim:
   you installed, and are governed by
   [`hook.skip` and severity](opting-out.md), not by trust.
 - **It does not protect a repository you wrote the manifest in.** Your own
-  `.amont.conf` is trusted by you, once.
+  `amont.conf` is trusted by you, once.
 - **SHA-1 is the floor**, in a repository using git's default object format.
   See above for why that trade was taken.
 

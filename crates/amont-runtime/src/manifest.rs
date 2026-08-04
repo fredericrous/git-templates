@@ -1,4 +1,4 @@
-//! `.amont.conf` — checks a repository declares for itself.
+//! `amont.conf` — checks a repository declares for itself.
 //!
 //! A third party cannot add a Rust module without rebuilding this binary, so
 //! extension means declared commands.
@@ -45,7 +45,7 @@ use crate::check::{Check, Fix, Outcome, Scope, Severity, Stage};
 use crate::hooks::common::Restaged;
 use crate::registry::{Ctx, CHECKS, ENTRYPOINTS};
 
-pub const MANIFEST: &str = ".amont.conf";
+pub const MANIFEST: &str = "amont.conf";
 
 /// Why a line could not be used.
 ///
@@ -229,7 +229,7 @@ pub struct External {
     pub id: String,
     /// The name as written in the manifest — the "short name" of the vocabulary
     /// — used for messages. A line too malformed to name itself falls back to
-    /// its position, and reading `pre-commit-.amont.conf:3` back to somebody
+    /// its position, and reading `pre-commit-amont.conf:3` back to somebody
     /// helps nobody.
     pub short_name: String,
     pub stage: Stage,
@@ -848,7 +848,7 @@ mod tests {
     #[test]
     fn a_nameless_line_is_named_after_its_position() {
         let l = one("pre-commit\n");
-        assert_eq!(l.name(), ".amont.conf:1");
+        assert_eq!(l.name(), "amont.conf:1");
         assert_eq!(why(&l), ParseError::MissingFields);
     }
 

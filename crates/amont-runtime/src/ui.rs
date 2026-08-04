@@ -90,7 +90,7 @@ pub fn highlight(text: &str) -> String {
 
 /// Text from a repository, made safe to hand a terminal.
 ///
-/// A name or a command in `.amont.conf` is chosen by whoever wrote the
+/// A name or a command in `amont.conf` is chosen by whoever wrote the
 /// repository, and the trust prompt exists precisely so a person can read the
 /// declarations before accepting them. `\x1b[8m` is the conceal attribute:
 /// putting it in one declaration's name HID THE NEXT ONE from that prompt, so

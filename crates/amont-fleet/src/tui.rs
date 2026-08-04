@@ -1564,7 +1564,7 @@ mod tests {
         let mut app = App::new(scan_with_repos(vec![r]));
         app.mode = Mode::Detail;
         let out = render(&app, 120, 30);
-        assert!(out.contains(".amont.conf"), "{out}");
+        assert!(out.contains("amont.conf"), "{out}");
         assert!(out.contains("shellcheck"), "{out}");
         assert!(out.contains("make lint"), "the command itself: {out}");
         assert!(out.contains("*.sh"), "and what gates it: {out}");
@@ -1656,7 +1656,7 @@ mod tests {
         app.mode = Mode::Detail;
         let out = render(&app, 120, 30);
         assert!(
-            !out.contains(".amont.conf"),
+            !out.contains("amont.conf"),
             "a file that does not exist was mentioned: {out}"
         );
     }

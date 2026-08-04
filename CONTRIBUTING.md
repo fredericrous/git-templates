@@ -99,7 +99,7 @@ test fails if a registered name has no shim or a shim has no handler. See
 
 Before adding a built-in, ask whether it belongs in everybody's binary. A check
 that is right for *one* repository can be declared in that repository's
-`.amont.conf` today, no fork required. See
+`amont.conf` today, no fork required. See
 [docs/custom-checks.md](docs/custom-checks.md).
 
 ## Tests

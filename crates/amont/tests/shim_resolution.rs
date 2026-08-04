@@ -145,7 +145,7 @@ fn an_unbaked_shim_ignores_an_executable_the_repo_planted() {
 /// component means the current directory. Against the old shim this ran the
 /// repository's file and exited 0, so the commit proceeded and the check
 /// reported as passed. Nothing about the trust model applied: no
-/// `.amont.conf`, no prompt, no declaration.
+/// `amont.conf`, no prompt, no declaration.
 #[test]
 fn an_unbaked_shim_ignores_the_repo_even_when_path_holds_the_cwd() {
     let r = Repo::new();

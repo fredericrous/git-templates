@@ -110,9 +110,9 @@ impl Tree {
         std::fs::create_dir_all(self.0.join(rel)).expect("mkdir");
         self
     }
-    /// A committed `.amont.conf` at a repo root.
+    /// A committed `amont.conf` at a repo root.
     fn manifest(&self, rel: &str, body: &str) -> &Self {
-        std::fs::write(self.0.join(rel).join(".amont.conf"), body).expect("write");
+        std::fs::write(self.0.join(rel).join("amont.conf"), body).expect("write");
         self
     }
     /// A committed `AGENTS.md` at a repo root, verbatim.
@@ -771,7 +771,7 @@ fn a_non_utf8_hook_is_never_ours_and_never_missing() {
 }
 
 /// A repo with no `AGENTS.md` at all is `missing`, not a problem to alarm on —
-/// the pointer is opt-in, same posture as `.amont.conf`.
+/// the pointer is opt-in, same posture as `amont.conf`.
 #[test]
 fn a_repo_without_agents_md_scans_as_missing() {
     let t = Tree::new("agents-md-missing");

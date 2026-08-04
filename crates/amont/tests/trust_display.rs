@@ -45,7 +45,7 @@ fn a_declaration_cannot_conceal_the_next_one_from_the_trust_prompt() {
     let r = Repo::new();
     r.stage("x.txt", "seed\n");
     r.commit("chore: seed");
-    r.stage(".amont.conf", &concealing_manifest());
+    r.stage("amont.conf", &concealing_manifest());
 
     let shown = run(&r, &["trust", "--show"]);
 
@@ -68,7 +68,7 @@ fn the_check_listing_does_not_pass_escapes_through_either() {
     let r = Repo::new();
     r.stage("x.txt", "seed\n");
     r.commit("chore: seed");
-    r.stage(".amont.conf", &concealing_manifest());
+    r.stage("amont.conf", &concealing_manifest());
 
     let shown = run(&r, &["list"]);
     assert!(
@@ -86,7 +86,7 @@ fn a_parse_error_does_not_carry_the_manifests_escapes() {
     r.stage("x.txt", "seed\n");
     r.commit("chore: seed");
     r.stage(
-        ".amont.conf",
+        "amont.conf",
         &format!("pre-commit  bad  *  {}nonsense  /bin/true\n", "\u{1b}[8m"),
     );
 

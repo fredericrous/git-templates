@@ -2,7 +2,7 @@
 
 Four git hooks are installed — `pre-commit`, `commit-msg`,
 `prepare-commit-msg`, `pre-push` — and behind them twenty named checks, plus
-any your repository declares in [`.amont.conf`](custom-checks.md).
+any your repository declares in [`amont.conf`](custom-checks.md).
 
 This page is the catalogue. **It is not the answer to "what will run in my
 repository"** — for that, ask:
@@ -137,4 +137,4 @@ A check is a module plus one registry entry in
 [CONTRIBUTING.md](https://github.com/fredericrous/amont/blob/main/CONTRIBUTING.md).
 
 If the check belongs to your repository rather than to everybody's, declare it
-in [`.amont.conf`](custom-checks.md) instead — no fork required.
+in [`amont.conf`](custom-checks.md) instead — no fork required.

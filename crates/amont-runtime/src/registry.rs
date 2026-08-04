@@ -465,7 +465,7 @@ pub fn stage_checks(stage: Stage) -> impl Iterator<Item = &'static Builtin> {
 }
 
 /// Every check for one stage — built-ins first, then whatever this repository
-/// declares in `.amont.conf`.
+/// declares in `amont.conf`.
 ///
 /// The order is not negotiable and not configurable. A third-party command must
 /// not be able to delay `pre-push-branch-protect`, and appending is the only
