@@ -6,6 +6,20 @@ mechanical pull-request list too, generated; this file is the part a human
 wrote, and the release workflow refuses to tag a version whose section is
 missing here.
 
+## v1.3.0 — 2026-08-04
+
+- The branch contract is now knowable BEFORE the branch exists, three ways.
+  `amont list --json` carries `branch_style` (shape, pattern, prefixes)
+  beside `commit_style`; the AGENTS.md block renders the same contract so a
+  coding agent reads it before its first `git checkout -b`; and a new
+  twenty-first check, `pre-commit-branch-pattern`, says at the FIRST commit
+  what pre-push would refuse at the last - with the `git branch -m` fix,
+  while renaming costs nothing. A warning, never a block, and quiet on a
+  detached head, in a remoteless repository, and on any branch a remote
+  already has. All three render from the same `BRANCH_PREFIXES` table the
+  push check enforces: there is no second copy to drift. Re-run
+  `amont agents-md` to refresh committed blocks.
+
 ## v1.2.1 — 2026-08-04
 
 - `amont-fleet` says what it is doing while it does it. The scan announces

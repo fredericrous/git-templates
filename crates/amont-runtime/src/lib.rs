@@ -443,8 +443,25 @@ pub fn print_json(stage_filter: Option<check::Stage>, pushed: bool, listings: &[
             json::bool_field("pushed", pushed),
             format!("\"checks\":{}", json::array(&checks)),
             format!("\"commit_style\":{}", commit_style_json(&style, &rows)),
+            format!("\"branch_style\":{}", branch_style_json()),
         ])
     );
+}
+
+/// The branch contract, in the same document agents are told to consult — so
+/// the pattern is knowable BEFORE a branch is created rather than discovered
+/// at push time. Rendered from `vocabulary::BRANCH_PREFIXES`, the same table
+/// `pre-push-branch-pattern` enforces: there is no second copy to drift.
+fn branch_style_json() -> String {
+    let prefixes: Vec<String> = vocabulary::BRANCH_PREFIXES
+        .iter()
+        .map(|p| p.name.to_string())
+        .collect();
+    json::object(&[
+        json::string_field("shape", "<prefix>/<name>"),
+        json::string_field("pattern", &vocabulary::branch_contract()),
+        json::string_array_field("prefixes", &prefixes),
+    ])
 }
 
 /// `git ls-files` — every check's default scope evaluation, unchanged from

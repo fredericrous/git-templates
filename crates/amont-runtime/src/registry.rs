@@ -94,6 +94,18 @@ pub const CHECKS: &[Builtin] = &[
         fix: Fix::None,
         run: |ctx| hooks::ban_terms::run(ctx.name, ctx.args),
     },
+    // The push-time contract, said at the first commit — when renaming the
+    // branch costs one command and zero rework. Same short name as the
+    // pre-push check on purpose: `hook.skip branch-pattern` silences the
+    // rule, not one of its two voices.
+    Builtin {
+        name: "pre-commit-branch-pattern",
+        stage: Stage::PreCommit,
+        scope: Scope::ALWAYS,
+        severity: Severity::Warn,
+        fix: Fix::None,
+        run: |_ctx| hooks::branch_pattern::early(),
+    },
     Builtin {
         name: "pre-commit-cargo-fmt",
         stage: Stage::PreCommit,
@@ -792,6 +804,7 @@ mod tests {
     const HAS_FIXING_CODE: &[(&str, bool)] = &[
         ("pre-commit-argo-lint", false),
         ("pre-commit-ban-terms", false),
+        ("pre-commit-branch-pattern", false),
         ("pre-commit-cargo-fmt", true),
         ("pre-commit-clippy", false),
         ("pre-commit-kube-linter", false),
@@ -843,7 +856,7 @@ mod tests {
     /// the point of the refactor: there is no second table to disagree with.
     #[test]
     fn every_check_declares_a_stage_and_a_scope() {
-        assert_eq!(CHECKS.len(), 20);
+        assert_eq!(CHECKS.len(), 21);
         let pre_commit = super::stage_checks(Stage::PreCommit).count();
         let pre_push = super::stage_checks(Stage::PrePush).count();
         assert_eq!(

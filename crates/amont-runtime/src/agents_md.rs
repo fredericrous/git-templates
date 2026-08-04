@@ -18,7 +18,17 @@ pub const START: &str = "<!-- amont:start -->";
 pub const END: &str = "<!-- amont:end -->";
 
 /// The block, START and END inclusive, always ending in exactly one newline.
+///
+/// The branch paragraph is rendered from `vocabulary::BRANCH_PREFIXES` — the
+/// table `pre-push-branch-pattern` enforces — precisely so this file cannot
+/// become a second, driftable copy of the rule. What the block says and what
+/// the hook rejects are the same constant.
 pub fn generate_block() -> String {
+    let prefixes = crate::vocabulary::BRANCH_PREFIXES
+        .iter()
+        .map(|p| p.name)
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "{START}\n\
 ## Git hooks (amont)\n\
@@ -34,7 +44,11 @@ amont list --json --stage pre-push --pushed  # exactly what pushing next gates\n
 Each check reports its *effective* severity (`block`/`warn`, including any\n\
 `amont.severity.*` override) and whether it fires here. The same output\n\
 carries `commit_style`: the subject and description limits `commit-msg`\n\
-enforces, and where the type's gitmoji is placed.\n\
+enforces, and where the type's gitmoji is placed. It also carries\n\
+`branch_style`: name a branch `<prefix>/<name>` BEFORE creating it —\n\
+prefixes are {prefixes} — because `pre-push` refuses a\n\
+new branch that breaks the pattern, at the end of the work instead of the\n\
+start.\n\
 \n\
 `git commit` and `git push` both run their checks first, and neither is\n\
 instant: pre-commit can invoke formatters, linters or clippy (a workspace\n\

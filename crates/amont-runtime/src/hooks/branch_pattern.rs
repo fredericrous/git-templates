@@ -10,9 +10,70 @@
 use crate::check::Outcome;
 use crate::git;
 use crate::pushrefs::PushRef;
-use crate::ui::{error_sign, highlight, valid_sign};
+use crate::ui::{error_sign, highlight, valid_sign, warning_sign};
 
 use crate::vocabulary;
+
+/// The same contract, said at the FIRST COMMIT — `pre-commit-branch-pattern`.
+///
+/// pre-push is the enforcement point, and it is also the worst possible
+/// moment to learn the rule: the work is done and stacked on a name that now
+/// has to change, usually by an agent or a person who never saw the contract
+/// before creating the branch. This is `usual-name`'s argument applied to
+/// branch names — say it at the first commit, when the fix is one
+/// `git branch -m` and nothing is built on top.
+///
+/// A warning, never a block, and quiet in every state where the push check
+/// would not judge this branch:
+///
+///   - a DETACHED head (rebase, cherry-pick, bisect) names no branch;
+///   - a repository with no remote has nothing this contract gates;
+///   - a branch with a remote-tracking ref under any remote already exists
+///     on a server. pre-push authorises an existing branch by its non-zero
+///     remote oid; the remote-tracking ref is the local mirror of that same
+///     fact, and costs no network to consult.
+pub fn early() -> Outcome {
+    let Some(branch) = git::stdout(&["symbolic-ref", "--quiet", "--short", "HEAD"]) else {
+        return Outcome::Passed;
+    };
+    if conforms(&branch) {
+        println!(
+            "{} Branch name conforms with authorized pattern",
+            valid_sign()
+        );
+        return Outcome::Passed;
+    }
+    if git::stdout(&["remote"])
+        .map(|remotes| remotes.is_empty())
+        .unwrap_or(true)
+    {
+        return Outcome::Passed;
+    }
+    // `*` in a for-each-ref pattern does not cross `/`, so this matches the
+    // branch under any single remote name and nothing else.
+    let tracking = format!("refs/remotes/*/{branch}");
+    if git::stdout(&["for-each-ref", "--format=%(refname)", &tracking])
+        .is_some_and(|refs| !refs.is_empty())
+    {
+        return Outcome::Passed;
+    }
+    let prefixes = vocabulary::BRANCH_PREFIXES
+        .iter()
+        .map(|p| p.name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!(
+        "{} Branch {} will be refused at push time — it does not match
+    {}.
+    Rename it now, while nothing is stacked on the name: {} <prefix>/…
+    Prefixes: {prefixes}",
+        warning_sign(),
+        highlight(&branch),
+        highlight(&vocabulary::branch_contract()),
+        highlight("git branch -m")
+    );
+    Outcome::Warned
+}
 
 /// Both the rule and the message now come from `vocabulary`, so what a user is
 /// told and what is enforced cannot drift — and neither can the branch prefixes
