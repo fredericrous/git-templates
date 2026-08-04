@@ -6,6 +6,23 @@ mechanical pull-request list too, generated; this file is the part a human
 wrote, and the release workflow refuses to tag a version whose section is
 missing here.
 
+## v1.2.0 — 2026-08-04
+
+- The committed manifest is now **`amont.conf`**, undotted. A file whose
+  whole story is "review me before you trust me" should not be hidden by
+  the shell's dotfile convention. If you created a `.amont.conf` under
+  v1.1.0, rename it — the trust record is keyed on content, so an
+  already-trusted manifest stays trusted under its new name.
+- The AGENTS.md block written by `amont agents-md` now warns coding agents
+  that `git commit` and `git push` run their checks first and can
+  legitimately take minutes — pre-commit can mean clippy building a
+  workspace, pre-push a test suite — so a shell tool's default two-minute
+  timeout kills the command mid-check and reads its own impatience as
+  failure. Re-run `amont agents-md` to refresh the block.
+- `amont list | head` no longer panics with a backtrace when the pipe
+  closes early: both binaries restore SIGPIPE's default disposition and
+  die quietly, like every other Unix filter.
+
 ## v1.1.0 — 2026-08-04
 
 **The project is now amont** — French for upstream: catch it *en amont*,
