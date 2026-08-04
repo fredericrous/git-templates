@@ -205,7 +205,33 @@ fn parse(argv: Vec<OsString>) -> Invocation {
     }
 }
 
+/// Die quietly when the reader hangs up, like every other Unix filter.
+///
+/// Rust ignores SIGPIPE at startup, so `amont list | head` panicked with a
+/// backtrace the moment `head` closed the pipe — `println!` hit EPIPE and
+/// EPIPE is a panic. Restoring SIGPIPE's default disposition makes the exit
+/// what a shell user expects (killed by the signal, status 141), and it is
+/// safe here because nothing in this binary writes to a pipe it must outlive.
+/// `extern "C"` rather than a crate: std already links libc, and the commit
+/// path takes no dependencies. Windows has no SIGPIPE; there the pipe-closed
+/// write fails an `Err` path instead of raising a signal, and this is a no-op.
+#[cfg(unix)]
+fn die_on_sigpipe() {
+    extern "C" {
+        fn signal(signum: i32, handler: usize) -> usize;
+    }
+    const SIGPIPE: i32 = 13;
+    const SIG_DFL: usize = 0;
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn die_on_sigpipe() {}
+
 fn main() {
+    die_on_sigpipe();
     match parse(std::env::args_os().skip(1).collect()) {
         Invocation::Help => {
             print!("{USAGE}");

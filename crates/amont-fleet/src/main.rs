@@ -209,7 +209,26 @@ fn default_root(home: Option<&Path>) -> Option<PathBuf> {
     home.map(|h| h.join("Developer"))
 }
 
+/// Same disposition as the hook binary's `die_on_sigpipe`, for the same
+/// reason: `amont-fleet scan | head` must die quietly, not panic. See the
+/// comment there for the full argument.
+#[cfg(unix)]
+fn die_on_sigpipe() {
+    extern "C" {
+        fn signal(signum: i32, handler: usize) -> usize;
+    }
+    const SIGPIPE: i32 = 13;
+    const SIG_DFL: usize = 0;
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn die_on_sigpipe() {}
+
 fn main() -> ExitCode {
+    die_on_sigpipe();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = match parse(&argv, home().as_deref()) {
         Ok(a) => a,
