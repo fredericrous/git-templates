@@ -303,6 +303,12 @@ amont agents-md --check  # exit non-zero if it has drifted
 `agents-md` only ever touches a `<!-- amont:start -->` / `<!-- amont:end -->`
 span, so the rest of the file stays yours.
 
+The block it writes also warns the agent that `git commit` and `git push`
+run their checks first — pre-commit can mean clippy building a workspace,
+pre-push a whole test suite — and an agent whose shell tool defaults to a
+two-minute timeout will kill the command mid-check and read its own
+impatience as a failure. Ten minutes is the safe floor, for both.
+
 ## Why you can let this near your commits
 
 A prompt theme is cosmetic. This blocks commits and pushes, reads every staged

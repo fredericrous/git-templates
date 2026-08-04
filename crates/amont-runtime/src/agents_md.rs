@@ -36,6 +36,14 @@ Each check reports its *effective* severity (`block`/`warn`, including any\n\
 carries `commit_style`: the subject and description limits `commit-msg`\n\
 enforces, and where the type's gitmoji is placed.\n\
 \n\
+`git commit` and `git push` both run their checks first, and neither is\n\
+instant: pre-commit can invoke formatters, linters or clippy (a workspace\n\
+build), and pre-push can run the test suite. Give both commands a timeout\n\
+of at least 10 minutes instead of your tooling's default. A push killed\n\
+mid-suite pushed nothing; a commit killed mid-check committed nothing, and\n\
+your unstaged work stays parked until the next run says how to recover it.\n\
+Neither is the checks failing — it is the timeout.\n\
+\n\
 Never bypass with `--no-verify`. To change enforcement, downgrade it\n\
 intentionally instead:\n\
 \n\
