@@ -1,7 +1,7 @@
 # The checks
 
 Four git hooks are installed — `pre-commit`, `commit-msg`,
-`prepare-commit-msg`, `pre-push` — and behind them twenty named checks, plus
+`prepare-commit-msg`, `pre-push` — and behind them twenty-one named checks, plus
 any your repository declares in [`amont.conf`](custom-checks.md).
 
 This page is the catalogue. **It is not the answer to "what will run in my
@@ -65,6 +65,7 @@ fourteen still report.
 |---|---|---|
 | `pre-commit-argo-lint` | `.yaml` `.yml` + `kustomization.yaml`/`.yml` | Argo CD app lint. **soft** |
 | `pre-commit-ban-terms` | `.js` `.jsx` `.ts` `.tsx` `.vue` | Refuses focused/debug leftovers (`describe.only`, `debugger`, …) in staged JS/TS. Scoped to what this commit touches, and re-checked against staged content with comments and string literals blanked. |
+| `pre-commit-branch-pattern` | always | Says at the **first commit** what [`pre-push-branch-pattern`](#pre-push) will refuse at push time, with the `git branch -m` fix — while renaming costs nothing. Quiet on a detached head, in a remoteless repository, and on any branch a remote already has. **Never blocks.** |
 | `pre-commit-cargo-fmt` | `.rs` + `Cargo.toml` | `cargo fmt`. **fixes** |
 | `pre-commit-clippy` | `.rs` + `Cargo.toml` | `cargo clippy` |
 | `pre-commit-kube-linter` | `.yaml` `.yml` + `.kube-linter*.yaml`/`.yml` | kube-linter. **soft** |
