@@ -554,6 +554,16 @@ fn force_replaces_a_symlinked_hook_and_never_the_file_it_pointed_at() {
 /// file git is watching, and there is no flag that is — a repository pointing
 /// `core.hooksPath` at a tracked directory (a perfectly normal way to keep
 /// hooks in version control) must be refused whatever is typed.
+///
+/// The refusal now arrives one step EARLIER than it used to, from the redirect
+/// check rather than from `guard_write`'s tracked guard, and that is a
+/// strengthening rather than a loss: dispatch has been handed to somebody else,
+/// so there is no directory left that is both ours to write and one git would
+/// read from. The tracked guard itself stays covered without a redirect by
+/// `force_replaces_a_symlinked_hook_and_never_the_file_it_pointed_at`.
+///
+/// The load-bearing assertion is unchanged and stated last: the tracked file is
+/// byte-identical afterwards.
 #[test]
 fn a_tracked_hooks_directory_is_refused_even_with_force() {
     let s = Sandbox::new("tracked-hooks");
@@ -573,7 +583,7 @@ fn a_tracked_hooks_directory_is_refused_even_with_force() {
         let (code, out) = run_verb(&s, &repo, args);
         assert_ne!(code, 0, "{args:?} rewrote tracked source:\n{out}");
         assert!(
-            out.contains("TRACKED") || out.contains("not ours"),
+            out.contains("TRACKED") || out.contains("not ours") || out.contains("core.hooksPath"),
             "{args:?} must say why:\n{out}"
         );
         assert_eq!(
@@ -582,6 +592,100 @@ fn a_tracked_hooks_directory_is_refused_even_with_force() {
             "TRACKED FILE WAS REWRITTEN by {args:?}"
         );
     }
+}
+
+/// The husky case, which used to pass silently and is the reason any of this
+/// exists.
+///
+/// `core.hooksPath` at an UNTRACKED directory inside the repository — exactly
+/// what `husky` writes — used to be indistinguishable from `.git/hooks` to
+/// `--git-path hooks`, so `install` cheerfully baked four shims into `.husky/_`.
+/// husky's own `prepare` regenerates that directory on the next `npm install`,
+/// so the shims were gone by the next install and the repository ran no checks
+/// while every report said it was managed. Every `duro-*` repository on this
+/// machine was in that state, and a direct push to `main` went through
+/// unchallenged for as long as it lasted.
+///
+/// Both directories must be left alone, and the message must name the remedy.
+#[test]
+fn an_untracked_redirect_is_refused_and_names_the_remedy() {
+    let s = Sandbox::new("husky-redirect");
+    let repo = s.path("repo");
+    init_repo(&repo);
+    // Untracked, and never committed: this is what husky's `prepare` produces.
+    let husky = repo.join(".husky/_");
+    std::fs::create_dir_all(&husky).expect("mkdir");
+    std::fs::write(
+        husky.join("pre-commit"),
+        "#!/usr/bin/env sh\n. \"$(dirname \"$0\")/h\"\n",
+    )
+    .expect("write");
+    let before = std::fs::read_to_string(husky.join("pre-commit")).expect("read");
+    git(&repo, &["config", "core.hooksPath", ".husky/_"]);
+
+    for args in [&["install"][..], &["install", "--force"][..]] {
+        let (code, out) = run_verb(&s, &repo, args);
+        assert_ne!(
+            code, 0,
+            "{args:?} wrote into a redirected hooks dir:\n{out}"
+        );
+        assert!(
+            out.contains("core.hooksPath"),
+            "{args:?} must name the setting:\n{out}"
+        );
+        assert!(
+            out.contains("git config --unset core.hooksPath"),
+            "{args:?} must name the remedy:\n{out}"
+        );
+        // Naming the tool is what turns the message into something actionable
+        // rather than a puzzle about a config key.
+        assert!(out.contains("husky"), "{args:?} must name husky:\n{out}");
+        assert_eq!(
+            std::fs::read_to_string(husky.join("pre-commit")).expect("read"),
+            before,
+            "{args:?} overwrote husky's own hook"
+        );
+        // And nothing was smuggled into the directory git is NOT reading.
+        assert!(
+            !repo.join(".git/hooks/pre-commit").exists(),
+            "{args:?} wrote a shim git would never dispatch"
+        );
+    }
+}
+
+/// Uninstall must NOT inherit the refusal above.
+///
+/// Versions before the redirect check wrote our shims into whatever
+/// `core.hooksPath` named, so repositories are carrying them in `.husky/_` right
+/// now. If `uninstall` refused a redirect the way `install` does, the only
+/// command that removes them could not reach them — the tool would have made a
+/// mess it could no longer clean up.
+#[test]
+fn uninstall_reaches_shims_left_in_a_redirected_dir() {
+    let s = Sandbox::new("uninstall-redirect");
+    let repo = s.path("repo");
+    init_repo(&repo);
+    let husky = repo.join(".husky/_");
+    std::fs::create_dir_all(&husky).expect("mkdir");
+
+    // Install normally first, so the shims are genuinely ours, then redirect —
+    // the order a repository actually arrives in this state by.
+    let (code, out) = run_verb(&s, &repo, &["install"]);
+    assert_eq!(code, 0, "setup install failed:\n{out}");
+    let shim = std::fs::read_to_string(repo.join(".git/hooks/pre-commit")).expect("read");
+    std::fs::write(husky.join("pre-commit"), &shim).expect("write");
+    git(&repo, &["config", "core.hooksPath", ".husky/_"]);
+
+    let (code, out) = run_verb(&s, &repo, &["uninstall"]);
+    assert_eq!(code, 0, "uninstall failed:\n{out}");
+    assert!(
+        !husky.join("pre-commit").exists(),
+        "our shim was left behind in the redirected dir:\n{out}"
+    );
+    assert!(
+        !repo.join(".git/hooks/pre-commit").exists(),
+        "our shim was left behind in the repo's own dir:\n{out}"
+    );
 }
 
 /// Fail closed for the WHOLE repository. A write that cannot happen must leave

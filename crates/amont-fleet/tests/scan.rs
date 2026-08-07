@@ -525,6 +525,46 @@ fn core_hooks_path_is_honoured_not_assumed() {
     assert!(!t.path().join("redirected/.git/hooks").exists());
 }
 
+/// The husky case, at scan level. `.husky/_` is inside the working tree, so
+/// every containment test the scanner had said "in" — and it reported eleven
+/// repositories as managed-but-drifted when what was true is that amont was not
+/// running in any of them.
+///
+/// A hook manager that REGENERATES its directory is the distinguishing fact, and
+/// `redirect_is_hostile` reads it off the destination. So this must report
+/// `redirected`, `hostile`, and NOT managed.
+#[test]
+fn a_husky_hooks_path_is_reported_as_hostile_not_managed() {
+    let t = Tree::new("hookspath-husky");
+    t.custom_hooks_path_repo("redirected", ".husky/_");
+    let v = json(&["--root", t.path().to_str().unwrap()]);
+    let repo = &v["repos"][0];
+    assert_eq!(repo["hooks_dir"]["where"], "redirected", "{repo}");
+    assert_eq!(repo["hooks_dir"]["hostile"], true, "{repo}");
+    assert_eq!(
+        repo["managed"], false,
+        "a repository whose dispatch husky owns is not managed by us: {repo}"
+    );
+}
+
+/// The other half of the same predicate, and the reason it is not simply
+/// "refuse every `core.hooksPath`".
+///
+/// A repository that deliberately keeps its hooks in `tooling/hooks` has chosen
+/// a location, not handed dispatch to a tool that will overwrite it. Nothing
+/// regenerates that directory, so there is nothing to protect it from — it stays
+/// benign, stays managed, and `fix` still writes there.
+#[test]
+fn a_deliberate_in_repo_hooks_path_stays_benign() {
+    let t = Tree::new("hookspath-benign");
+    t.custom_hooks_path_repo("redirected", "tooling/hooks");
+    let v = json(&["--root", t.path().to_str().unwrap()]);
+    let repo = &v["repos"][0];
+    assert_eq!(repo["hooks_dir"]["where"], "redirected", "{repo}");
+    assert_eq!(repo["hooks_dir"]["hostile"], false, "{repo}");
+    assert_eq!(repo["managed"], true, "{repo}");
+}
+
 /// `core.hooksPath` reaching a repo through an `include`, not a literal key
 /// in its own `.git/config` — a local-file-only shortcut would see nothing
 /// to act on here and fall back to `.git/hooks`, wrongly.

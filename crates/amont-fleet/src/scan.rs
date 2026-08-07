@@ -249,6 +249,36 @@ pub enum HooksDir {
     /// and a repo redirecting `core.hooksPath` to `tooling/hooks` within itself
     /// is redirecting within itself.
     In { path: PathBuf },
+    /// Inside the repository, and NOT its own `<git-common-dir>/hooks` —
+    /// `core.hooksPath` handed dispatch to another tool.
+    ///
+    /// Split out of `In`, which used to swallow it, and the silence cost
+    /// something concrete: every `duro-*` repository ran husky, so
+    /// `core.hooksPath` was `.husky/_`, so the whole fleet reported them as
+    /// "drifted" — four shims that did not match, in a directory husky
+    /// regenerates on the next `npm install`. What was actually true is that
+    /// amont was not running in them at all, and a direct push to `main` went
+    /// through unchallenged for as long as that lasted.
+    ///
+    /// `hostile` is decided ONCE here, at scan time, by
+    /// [`amont_runtime::install::redirect_is_hostile`] — the same predicate
+    /// `amont install` uses, so a repository cannot be judged one way by the
+    /// dashboard and the other by the installer.
+    ///
+    /// Stored rather than recomputed because that predicate reads four files,
+    /// and `inside()` is called per row per frame by the TUI. A cheap accessor
+    /// that quietly did filesystem I/O would be a render-loop stall nobody
+    /// looking at the call site could see.
+    ///
+    /// Hostile is reported and never written to; benign is followed exactly as
+    /// before, which is what keeps a deliberate `tooling/hooks` working. The
+    /// remedy for the hostile case is `git config --unset core.hooksPath`, which
+    /// the message says.
+    Redirected {
+        path: PathBuf,
+        own: PathBuf,
+        hostile: bool,
+    },
     /// Resolved to a directory that is neither. Reported, never created, never
     /// written to, never deleted from.
     Outside { path: PathBuf },
@@ -263,14 +293,40 @@ impl HooksDir {
     pub fn inside(&self) -> Option<&Path> {
         match self {
             HooksDir::In { path } => Some(path),
+            // A benign redirect is a directory this repository chose and we have
+            // always honoured. Only a hostile one is withheld.
+            HooksDir::Redirected {
+                path,
+                hostile: false,
+                ..
+            } => Some(path),
             _ => None,
         }
+    }
+
+    /// Whether another tool has taken hook dispatch away from this repository.
+    pub fn is_hostile_redirect(&self) -> bool {
+        matches!(self, HooksDir::Redirected { hostile: true, .. })
     }
 
     /// A fragment for the middle of a sentence: "the hooks directory is {}".
     pub fn describe(&self) -> String {
         match self {
             HooksDir::In { path } => path.display().to_string(),
+            HooksDir::Redirected {
+                path,
+                hostile: true,
+                ..
+            } => match amont_runtime::install::redirect_culprit(path) {
+                Some(tool) => format!("{} — {tool} owns the hooks here", path.display()),
+                None => format!(
+                    "{} — core.hooksPath sent git here, amont is not running",
+                    path.display()
+                ),
+            },
+            HooksDir::Redirected { path, .. } => {
+                format!("{} — via core.hooksPath", path.display())
+            }
             HooksDir::Outside { path } => {
                 format!("{} — OUTSIDE the repository", path.display())
             }
@@ -366,17 +422,51 @@ pub fn hooks_dir_for(repo: &Path) -> HooksDir {
         };
     };
     let hooks = PathBuf::from(hooks);
-    if let Ok(rel) = amont_runtime::hookfile::resolve_lexical(&hooks)
-        .strip_prefix(amont_runtime::hookfile::resolve_lexical(Path::new(top)))
+    let own = Path::new(common).join("hooks");
+
+    // Re-root a path that lands inside the working tree onto the caller's own
+    // `repo`, rather than handing back git's. They name the same directory and
+    // are not the same string: git canonicalizes, so on macOS a repository under
+    // `$TMPDIR` comes back as `/private/var/…` where the caller said `/var/…`.
+    // `apply` compares its re-resolved directory against the one the plan
+    // carried, so a plan holding git's spelling and an apply holding the
+    // caller's would never match.
+    let rooted = |p: &Path| -> PathBuf {
+        match amont_runtime::hookfile::resolve_lexical(p)
+            .strip_prefix(amont_runtime::hookfile::resolve_lexical(Path::new(top)))
+        {
+            Ok(rel) => repo.join(rel),
+            Err(_) => p.to_path_buf(),
+        }
+    };
+
+    // `Outside` FIRST, and it outranks everything below. `core.hooksPath` may
+    // name any absolute path on the disk — `/etc/amont`, another checkout's
+    // working tree — and that is the case where nothing may be created, written
+    // or deleted at all. `Redirected` is the weaker finding (a directory inside
+    // this repository), so classifying a `/elsewhere` path as merely redirected
+    // would trade the strong refusal for the soft one.
+    let within_repo = amont_runtime::hookfile::is_within(&hooks, Path::new(top))
+        || amont_runtime::hookfile::is_within(&hooks, Path::new(common));
+    if !within_repo {
+        return HooksDir::Outside { path: hooks };
+    }
+    // Then the redirect, BEFORE deciding it is ours. A redirect landing inside
+    // the working tree (`.husky/_`, `tooling/hooks`) satisfies the containment
+    // test above, so asking containment alone is exactly what let husky's
+    // directory pass as this repository's own.
+    if amont_runtime::hookfile::resolve_lexical(&hooks)
+        != amont_runtime::hookfile::resolve_lexical(&own)
     {
-        return HooksDir::In {
-            path: repo.join(rel),
+        let hostile = amont_runtime::install::redirect_is_hostile(&hooks, &own);
+        return HooksDir::Redirected {
+            path: rooted(&hooks),
+            own,
+            hostile,
         };
     }
-    if amont_runtime::hookfile::is_within(&hooks, Path::new(common)) {
-        HooksDir::In { path: hooks }
-    } else {
-        HooksDir::Outside { path: hooks }
+    HooksDir::In {
+        path: rooted(&hooks),
     }
 }
 
