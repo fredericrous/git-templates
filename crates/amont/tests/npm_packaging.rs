@@ -140,8 +140,23 @@ fn the_wrapper_can_resolve_every_package_that_is_published() {
 #[test]
 fn init_bakes_the_native_binary_not_the_node_wrapper() {
     let src = read("crates/amont-runtime/src/install.rs");
-    let (_, init_body) = src.split_once("pub fn init()").expect("init exists");
-    let init_body = &init_body[..init_body.find("\n}\n").unwrap_or(init_body.len())];
+
+    // Line-based, NOT `find("\n}\n")`. On Windows the checkout is CRLF, so that
+    // needle never matched, the `unwrap_or(len())` fallback took the whole rest
+    // of the FILE as the body, and the `on_path_already` in `install_binary`
+    // three functions further down failed this assertion. `str::lines()` splits
+    // on `\n` and strips a trailing `\r`, so it reads both checkouts the same.
+    let init_body: Vec<&str> = src
+        .lines()
+        .skip_while(|l| !l.starts_with("pub fn init()"))
+        .take_while(|l| !l.starts_with('}') || l.starts_with("pub fn init()"))
+        .collect();
+    assert!(
+        init_body.len() > 1,
+        "could not find the body of pub fn init()"
+    );
+    let init_body = init_body.join("\n");
+
     assert!(
         init_body.contains("current_exe()"),
         "init no longer bakes current_exe()"
