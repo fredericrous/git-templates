@@ -412,6 +412,19 @@ fn state_word(r: &Repo) -> String {
     if let Some(owner) = &r.shares_hooks_with {
         return format!("covered by {}", amont_runtime::ui::sanitize_path(owner));
     }
+    // Named specifically, because "hooks elsewhere" reads like a path quirk when
+    // what it actually means is that this repository runs no checks at all.
+    if r.hooks_dir.is_hostile_redirect() {
+        return match &r.hooks_dir {
+            crate::scan::HooksDir::Redirected { path, .. } => {
+                match amont_runtime::install::redirect_culprit(path) {
+                    Some(tool) => format!("! {tool} owns hooks"),
+                    None => "! dispatch taken".into(),
+                }
+            }
+            _ => unreachable!("is_hostile_redirect implies Redirected"),
+        };
+    }
     if r.hooks_dir.inside().is_none() {
         return "! hooks elsewhere".into();
     }

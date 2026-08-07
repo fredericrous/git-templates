@@ -97,10 +97,16 @@ pub enum Refusal {
     /// `core.hooksPath` may be an absolute path anywhere on the disk, and
     /// `Intent::Activate` used to `create_dir_all` it and write four 0o755 files
     /// into it — so a scanned repository could name `/etc/amont`, or another
-    /// checkout's working tree, and a fleet-wide `install` would oblige. See
-    /// [`crate::scan::HooksDir`] for why the per-repo installer keeps honouring
-    /// the same setting that this refuses.
+    /// checkout's working tree, and a fleet-wide `install` would oblige.
     HooksDirOutsideRepo { path: PathBuf },
+    /// `core.hooksPath` points somewhere inside the repository that is not its
+    /// own `hooks` directory: another tool owns dispatch.
+    ///
+    /// Refused rather than obliged, and the per-repo `amont install` now
+    /// refuses it too — the two used to disagree, which is how the fleet came to
+    /// report eleven husky repositories as "drifted" rather than as not running
+    /// amont at all.
+    HooksDirRedirected { path: PathBuf },
     /// git would not say where this repository's hooks live. The old code
     /// answered that question with `repo.join(".git/hooks")`, which is a guess
     /// everywhere and a WRONG guess for a repository whose `.git` is a file.
@@ -117,38 +123,63 @@ impl Refusal {
     /// from a repository we could not read because git will not talk to it. The
     /// `TrackedUnknown` case is the sharpest — its fix is one `git config` away
     /// and the old output did not even say which repository was affected.
+    ///
+    /// **Every borrowed value is sanitized HERE, and the result is printed
+    /// raw.** The call site used to run `ui::sanitize` over the whole assembled
+    /// string, which escapes `\n` — correctly, for a path scraped off somebody's
+    /// disk, where an embedded newline could forge a line of our own report. The
+    /// cost was that it also escaped OUR deliberate line breaks, so
+    /// `TrackedUnknown` has been rendering its `git config --add safe.directory`
+    /// remedy as a literal `\x0a` for as long as it has existed — the one
+    /// refusal whose whole point is telling the reader what to type.
+    ///
+    /// Sanitizing the parts rather than the whole keeps both properties: a
+    /// hostile path still cannot inject a line, and the template can breathe.
     pub fn explain(&self) -> String {
+        use amont_runtime::ui::{sanitize, sanitize_path};
         match self {
             Refusal::Unmanaged => "no shim of ours here — not adopting it".to_string(),
             Refusal::UnreadableHooks => "the hooks directory could not be read".to_string(),
             Refusal::Tracked { path } => format!(
                 "{} is TRACKED by git — that is somebody's source, not our hook",
-                path.display()
+                sanitize_path(path)
             ),
             Refusal::TrackedUnknown { path, why } => format!(
-                "cannot tell whether {} is tracked ({why})\n      \
+                "cannot tell whether {} is tracked ({})\n      \
                  If this is a repository you own: \
                  git config --global --add safe.directory {}",
-                path.display(),
-                path.parent().unwrap_or(path).display()
+                sanitize_path(path),
+                sanitize(why),
+                sanitize_path(path.parent().unwrap_or(path))
             ),
             Refusal::ForeignHook { names } => format!(
                 "{} was written by somebody else — activating would overwrite it",
-                names.join(", ")
+                sanitize(&names.join(", "))
             ),
             Refusal::AgentsMdMalformed { path } => {
-                format!("{} carries an unpaired marker", path.display())
+                format!("{} carries an unpaired marker", sanitize_path(path))
             }
             Refusal::UnbakeableBinary { binary } => {
-                format!("{binary} is not a path a shim will accept")
+                format!("{} is not a path a shim will accept", sanitize(binary))
             }
             Refusal::HooksDirOutsideRepo { path } => format!(
                 "core.hooksPath resolves to {}, OUTSIDE the repository — \
                  not creating or writing there",
-                path.display()
+                sanitize_path(path)
             ),
+            Refusal::HooksDirRedirected { path } => {
+                let owner = amont_runtime::install::redirect_culprit(path)
+                    .map(|t| format!("{t} owns"))
+                    .unwrap_or_else(|| "another tool owns".to_string());
+                format!(
+                    "core.hooksPath resolves to {} — {owner} the hooks here, \
+                     so amont is not running\n      \
+                     Hand dispatch back: git config --unset core.hooksPath",
+                    sanitize_path(path)
+                )
+            }
             Refusal::HooksDirUnknown { why } => {
-                format!("git would not say where the hooks are ({why})")
+                format!("git would not say where the hooks are ({})", sanitize(why))
             }
         }
     }
@@ -243,6 +274,9 @@ pub enum Warning {
     /// one loses something — the refusal alone is silent about where, the
     /// warning alone would not suppress the write.
     HooksDirOutsideRepo { path: PathBuf },
+    /// `core.hooksPath` handed dispatch to another tool inside the repository.
+    /// On both channels for the same reason as `HooksDirOutsideRepo`.
+    HooksDirRedirected { path: PathBuf },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -374,6 +408,31 @@ pub fn plan(
     if repo.shares_hooks_with.is_some() {
         return p;
     }
+    // A hostile redirect is reported AHEAD of `Unmanaged`, and the predicate is
+    // the runtime's, shared with `amont install` so the two cannot come to
+    // different conclusions about the same repository.
+    //
+    // Ahead of `Unmanaged` because that refusal is filtered out of the report as
+    // noise — correctly, since most of a machine's repositories belong to
+    // somebody else. But a repository holding OUR shims in
+    // `<git-common-dir>/hooks` while `core.hooksPath` sends git elsewhere is one
+    // where amont was installed and then silently stopped running. Reporting
+    // that as "no shim of ours here" is precisely backwards, and it is the state
+    // every `duro-*` repository was in.
+    if let crate::scan::HooksDir::Redirected {
+        path,
+        hostile: true,
+        ..
+    } = &hooks_dir
+    {
+        {
+            p.warn
+                .push(Warning::HooksDirRedirected { path: path.clone() });
+            p.refuse
+                .push(Refusal::HooksDirRedirected { path: path.clone() });
+            return p;
+        }
+    }
     if !repo.managed && intent == Intent::Repair {
         p.refuse.push(Refusal::Unmanaged);
         return p;
@@ -390,6 +449,10 @@ pub fn plan(
                 .push(Refusal::HooksDirOutsideRepo { path: path.clone() });
             return p;
         }
+        // A redirect that got past the hostility check above is followed, which
+        // is what this project has always done for a repository keeping its
+        // hooks somewhere it chose (`tooling/hooks` under version control).
+        crate::scan::HooksDir::Redirected { path, .. } => path.clone(),
         crate::scan::HooksDir::Unknown { why } => {
             p.refuse.push(Refusal::HooksDirUnknown { why: why.clone() });
             return p;

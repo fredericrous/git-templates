@@ -47,6 +47,7 @@ usage:
     amont list [--json] [--stage pre-commit|pre-push] [--pushed]
     amont setup [--local|--global] [--dry-run]
     amont install [--force] | uninstall [--binary]
+    amont init
     amont trust [--show|--revoke]
     amont run [<check>] [--all-files] [--hooks-dir <dir>] | restore
     amont agents-md [--check] [--path <file>]
@@ -60,6 +61,7 @@ enum Sub {
     List,
     Setup,
     Install,
+    Init,
     Uninstall,
     Run,
     Trust,
@@ -85,11 +87,12 @@ impl Sub {
             Sub::List => 0,
             Sub::Setup => 1,
             Sub::Install => 2,
-            Sub::Uninstall => 3,
-            Sub::Run => 4,
-            Sub::Trust => 5,
-            Sub::Restore => 6,
-            Sub::AgentsMd => 7,
+            Sub::Init => 3,
+            Sub::Uninstall => 4,
+            Sub::Run => 5,
+            Sub::Trust => 6,
+            Sub::Restore => 7,
+            Sub::AgentsMd => 8,
         }
     }
 }
@@ -99,10 +102,11 @@ impl Sub {
 /// There were previously seven independent string comparisons scattered down
 /// `main`, each asked twice (once of `hook`, once of `rest.first()`), which is
 /// fourteen places for the set of verbs to be. This is one.
-const SUBCOMMANDS: [(&str, Sub); 8] = [
+const SUBCOMMANDS: [(&str, Sub); 9] = [
     ("list", Sub::List),
     ("setup", Sub::Setup),
     ("install", Sub::Install),
+    ("init", Sub::Init),
     ("uninstall", Sub::Uninstall),
     ("run", Sub::Run),
     ("trust", Sub::Trust),
@@ -282,6 +286,11 @@ fn run_sub(sub: Sub, args: &[OsString]) -> i32 {
         Sub::Install => report(amont_runtime::install::run(
             args.iter().any(|a| a == "--force"),
         )),
+        // `amont init` — the verb a package manager calls. Deliberately
+        // flagless: it runs unattended, from a `prepare` script, so there is
+        // nobody to have typed an option and nothing it should be asked to do
+        // beyond wiring this one repository.
+        Sub::Init => report(amont_runtime::install::init()),
         Sub::Uninstall => report(amont_runtime::install::uninstall(
             args.iter().any(|a| a == "--binary"),
         )),

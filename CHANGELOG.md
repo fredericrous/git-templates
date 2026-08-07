@@ -6,6 +6,48 @@ mechanical pull-request list too, generated; this file is the part a human
 wrote, and the release workflow refuses to tag a version whose section is
 missing here.
 
+## v1.4.0 — 2026-08-07
+
+- **A repository whose hooks another tool owns is now refused, by name.**
+  `git rev-parse --git-path hooks` honours `core.hooksPath`, so in a
+  repository running husky it answers `.husky/_` — inside the repository,
+  plausible, and wrong. `install` baked four shims there, husky's own
+  `prepare` regenerated the directory on the next `npm install`, and the
+  repository went back to running nothing. Eleven repositories on the
+  author's machine were in that state; the fleet called them "drifted", and
+  a direct push to a protected branch went through unchallenged for as long
+  as it lasted. Both `install` and `amont-fleet` now say what happened and
+  what to type, and `--force` does not move it. This is not a blanket
+  objection to `core.hooksPath`: a repository deliberately keeping its hooks
+  in `tooling/hooks` is installed into exactly as before. The refusal needs
+  evidence — a destination belonging to a manager that regenerates it, or
+  our shims already sitting in the repository's own hooks directory.
+  `uninstall` deliberately does not refuse, since it has to reach shims
+  earlier versions put there.
+
+- **`npm i -D amont` + `"prepare": "amont init"`.** For a JavaScript project
+  the binary can now travel with the repository rather than with the
+  machine, so a teammate who clones it and runs `npm install` gets the hooks
+  with no install step of their own. Six prebuilt platform packages are
+  declared as `optionalDependencies` with `os`/`cpu`/`libc`, and there is no
+  `postinstall` — this survives `npm ci --ignore-scripts`, an offline cache
+  and a pull-through registry. The binaries are the ones this release
+  already publishes and checksums.
+
+- **A new verb, `amont init`**, is what that `prepare` calls: it wires up one
+  repository and does nothing else. `install` could not serve — it copies a
+  binary into `~/.local/bin`, populates the XDG template directory, and
+  prompts through `/dev/tty`, which in a terminal would hang `npm install`
+  on a question about a manifest nobody has read. `init` never prompts,
+  writes nothing outside the repository, and exits 0 in silence where there
+  is no `.git`, because `npm install` legitimately runs from a tarball and
+  inside a Docker build.
+
+- A refusal that had never rendered. `Refusal::explain` was sanitized as one
+  assembled string, which escapes `\n`, so `TrackedUnknown` printed its
+  `git config --add safe.directory` remedy as a literal `\x0a` — the one
+  refusal whose entire purpose is telling you what to type.
+
 ## v1.3.1 — 2026-08-07
 
 - `amont-fleet` now shows the walk while it walks. `scan`, `fix`, `install`

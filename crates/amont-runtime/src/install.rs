@@ -445,6 +445,87 @@ pub fn run(force: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// `amont init` — wire up THIS repository, and touch nothing else.
+///
+/// The verb a package manager can call. `"prepare": "amont init"` in a
+/// `package.json` means a teammate who clones and runs `npm install` gets the
+/// hooks, which is the ergonomic husky has and this project did not.
+///
+/// ## Why `install` could not be that verb
+///
+/// Every one of its three extra steps is wrong for something that runs on every
+/// teammate's install, and the third is a hang:
+///
+///   * `install_binary` copies into `~/.local/bin` — a machine-level write from
+///     `npm install`;
+///   * `populate_template_dir` writes `~/.config/git/git-templates`, so a
+///     package manager would be arranging for every FUTURE clone to get hooks;
+///   * `offer_trust` calls `trust::confirm`, which opens `/dev/tty`. In a
+///     terminal that succeeds and BLOCKS, so `npm install` would stop dead on a
+///     prompt about a manifest the user has not read.
+///
+/// So this does one thing: bake four shims into the repository's own hooks
+/// directory.
+///
+/// ## What it bakes, and why not the PATH hit
+///
+/// `current_exe()`, always — never [`install_binary`]'s "is it already on
+/// `PATH`?" branch. Under npm the answer to that question is
+/// `node_modules/.bin/amont`, which is the **JS wrapper**: baking it would put a
+/// node process in front of every single commit, on a tool whose start-up cost
+/// is a stated feature. `current_exe()` is the native binary inside the platform
+/// package, which is what should run.
+///
+/// ## Silence, and its limits
+///
+/// Outside a git repository this reports nothing and exits 0. `npm install`
+/// legitimately runs where there is no `.git` — from a tarball, inside a Docker
+/// build, in CI — and failing there would make the package uninstallable in all
+/// three. It stays LOUD about everything else: a redirect, an unwritable
+/// directory and a foreign hook all still fail, because those are repositories
+/// where somebody believes they have hooks and does not.
+pub fn init() -> Result<(), String> {
+    let hooks = match repo_hooks() {
+        RepoHooks::Own(dir) => dir,
+        RepoHooks::Redirected { to, own } if redirect_is_hostile(&to, &own) => {
+            return Err(redirected_message(&to, &own))
+        }
+        RepoHooks::Redirected { to, .. } => to,
+        // The one silent exit, and the only one.
+        RepoHooks::Nowhere => return Ok(()),
+    };
+
+    let me =
+        std::env::current_exe().map_err(|e| format!("cannot locate the running binary: {e}"))?;
+    // `absolute` rather than `canonicalize`: the shim needs an absolute path and
+    // nothing more, and resolving symlinks here would bake pnpm's
+    // `.pnpm/amont-<target>@<version>/…` store path in place of the stable link
+    // the package manager maintains.
+    let binary = absolute(&me);
+    let binary = binary.to_string_lossy().into_owned();
+    if !is_bakeable(&binary) {
+        return Err(format!(
+            "{} cannot bake {binary:?} — the shim takes an absolute path only",
+            error_sign()
+        ));
+    }
+
+    std::fs::create_dir_all(&hooks)
+        .map_err(|e| format!("cannot create {}: {e}", hooks.display()))?;
+
+    // `force: false`. A hook somebody else wrote is theirs, and `init` runs
+    // unattended — there is no one at the keyboard to have decided otherwise.
+    let written = write_shims(&hooks, &binary, false)
+        .map_err(|e| format!("cannot write shims to {}: {e}", hooks.display()))?;
+    println!(
+        "{} amont: {} hooks in {}",
+        valid_sign(),
+        written.len(),
+        hooks.display()
+    );
+    Ok(())
+}
+
 /// Name the commit-style settings, once, at the moment somebody acquires them.
 ///
 /// A PRINT, never a prompt. `install` has to remain answerable by nobody: it
@@ -766,17 +847,144 @@ fn report_overwrites(written: &[Written]) {
     }
 }
 
-/// Where git will actually look for hooks in the repository we are standing
-/// in — never `--git-dir` plus `join("hooks")`. For the main worktree the two
-/// agree, but hooks are explicitly SHARED across every worktree, unlike
-/// `MERGE_HEAD` and friends: a linked worktree's `--git-dir` is its own
-/// PRIVATE gitdir, so joining "hooks" onto it names a directory git never
-/// dispatches from, and a shim baked there is inert — installed, and never
-/// run. `--git-path hooks` is the question actually being asked, and git
-/// itself resolves the worktree case correctly.
-fn repo_hooks_dir() -> Option<PathBuf> {
-    crate::git::stdout(&["rev-parse", "--path-format=absolute", "--git-path", "hooks"])
-        .map(PathBuf::from)
+/// Where git dispatches hooks from, and whether that is this repository's OWN
+/// hooks directory or somewhere `core.hooksPath` sent it.
+///
+/// This replaces a bare `repo_hooks_dir()` that returned only the dispatch path.
+/// `--git-path hooks` is still the right question — never `--git-dir` plus
+/// `join("hooks")`, because hooks are explicitly SHARED across worktrees while a
+/// linked worktree's `--git-dir` is its own PRIVATE gitdir, so joining "hooks"
+/// onto it names a directory git never dispatches from. The addition is asking
+/// `--git-common-dir` alongside it, so the answer can be compared against the
+/// directory that would be ours.
+///
+/// The distinction did not exist and its absence was silent. `--git-path hooks`
+/// honours `core.hooksPath`, so in a repository running husky it answers
+/// `.husky/_` — inside the repo, plausible, and wrong. `install` wrote four
+/// shims there, husky's own `prepare` regenerated the directory on the next
+/// `npm install`, and the repository went back to having no checks with nothing
+/// to show for it. Every guarantee this tool makes was off in those repositories
+/// and the fleet reported them as merely "drifted".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoHooks {
+    /// `<git-common-dir>/hooks`. Git dispatches from here and it is ours to write.
+    Own(PathBuf),
+    /// `core.hooksPath` points somewhere else. Another tool owns dispatch here,
+    /// and writing to `own` would install shims git never runs.
+    Redirected { to: PathBuf, own: PathBuf },
+    /// Not in a repository, or git would not answer.
+    Nowhere,
+}
+
+/// Ask git both questions at once — what it dispatches from, and what this
+/// repository's own hooks directory is — then compare.
+///
+/// Lexical comparison via [`crate::hookfile::resolve_lexical`], not
+/// `canonicalize`: neither directory is guaranteed to exist yet (a fresh clone
+/// has no `.git/hooks` until something writes one), and `canonicalize` cannot be
+/// asked about a path that does not. Same reason `is_within` is lexical.
+pub fn repo_hooks() -> RepoHooks {
+    let Some(out) = crate::git::stdout(&[
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "hooks",
+        "--git-common-dir",
+    ]) else {
+        return RepoHooks::Nowhere;
+    };
+    let mut lines = out.lines();
+    let (Some(dispatched), Some(common)) = (lines.next(), lines.next()) else {
+        return RepoHooks::Nowhere;
+    };
+    let dispatched = PathBuf::from(dispatched);
+    let own = PathBuf::from(common).join("hooks");
+    if crate::hookfile::resolve_lexical(&dispatched) == crate::hookfile::resolve_lexical(&own) {
+        RepoHooks::Own(own)
+    } else {
+        RepoHooks::Redirected {
+            to: dispatched,
+            own,
+        }
+    }
+}
+
+/// Name the tool behind a `core.hooksPath`, when the path gives it away.
+///
+/// A short list on purpose. It is half of [`redirect_is_hostile`]'s evidence,
+/// not a general classifier, and a name guessed wrong is worse than none.
+pub fn redirect_culprit(to: &Path) -> Option<&'static str> {
+    let s = to.to_string_lossy().replace('\\', "/");
+    if s.contains("/.husky") {
+        return Some("husky");
+    }
+    if s.contains("/.lefthook") || s.contains("lefthook") {
+        return Some("lefthook");
+    }
+    None
+}
+
+/// Whether any of our four shims sits in `dir`.
+///
+/// The runtime's own copy of the question `amont-fleet::scan::is_managed`
+/// answers, because the guard that needs it runs in the commit-path crate and
+/// cannot depend on the dashboard.
+pub fn holds_our_shims(dir: &Path) -> bool {
+    DISPATCHERS
+        .iter()
+        .any(|name| matches!(hookfile::classify(&dir.join(name)), HookFile::Ours))
+}
+
+/// Whether a redirect must be REFUSED rather than followed.
+///
+/// Not every `core.hooksPath` is a problem, and the first cut of this refused
+/// them all — which would have broken a repository that deliberately keeps its
+/// hooks in `tooling/hooks` under version control. That is a setup this project
+/// has always honoured and `plan_finds_shims_at_a_redirected_hooks_path` pins.
+///
+/// So the refusal rests on evidence, not on the mere presence of the setting.
+/// Either is enough:
+///
+///   * **the destination belongs to a hook manager we recognise** — husky and
+///     lefthook both REGENERATE their directory on install, so anything we wrote
+///     there is gone by the next `npm install` and the repository silently stops
+///     being checked;
+///   * **our shims are already in the repository's own hooks directory** — amont
+///     was installed here and something later took dispatch away. Whatever the
+///     destination is, this repository is not running the checks it believes it
+///     is, and that is worth stopping for whether or not we can name the culprit.
+///
+/// A repository with neither signal keeps the old behaviour exactly.
+pub fn redirect_is_hostile(to: &Path, own: &Path) -> bool {
+    redirect_culprit(to).is_some() || holds_our_shims(own)
+}
+
+/// The refusal both `install` and `init` give when another tool owns dispatch.
+///
+/// One function, so the two cannot drift into saying different things about the
+/// same situation — and so the remedy is spelled exactly once.
+pub fn redirected_message(to: &Path, own: &Path) -> String {
+    let mut msg = format!(
+        "{} git dispatches hooks from {}, not {}",
+        error_sign(),
+        highlight(&to.display().to_string()),
+        own.display()
+    );
+    match redirect_culprit(to) {
+        Some(tool) => msg.push_str(&format!(
+            "\n    `core.hooksPath` is set, so {tool} owns the hooks here. Shims\n    \
+             written to either directory would be overwritten or never run."
+        )),
+        None => msg.push_str(
+            "\n    `core.hooksPath` is set, so another tool owns the hooks here.\n    \
+             Shims written to either directory would be overwritten or never run.",
+        ),
+    }
+    msg.push_str(&format!(
+        "\n    Hand dispatch back first: {}",
+        highlight("git config --unset core.hooksPath")
+    ));
+    msg
 }
 
 /// Bake the shims into the repository we are standing in, if we are in one.
@@ -790,12 +998,27 @@ fn repo_hooks_dir() -> Option<PathBuf> {
 /// are fixed at once: the symlink is refused by name, and `--force` replaces
 /// the link by rename instead of writing through it.
 fn bake_repo_hooks(binary: &str, force: bool) -> Result<(), String> {
-    let Some(hooks) = repo_hooks_dir() else {
-        println!(
-            "{} not inside a git repository — no repo hooks written.",
-            warning_sign()
-        );
-        return Ok(());
+    let hooks = match repo_hooks() {
+        RepoHooks::Own(dir) => dir,
+        // A hostile redirect is refused, and `--force` does not move it.
+        // `--force` means "that file is mine to replace"; it has never meant
+        // "write where git does not look". Writing `own` would leave four shims
+        // git never dispatches, and writing `to` would hand our files to the
+        // tool that regenerates that directory.
+        //
+        // A redirect that is merely a redirect is followed, as it always was —
+        // see `redirect_is_hostile` for where the line is.
+        RepoHooks::Redirected { to, own } if redirect_is_hostile(&to, &own) => {
+            return Err(redirected_message(&to, &own))
+        }
+        RepoHooks::Redirected { to, .. } => to,
+        RepoHooks::Nowhere => {
+            println!(
+                "{} not inside a git repository — no repo hooks written.",
+                warning_sign()
+            );
+            return Ok(());
+        }
     };
     let _ = std::fs::create_dir_all(&hooks);
 
@@ -887,40 +1110,56 @@ pub fn uninstall(remove_binary: bool) -> Result<(), String> {
 /// clone. Refusing is not failing — the same rule `populate_template_dir`
 /// already states.
 fn uninstall_repo_hooks() -> Result<(), String> {
-    let Some(hooks) = repo_hooks_dir() else {
-        println!(
-            "{} not inside a git repository — no repo hooks removed.",
-            warning_sign()
-        );
-        return Ok(());
+    // BOTH directories, where they differ. Uninstall is the one path that must
+    // not inherit `install`'s new refusal: versions before it wrote shims into
+    // whatever `core.hooksPath` named, so a repository can be carrying our files
+    // in `.husky/_` right now — and refusing to look there would leave the only
+    // command that removes them unable to find them. Removal is safe in a way
+    // writing is not; `guard_remove` still decides file by file.
+    let dirs: Vec<PathBuf> = match repo_hooks() {
+        RepoHooks::Own(dir) => vec![dir],
+        RepoHooks::Redirected { to, own } => vec![to, own],
+        RepoHooks::Nowhere => {
+            println!(
+                "{} not inside a git repository — no repo hooks removed.",
+                warning_sign()
+            );
+            return Ok(());
+        }
     };
 
-    let mut removed = 0usize;
-    let mut left: Vec<String> = Vec::new();
-    for name in DISPATCHERS {
-        let path = hooks.join(name);
-        match hookfile::classify(&path) {
-            HookFile::Absent => {}
-            HookFile::Ours => match hookfile::guard_remove(&path, true) {
-                Ok(()) => {
-                    hookfile::remove_regular(&path)
-                        .map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
-                    removed += 1;
-                }
-                // Ours by marker, and still not ours to delete: a tracked path,
-                // or one git could not answer for.
-                Err(r) => left.push(r.explain()),
-            },
-            what => left.push(format!("{name} — {}", what.describe())),
+    for hooks in &dirs {
+        let mut removed = 0usize;
+        let mut left: Vec<String> = Vec::new();
+        for name in DISPATCHERS {
+            let path = hooks.join(name);
+            match hookfile::classify(&path) {
+                HookFile::Absent => {}
+                HookFile::Ours => match hookfile::guard_remove(&path, true) {
+                    Ok(()) => {
+                        hookfile::remove_regular(&path)
+                            .map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
+                        removed += 1;
+                    }
+                    // Ours by marker, and still not ours to delete: a tracked
+                    // path, or one git could not answer for.
+                    Err(r) => left.push(r.explain()),
+                },
+                what => left.push(format!("{name} — {}", what.describe())),
+            }
         }
-    }
-    println!(
-        "{} removed {removed} shims from {}",
-        valid_sign(),
-        hooks.display()
-    );
-    for reason in &left {
-        println!("{} left alone: {reason}", warning_sign());
+        // The second directory is usually empty of ours and saying so every time
+        // would be noise. Report it only when it held something.
+        if removed > 0 || !left.is_empty() || dirs.len() == 1 {
+            println!(
+                "{} removed {removed} shims from {}",
+                valid_sign(),
+                hooks.display()
+            );
+        }
+        for reason in &left {
+            println!("{} left alone: {reason}", warning_sign());
+        }
     }
     Ok(())
 }

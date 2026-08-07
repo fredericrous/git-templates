@@ -116,6 +116,65 @@ not something specific to this one — a formula is code, and Homebrew now asks
 you to decide about running it explicitly. Which is the same argument this tool
 makes about a repository's declared checks.
 
+### As a project dependency (npm)
+
+For a JavaScript project, the binary can travel with the repository instead of
+with the machine:
+
+```sh
+npm i -D amont        # or: pnpm add -D amont
+npm pkg set scripts.prepare="amont init"
+npm install           # prepare runs; the hooks appear
+```
+
+Anyone who then clones the repository and runs `npm install` gets the hooks.
+That is [§2](#2-turn-hooks-on) done for them, by the package manager, once —
+which is the whole point of the shape.
+
+Six prebuilt platform packages are declared as `optionalDependencies`
+(`amont-darwin-arm64`, `amont-linux-x64-gnu`, …), each carrying `os`, `cpu` and
+`libc`, so npm and pnpm install exactly one and skip the other five. **There is
+no `postinstall`**, deliberately: `npm ci --ignore-scripts` is a normal
+hardening choice, and a package that quietly installs nothing under it would
+fail much later, as `amont: not found` from a git hook.
+
+The `bin` npm links is a small JS shim, because a linked `bin` has to live
+inside the package it belongs to. It is not on the hook path: `amont init`
+bakes the **native** binary's path into `.git/hooks`, so node runs once during
+`prepare` and never on a commit.
+
+If your platform is not one of the six, `npm install` will succeed and the shim
+will say so the first time it runs. `cargo install amont` builds the same
+source anywhere Rust does.
+
+#### `init` and `install` are different verbs
+
+`amont init` wires up **one repository** and nothing else. It does not copy a
+binary into `~/.local/bin`, does not touch `~/.config/git/git-templates`, and
+never prompts — all three of which `install` does, and all three of which are
+wrong for something that runs on every teammate's `npm install`. The trust
+prompt is the sharp one: it reads `/dev/tty`, so in a terminal it would *block*,
+and `npm install` would hang on a question about a manifest nobody has read.
+
+Outside a git repository `init` exits 0 in silence, because `npm install`
+legitimately runs from a tarball, inside a Docker build and in CI. It stays loud
+about everything else.
+
+#### On turning hooks on from a package manager
+
+[The installer](#1-get-the-binary) says, and means, that it does not turn any
+hooks on. A `prepare` script plainly does. The two are not in tension, and the
+distinction is worth stating rather than leaving to be reconciled:
+
+- **the machine** still decides nothing implicitly. Installing this tool, by any
+  route, activates nothing anywhere;
+- **the repository** opts in, once, by committing a line to its own
+  `package.json` — a reviewable change, in the open, that a reader can see;
+- what arrives is still four legible files in `.git/hooks`. A colleague who has
+  never heard of this tool can `cat .git/hooks/pre-commit` and see what runs,
+  which is exactly the property that made us
+  [refuse `core.hooksPath`](index-fidelity-and-run-modes.md#what-we-are-not-taking-and-why).
+
 ### Requirements
 
 **Git 2.31+.** `git rev-parse --path-format=absolute` landed in 2.31, and three
@@ -153,6 +212,38 @@ amont-fleet tui                          # the dashboard
 `amont-fleet` is installed separately and on purpose: it pulls ratatui,
 crossterm and serde, and keeping the two installs apart is what stops "I wanted
 the dashboard" from becoming "every commit now depends on a TUI library".
+
+### When another tool already owns the hooks
+
+`core.hooksPath` redirects hook dispatch, and `husky` sets it. In a repository
+that runs husky, git reads `.husky/_` and never looks at `.git/hooks` at all —
+so an install that wrote there would produce four files git never runs, and one
+that wrote to `.husky/_` would hand them to a directory husky's own `prepare`
+regenerates on the next `npm install`.
+
+Both are refused, by name:
+
+```
+✗ git dispatches hooks from /repo/.husky/_, not /repo/.git/hooks
+    `core.hooksPath` is set, so husky owns the hooks here. Shims
+    written to either directory would be overwritten or never run.
+    Hand dispatch back first: git config --unset core.hooksPath
+```
+
+`--force` does not move it. That flag means "that file is mine to replace"; it
+has never meant "write where git does not look".
+
+This is not a blanket objection to `core.hooksPath`. A repository that
+deliberately keeps its hooks in, say, `tooling/hooks` under version control has
+chosen a location, not handed dispatch to something that will overwrite it, and
+is installed into exactly as before. The refusal needs evidence: either the
+destination belongs to a hook manager that regenerates it, or our shims are
+already sitting in the repository's own hooks directory — which means amont was
+installed here and something later took dispatch away.
+
+`amont uninstall` deliberately does **not** refuse. Versions before this check
+wrote shims into whatever `core.hooksPath` named, so it has to be able to reach
+files that are already there.
 
 ### `--force`, and what it will not do
 

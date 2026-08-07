@@ -323,7 +323,9 @@ fn main() -> ExitCode {
             // reason attached — which is the difference between "we skipped
             // something" and "we skipped THIS, because THAT".
             for (_, why) in &left {
-                println!("  {}", amont_runtime::ui::sanitize(&why.explain()));
+                // `explain` sanitizes every borrowed value itself, so its own
+                // line breaks survive — see `Refusal::explain`.
+                println!("  {}", why.explain());
             }
         }
         if !failed.is_empty() {
@@ -613,7 +615,7 @@ fn report_refusals(plans: &[fix::FixPlan]) {
     for p in interesting {
         println!("  {}", shown(&p.repo));
         for r in p.refuse.iter().filter(|r| **r != fix::Refusal::Unmanaged) {
-            println!("    {}", amont_runtime::ui::sanitize(&r.explain()));
+            println!("    {}", r.explain());
         }
     }
 }
@@ -642,6 +644,15 @@ fn report_warnings(plans: &[fix::FixPlan]) {
                 fix::Warning::HooksDirOutsideRepo { path } => {
                     println!(
                         "  {}  ({}: core.hooksPath points OUTSIDE the repository)",
+                        shown(path),
+                        shown(&p.repo)
+                    );
+                }
+                fix::Warning::HooksDirRedirected { path } => {
+                    let owner =
+                        amont_runtime::install::redirect_culprit(path).unwrap_or("another tool");
+                    println!(
+                        "  {}  ({}: core.hooksPath — {owner} owns the hooks, amont is not running)",
                         shown(path),
                         shown(&p.repo)
                     );
