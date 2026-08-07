@@ -445,6 +445,87 @@ pub fn run(force: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// `amont init` — wire up THIS repository, and touch nothing else.
+///
+/// The verb a package manager can call. `"prepare": "amont init"` in a
+/// `package.json` means a teammate who clones and runs `npm install` gets the
+/// hooks, which is the ergonomic husky has and this project did not.
+///
+/// ## Why `install` could not be that verb
+///
+/// Every one of its three extra steps is wrong for something that runs on every
+/// teammate's install, and the third is a hang:
+///
+///   * `install_binary` copies into `~/.local/bin` — a machine-level write from
+///     `npm install`;
+///   * `populate_template_dir` writes `~/.config/git/git-templates`, so a
+///     package manager would be arranging for every FUTURE clone to get hooks;
+///   * `offer_trust` calls `trust::confirm`, which opens `/dev/tty`. In a
+///     terminal that succeeds and BLOCKS, so `npm install` would stop dead on a
+///     prompt about a manifest the user has not read.
+///
+/// So this does one thing: bake four shims into the repository's own hooks
+/// directory.
+///
+/// ## What it bakes, and why not the PATH hit
+///
+/// `current_exe()`, always — never [`install_binary`]'s "is it already on
+/// `PATH`?" branch. Under npm the answer to that question is
+/// `node_modules/.bin/amont`, which is the **JS wrapper**: baking it would put a
+/// node process in front of every single commit, on a tool whose start-up cost
+/// is a stated feature. `current_exe()` is the native binary inside the platform
+/// package, which is what should run.
+///
+/// ## Silence, and its limits
+///
+/// Outside a git repository this reports nothing and exits 0. `npm install`
+/// legitimately runs where there is no `.git` — from a tarball, inside a Docker
+/// build, in CI — and failing there would make the package uninstallable in all
+/// three. It stays LOUD about everything else: a redirect, an unwritable
+/// directory and a foreign hook all still fail, because those are repositories
+/// where somebody believes they have hooks and does not.
+pub fn init() -> Result<(), String> {
+    let hooks = match repo_hooks() {
+        RepoHooks::Own(dir) => dir,
+        RepoHooks::Redirected { to, own } if redirect_is_hostile(&to, &own) => {
+            return Err(redirected_message(&to, &own))
+        }
+        RepoHooks::Redirected { to, .. } => to,
+        // The one silent exit, and the only one.
+        RepoHooks::Nowhere => return Ok(()),
+    };
+
+    let me =
+        std::env::current_exe().map_err(|e| format!("cannot locate the running binary: {e}"))?;
+    // `absolute` rather than `canonicalize`: the shim needs an absolute path and
+    // nothing more, and resolving symlinks here would bake pnpm's
+    // `.pnpm/amont-<target>@<version>/…` store path in place of the stable link
+    // the package manager maintains.
+    let binary = absolute(&me);
+    let binary = binary.to_string_lossy().into_owned();
+    if !is_bakeable(&binary) {
+        return Err(format!(
+            "{} cannot bake {binary:?} — the shim takes an absolute path only",
+            error_sign()
+        ));
+    }
+
+    std::fs::create_dir_all(&hooks)
+        .map_err(|e| format!("cannot create {}: {e}", hooks.display()))?;
+
+    // `force: false`. A hook somebody else wrote is theirs, and `init` runs
+    // unattended — there is no one at the keyboard to have decided otherwise.
+    let written = write_shims(&hooks, &binary, false)
+        .map_err(|e| format!("cannot write shims to {}: {e}", hooks.display()))?;
+    println!(
+        "{} amont: {} hooks in {}",
+        valid_sign(),
+        written.len(),
+        hooks.display()
+    );
+    Ok(())
+}
+
 /// Name the commit-style settings, once, at the moment somebody acquires them.
 ///
 /// A PRINT, never a prompt. `install` has to remain answerable by nobody: it
