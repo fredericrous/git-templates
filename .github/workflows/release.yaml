@@ -236,6 +236,100 @@ jobs:
   #
   # `needs: build` on purpose. If a target does not compile, that is a release
   # nobody should be able to `cargo install` either — and crates.io versions are
+  # npm, so `npm install -D amont` + `"prepare": "amont init"` works — the
+  # husky-shaped adoption path.
+  #
+  # Seven packages: six per-platform ones carrying the SAME binaries this release
+  # already published and checksummed, and `amont` itself, which is a JS shim and
+  # six `optionalDependencies`. No `postinstall` anywhere, so this survives
+  # `npm ci --ignore-scripts`, an offline cache and a pull-through registry —
+  # see npm/README.md for why that ruled out the download-on-install shape.
+  publish-npm:
+    name: publish to npm
+    needs: [guard, build, publish]
+    # Keyed on the ref being a TAG rather than on dry_run, exactly as
+    # publish-crates is, so a workflow_dispatch against an existing tag can
+    # resume a publish that failed for a reason outside this repository.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # `contents: read` narrows the workflow-level `write` — this job publishes
+    # nothing to the repository. `id-token: write` is what `npm publish
+    # --provenance` signs with, so npm can attest these bytes came from this
+    # workflow at this tag rather than from somebody's laptop.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Lays out the trees and then REFUSES to hand back a set that would not
+      # install: a missing binary, a package.json that is not JSON, or an
+      # optionalDependency naming a version nothing built. npm versions are
+      # immutable, so every one of those can only be superseded afterwards.
+      - name: Lay out the packages
+        run: ./scripts/npm-pack.sh "${{ needs.guard.outputs.version }}" dist dist/npm
+
+      # Pack before publish, and assert the binary is IN the tarball. `files`
+      # narrows what ships, and a package whose payload was excluded still
+      # publishes cleanly — it fails later, on somebody's machine, at their first
+      # commit.
+      - name: The tarball actually carries the binary
+        run: |
+          set -euo pipefail
+          cd dist/npm/amont-linux-x64-gnu
+          tar tzf "$(npm pack --silent)" | grep -qx 'package/bin/amont'
+          echo "the linux-x64-gnu tarball carries bin/amont"
+
+      - name: Publish platform packages, then amont
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN is not set for this environment."
+            exit 1
+          fi
+
+          # ORDER IS LOAD-BEARING. `amont` declares each platform package at this
+          # exact version, and npm validates that a dependency version exists at
+          # publish time — so publishing `amont` first fails the whole job, and
+          # publishing it first SUCCESSFULLY would be worse: an immutable version
+          # nobody can install.
+          #
+          # Idempotent on "already published" for the same reason publish-crates
+          # is: the usual reason to re-run a release is that a LATER step failed.
+          publish() {
+            local dir="$1"
+            echo "→ publishing $(basename "$dir")"
+            if out=$(npm publish --access public --provenance "$dir" 2>&1); then
+              printf '%s\n' "$out"
+            else
+              printf '%s\n' "$out"
+              if printf '%s' "$out" | grep -qiE "cannot publish over|previously published|EPUBLISHCONFLICT"; then
+                echo "  already published — continuing"
+              else
+                echo "::error::publishing $(basename "$dir") failed"
+                exit 1
+              fi
+            fi
+          }
+
+          for dir in dist/npm/amont-*; do publish "$dir"; done
+          publish dist/npm/amont
+
+          echo "### Published to npm" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`npm i -D amont\` — v${{ needs.guard.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+
   # IMMUTABLE, so a bad publish can only be yanked and superseded, never fixed.
   # The binaries are the cheaper thing to get wrong.
   publish-crates:
