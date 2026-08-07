@@ -263,7 +263,10 @@ mod tests {
     }
 
     fn scan_one(root: &Path, binary: &str) -> (scan::Repo, PathBuf) {
-        let s = scan::scan(root, 3, binary);
+        // A fixture has nothing to draw, so it discards the progress — the one
+        // caller for which the silence `scan` no longer offers by default is
+        // actually correct.
+        let s = scan::scan(root, 3, binary, &mut |_| {});
         let r = s.repos.into_iter().next().expect("one repo");
         let abs = root.join(&r.path);
         (r, abs)

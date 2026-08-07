@@ -6,6 +6,19 @@ mechanical pull-request list too, generated; this file is the part a human
 wrote, and the release workflow refuses to tag a version whose section is
 missing here.
 
+## v1.3.1 — 2026-08-07
+
+- `amont-fleet` now shows the walk while it walks. `scan`, `fix`, `install`
+  and `uninstall` all begin with the same pass over every repository under
+  the root; it announced itself once and then went quiet for the whole seven
+  seconds, which from the outside is indistinguishable from a hang. There is
+  now a live line: the clock, how many directories and repositories have been
+  counted, and the path being looked at right now — the last being the one
+  that matters when a scan stalls, since a frozen count says something is
+  slow and only the path says what. It erases itself before the report
+  prints, and it appears only when stderr is a terminal, so piped, redirected
+  and CI runs emit exactly the bytes they did before.
+
 ## v1.3.0 — 2026-08-04
 
 - The branch contract is now knowable BEFORE the branch exists, three ways.
