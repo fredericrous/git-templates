@@ -71,6 +71,20 @@ brew trust fredericrous/tap    # Homebrew asks this of every third-party tap
 brew install amont
 ```
 
+**In a JavaScript project**, the binary can travel with the repository rather
+than with the machine, so a teammate who clones it needs no install step at all:
+
+```sh
+npm i -D amont                            # or: pnpm add -D amont
+npm pkg set scripts.prepare="amont init"
+npm install                               # the hooks appear
+```
+
+Six prebuilt platform packages are declared as `optionalDependencies`, so npm
+installs exactly one and runs no install scripts at all — this survives
+`npm ci --ignore-scripts`. `amont init` wires up that one repository and
+nothing else: no `~/.local/bin`, no template directory, no prompts.
+
 ## Uninstall
 
 ```sh

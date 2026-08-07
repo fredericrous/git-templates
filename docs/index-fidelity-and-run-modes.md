@@ -647,6 +647,21 @@ built around, becomes unexpressible; a repository with hooks of its own silently
 loses them; and a colleague who has never heard of this tool can read
 `.git/hooks/pre-commit` and see what runs. That legibility is worth four files.
 
+**And the failure is not hypothetical — we were on the receiving end of it.**
+Eleven repositories on the author's machine ran husky, so `core.hooksPath` was
+`.husky/_`, so `git rev-parse --git-path hooks` answered `.husky/_` and
+`install` cheerfully baked four shims into a directory husky's own `prepare`
+regenerates. They were gone by the next `npm install`. Every one of those
+repositories reported as merely "drifted" in the fleet view while running no
+checks at all, and a direct push to a protected branch went through
+unchallenged for as long as it lasted. That is exactly "a repository with hooks
+of its own silently loses them", arrived at from the other direction, and it is
+now [refused by name](install.md#when-another-tool-already-owns-the-hooks).
+
+None of which the npm packaging contradicts. `amont init` writes the same four
+files to the same `.git/hooks`; what a `prepare` script changes is *who types
+the command*, not where the hooks live or whether they can be read.
+
 **repo + rev pinning, per-hook language isolation, `autoupdate` (pre-commit).**
 These solve distributing hooks to strangers. We compile checks in and distribute
 one binary through the fleet — the same problem, already solved differently.
