@@ -12,6 +12,7 @@
 mod apply;
 mod checks;
 mod fix;
+mod progress;
 mod scan;
 mod severities;
 mod shim;
@@ -275,24 +276,18 @@ fn main() -> ExitCode {
         };
     }
 
-    // Say the walk has started before starting it. The scan spawns git in
-    // every repository it finds and, until this line existed, printed nothing
-    // at all until it was done — which on a fleet-sized tree read as a hang,
-    // and "is it doing anything" is the one question a fleet tool must never
-    // raise. Stderr, so `--json` consumers reading stdout still get exactly
-    // one document; gated on a terminal, so scripts capturing stderr are not
-    // handed decoration.
-    {
-        use std::io::IsTerminal;
-        if std::io::stderr().is_terminal() {
-            eprintln!(
-                "  scanning {} · depth {} …",
-                args.root.display(),
-                args.depth
-            );
-        }
-    }
-    let scan = scan::scan(&args.root, args.depth, &installed);
+    // Say the walk has started, then keep saying where it has got to. The scan
+    // spawns git in every repository it finds and, before this existed,
+    // printed nothing at all until it was done — which on a fleet-sized tree
+    // read as a hang, and "is it doing anything" is the one question a fleet
+    // tool must never raise. An announcement alone was not enough: it says the
+    // walk STARTED, not that it is still going. See `progress` for the rest,
+    // including why every byte of this is gated on a terminal.
+    let mut bar = progress::Bar::start(&args.root, args.depth);
+    let scan = scan::scan(&args.root, args.depth, &installed, &mut |p| bar.update(p));
+    // Before the first line of any report reaches stdout: the two streams share
+    // a screen, and a report printed over a live status line interleaves with it.
+    bar.finish();
     let elapsed = started.elapsed();
 
     if args.mode == Mode::Uninstall {

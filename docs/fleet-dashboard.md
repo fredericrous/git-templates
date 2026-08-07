@@ -482,6 +482,13 @@ one is not a code path that exists.
   rows in place. Sorting is stable so rows do not jump under the cursor.
 - **Never block the UI thread.** A 16ms frame budget; scanning runs on threads
   and posts results over a channel. `q` must work during a scan.
+- **The plain commands stream too.** `scan`, `fix`, `install` and `uninstall`
+  share the walk, and the same rule applies to them: a live status line on
+  stderr carrying elapsed time, the two counts, and the path being looked at
+  right now. It is the path that matters when a scan stalls — a frozen count
+  says something is slow, and only the path says what. Gated on stderr being a
+  terminal, and erased before the report prints, so a piped or redirected run
+  emits exactly the bytes it always did.
 - **Bounded work.** Respect `--depth` (default 6) and skip `node_modules`,
   `target`, `.venv`, `vendor` — the same exclusions the existing sweep uses.
 - **No cache in v1.** An 8s scan does not justify a cache and its invalidation

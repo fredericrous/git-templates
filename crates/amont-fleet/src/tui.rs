@@ -1052,11 +1052,11 @@ pub fn run(root: std::path::PathBuf, depth: usize, binary: String) -> std::io::R
     let scan_root = root.clone();
     std::thread::spawn(move || {
         let t = tx.clone();
-        let scan = crate::scan::scan_with(&scan_root, depth, &binary, &mut |p| match p {
+        let scan = crate::scan::scan(&scan_root, depth, &binary, &mut |p| match p {
             // Throttled: a message per directory would spend more time in the
             // channel than in the walk.
-            crate::scan::Progress::Visited(n) if n % 200 == 0 => {
-                let _ = t.send(Msg::Visited(n));
+            crate::scan::Progress::Visited { count, .. } if count % 200 == 0 => {
+                let _ = t.send(Msg::Visited(count));
             }
             crate::scan::Progress::Found(r) => {
                 let _ = t.send(Msg::Found(Box::new(r.clone())));

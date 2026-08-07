@@ -185,6 +185,33 @@ fn json(args: &[&str]) -> serde_json::Value {
     serde_json::from_str(&run(&a).stdout).expect("valid json")
 }
 
+/// The live status line is drawn for a person watching a terminal, and this
+/// asserts the other half of that sentence: when nothing is watching — which
+/// is every piped, redirected and CI invocation, including this test's own —
+/// the run is silent on stderr and clean on stdout.
+///
+/// Worth a test rather than a reading of the code because the failure is not
+/// cosmetic. The line redraws itself with CR and CSI K; emitted into a pipe
+/// those are bytes in the capture, at up to twelve frames a second for the
+/// whole walk. A log would fill with them, and anything parsing stdout beside
+/// them would be parsing a moving target.
+#[test]
+fn nothing_is_drawn_when_nothing_is_watching() {
+    let t = Tree::new("quiet");
+    t.managed_repo("a").managed_repo("b/c");
+    let out = Command::new(bin())
+        .args(["--root", t.path().to_str().unwrap()])
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.is_empty(), "stderr must stay empty: {stderr:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains('\u{1b}') && !stdout.contains('\r'),
+        "the report carries no redraw sequences: {stdout:?}"
+    );
+}
+
 #[test]
 fn counts_managed_and_unmanaged_separately() {
     let t = Tree::new("mixed");

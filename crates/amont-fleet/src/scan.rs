@@ -412,15 +412,27 @@ pub fn is_managed(hooks: &Path) -> bool {
 /// the first usability heuristic, and this scan is well past the ~400ms at
 /// which an interface stops feeling immediate.
 pub enum Progress<'a> {
-    Visited(usize),
+    /// A directory the walk has just entered: how many so far, and which one.
+    ///
+    /// The path is not decoration. A bare count answers "is it moving"; when
+    /// the answer is no — a repository on a network mount, a `git` call that
+    /// will not return — only the path answers "moving through WHAT", which is
+    /// the difference between a hang a reader can act on and one they can only
+    /// wait out.
+    Visited {
+        count: usize,
+        dir: &'a Path,
+    },
     Found(&'a Repo),
 }
 
-pub fn scan(root: &Path, depth: usize, installed_binary: &str) -> FleetScan {
-    scan_with(root, depth, installed_binary, &mut |_| {})
-}
-
-pub fn scan_with(
+/// The callback is not optional, and there is no wrapper that discards it.
+/// There WAS one — `scan_with` for the dashboard, `scan` for everyone else —
+/// and it is how every plain command came to run a seven-second walk in
+/// silence: the quiet version was the one that was easy to call. A caller with
+/// nothing to draw passes `&mut |_| {}` and has to look at what it is throwing
+/// away to write it.
+pub fn scan(
     root: &Path,
     depth: usize,
     installed_binary: &str,
@@ -499,7 +511,10 @@ struct Walk {
 /// owner. An unstable order there means an unstable `shares_hooks_with`.
 fn walk(w: &mut Walk, dir: &Path, budget: usize, on: &mut dyn FnMut(Progress)) {
     w.scan.dirs_visited += 1;
-    on(Progress::Visited(w.scan.dirs_visited));
+    on(Progress::Visited {
+        count: w.scan.dirs_visited,
+        dir: dir.strip_prefix(&w.root).unwrap_or(dir),
+    });
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => {
